@@ -22,6 +22,7 @@ rebuild of the pre-holdout scope is queued automatically; later rounds register 
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -81,6 +82,10 @@ class ResplitResult:
 
 HoldoutListener = Callable[["Services", Holdout | None, Holdout], str]
 _listeners: dict[str, HoldoutListener] = {}
+
+# Modules that register a re-split listener on import; each round with data derived from the
+# pre-holdout part appends its module, so that a re-split started from anywhere reaches it.
+LISTENER_MODULES: tuple[str, ...] = ("twin.retrieval.resplit",)
 
 
 def on_holdout_change(name: str) -> Callable[[HoldoutListener], HoldoutListener]:
@@ -171,6 +176,8 @@ def resplit_holdout(services: Services, *, by: str = "user") -> ResplitResult:
     Everything derived from the pre-holdout part of the data is out of date afterwards, and
     evaluation results from before the re-split are not comparable with later ones.
     """
+    for module in LISTENER_MODULES:
+        importlib.import_module(module)
     previous = get_holdout(services)
     current = compute_holdout(services)
     _store(services, current, by=by)

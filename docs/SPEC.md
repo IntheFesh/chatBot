@@ -108,7 +108,10 @@ activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, mi
 proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
              edge_of_sleep_weekly_max: 2, tick_minutes: 5 }
 channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
-retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10 }
+retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10,
+             context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,
+             slot_sigma_slots: 8, recency_weight: 0.04, recency_half_life_days: 180,
+             dedup_similarity: 0.9, event_only_factor: 0.6, batch_size: 64 }   # 第 05 轮新增：除 model/device/holdout_ratio 外的 10 个键
 memory: { daily_summary: true, fact_extraction: true }
 ops:
   backup_hour_local: 4

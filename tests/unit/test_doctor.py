@@ -60,6 +60,7 @@ def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
         "deepseek-key",
         "ilink-api",
         "ilink-cdn",
+        "vector-model",
     }
     # these depend on the day (does the holiday library know next year?), on a key the user has
     # not stored yet and on the network (the test network is offline); they warn but never fail
@@ -333,3 +334,32 @@ def test_the_connectivity_checks_are_skipped_for_the_console_channel(tmp_path: P
     for check in (doctor.check_ilink_api, doctor.check_ilink_cdn):
         result = result_of(check, ctx)
         assert result.status is CheckStatus.OK and "not needed" in result.detail
+
+
+def test_the_vector_check_names_missing_libraries_and_notes_a_model_not_yet_downloaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx = context(tmp_path)
+    fresh = doctor.check_vector_model(ctx)
+    assert fresh.status is CheckStatus.OK and "downloaded on first use" in fresh.detail
+
+    monkeypatch.setattr(doctor, "VECTOR_MODULES", ("numpy", "no_such_vector_library"))
+    missing = doctor.check_vector_model(ctx)
+    assert missing.status is CheckStatus.FAIL and "no_such_vector_library" in missing.detail
+    assert missing.hint == "run `uv sync`"
+
+
+def test_the_vector_check_is_happy_once_the_model_is_on_disk(tmp_path: Path) -> None:
+    from twin.retrieval.embedder import manifest_path
+
+    ctx = context(tmp_path)
+    paths = ctx.paths()
+    assert paths is not None
+    paths.embeddings_dir.mkdir(parents=True)
+    manifest_path(paths.embeddings_dir, ctx.settings.retrieval.model).write_text(  # type: ignore[union-attr]
+        '{"revision": "7999e1d3359715c5"}', encoding="utf-8"
+    )
+    found = doctor.check_vector_model(ctx)
+    assert found.status is CheckStatus.OK and "revision 7999e1d3" in found.detail
+    without_settings = doctor.check_vector_model(DoctorContext(None))
+    assert without_settings.status is CheckStatus.OK

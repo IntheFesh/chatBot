@@ -28,10 +28,26 @@ dependencies = [
     "holidays>=0.60",
     "orjson>=3.10",
     "qrcode>=8.0",
+    "sentence-transformers>=3.3",
+    "lancedb>=0.17",
+    "numpy>=1.26",
+    "torch>=2.4",  # direct so that [tool.uv.sources] picks the CPU build on Linux
 ]
 
 [project.scripts]
 twin = "twin.cli:app"
+
+# torch: on Linux (CI, sandboxes) the CPU-only build from the PyTorch index, which is a few hundred
+# MB instead of several GB of CUDA libraries; on Windows the PyPI wheel is already CPU-only.  A
+# Windows PC with an NVIDIA card installs the CUDA build of torch by hand
+# (docs/PENDING_USER_ACTIONS.md, round 05).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [
@@ -92,7 +108,7 @@ files = ["src/twin"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["chinese_calendar", "chinese_calendar.*", "ijson", "ijson.*", "qrcode", "qrcode.*"]
+module = ["chinese_calendar", "chinese_calendar.*", "ijson", "ijson.*", "qrcode", "qrcode.*", "pyarrow", "pyarrow.*", "lancedb", "lancedb.*", "sentence_transformers", "sentence_transformers.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

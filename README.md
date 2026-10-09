@@ -49,6 +49,9 @@ uv run twin run              # Ctrl+C 优雅退出
 | `twin profile rollback <版本>` | 切回旧版本（连同当时的作息模型） | 轻量修改 |
 | `twin routine list` | 手动作息修正列表 | 只读 |
 | `twin routine add sleep\|busy\|holiday …` / `remove\|enable\|disable <id>` | 手动修正睡眠区间、每周忙碌时段、节假日日期区间（优先于推断） | 轻量修改 |
+| `twin retrieval rebuild [--full] [--foreground]` | 建 / 修复“她在类似情况下怎么回”的检索库（真实向量模型，首次使用下载到 `data/models/embeddings/`；可续跑；显示进度与预计剩余；导入后自动增量） | 重任务 |
+| `twin retrieval stats` | 窗口数、留出数、已编码数、向量模型与最近一次编码速度（只有计数，不含聊天内容） | 只读 |
+| `twin retrieval resplit [--yes] [--foreground]` | 把留出集切分点移到今天数据的最新 10%（评估结果前后不可比）；立刻把新留出的窗口移出索引 | 重任务 |
 
 全局选项：`--config <文件>`、`--set 键.路径=值`（可重复）、`--log-level`。配置优先级：命令行 > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config/config.yaml` > 默认值。
 

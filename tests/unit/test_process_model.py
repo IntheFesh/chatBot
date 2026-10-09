@@ -87,13 +87,16 @@ def expected_names() -> list[str]:
         "routine remove",
         "routine enable",
         "routine disable",
+        "retrieval rebuild",
+        "retrieval stats",
+        "retrieval resplit",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 51 == len(expected_names())
+    assert len(names) == 54 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -145,6 +148,9 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "routine remove": CommandKind.LIGHT,
         "routine enable": CommandKind.LIGHT,
         "routine disable": CommandKind.LIGHT,
+        "retrieval rebuild": CommandKind.HEAVY,
+        "retrieval stats": CommandKind.READ,
+        "retrieval resplit": CommandKind.HEAVY,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

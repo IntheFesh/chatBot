@@ -44,7 +44,11 @@ log = get_logger("twin.ingest.hooks")
 HookStatus = Literal["queued", "done", "skipped", "failed"]
 
 # Modules that register hooks on import; each later round appends its module here.
-HOOK_MODULES: tuple[str, ...] = ("twin.ingest.builtin_hooks", "twin.profile.hook")
+HOOK_MODULES: tuple[str, ...] = (
+    "twin.ingest.builtin_hooks",
+    "twin.profile.hook",
+    "twin.retrieval.hook",
+)
 
 
 class HookRegistrationError(ValueError):

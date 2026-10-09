@@ -148,6 +148,20 @@ class DataPaths:
         return self.data_dir / "tmp"
 
     @property
+    def vectors_dir(self) -> Path:
+        """LanceDB tables: vectors and ids only, never text (R-STO-005)."""
+        return self.data_dir / "vectors"
+
+    @property
+    def models_dir(self) -> Path:
+        return self.data_dir / "models"
+
+    @property
+    def embeddings_dir(self) -> Path:
+        """Downloaded embedding models (``retrieval.model``) and their version records."""
+        return self.models_dir / "embeddings"
+
+    @property
     def logs_dir(self) -> Path:
         return self.data_dir / "logs"
 

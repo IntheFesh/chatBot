@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import importlib.util
 import secrets as pysecrets
 import shutil
 import sys
@@ -31,6 +32,7 @@ from twin.llm.official import VISION_MODELS
 from twin.llm.pricing import PeakCalendar
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
 from twin.ops.power import describe_power_strategy
+from twin.retrieval.embedder import read_manifest
 from twin.storage.keystore import KeyStore, KeyStoreError
 from twin.storage.migrate import SchemaState, schema_status
 
@@ -317,6 +319,40 @@ def check_holiday_calendar(ctx: DoctorContext) -> CheckResult:
         "chinese-calendar`); until then list exceptions in pricing.extra_offpeak_dates and "
         "pricing.extra_peak_dates",
     )
+
+
+VECTOR_MODULES = ("numpy", "pyarrow", "lancedb", "torch", "sentence_transformers")
+
+
+@doctor_check
+def check_vector_model(ctx: DoctorContext) -> CheckResult:
+    """The vector libraries are installed and the embedding model is (or will be) available.
+
+    Nothing is imported: ``torch`` takes seconds to load and the model is loaded lazily on first
+    use (R-NFR-003); a missing model is downloaded then, so it is only a note here (R-RET-002).
+    """
+    missing = [name for name in VECTOR_MODULES if importlib.util.find_spec(name) is None]
+    if missing:
+        return CheckResult(
+            "vector-model",
+            CheckStatus.FAIL,
+            "not installed: " + ", ".join(missing),
+            "run `uv sync`",
+        )
+    paths = ctx.paths()
+    if ctx.settings is None or paths is None:
+        return CheckResult("vector-model", CheckStatus.OK, "libraries are installed")
+    model = ctx.settings.retrieval.model
+    record = read_manifest(paths.embeddings_dir, model)
+    if record is None:
+        return CheckResult(
+            "vector-model",
+            CheckStatus.OK,
+            f"{model} is downloaded on first use (about 100 MB; Hugging Face must be reachable "
+            "once)",
+        )
+    revision = str(record.get("revision", ""))[:8]
+    return CheckResult("vector-model", CheckStatus.OK, f"{model} downloaded (revision {revision})")
 
 
 @doctor_check

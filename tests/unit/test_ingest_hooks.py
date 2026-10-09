@@ -199,7 +199,13 @@ def test_hooks_run_after_the_import_and_are_listed_with_their_results(
 
     export = make_export(tmp_path, target_messages=80)
     outcome = run_import(services, export)
-    assert list(outcome.run.hooks) == ["image_caption", "sticker_download", "profile", "recorder"]
+    assert list(outcome.run.hooks) == [
+        "image_caption",
+        "sticker_download",
+        "profile",
+        "retrieval",
+        "recorder",
+    ]
     assert outcome.run.hooks["recorder"] == {
         "name": "recorder",
         "status": "done",

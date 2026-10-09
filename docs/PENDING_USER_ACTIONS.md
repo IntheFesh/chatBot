@@ -187,3 +187,41 @@
 
 6. **（后续轮次）重切留出集**
    - 函数 `twin.profile.holdout.resplit_holdout()` 已完成并有测试；命令 `twin retrieval resplit` 在第 05 轮提供。重切会让评估结果前后不可比，并自动排队重算 pre_holdout 范围的派生数据。
+
+## 第 05 轮 —— 向量模型与真实片段检索库
+
+沙箱里没有真实聊天记录，检索库只用合成对话验证过（窗口边界、留出集、MMR、时段加分、`before` 过滤、增量与续跑、模型变更拒绝等），向量模型则**真的**下载并跑过一次：`BAAI/bge-small-zh-v1.5`（revision `7999e1d3…`，权重 SHA-256 `354763b9…`，512 维）在沙箱 CPU 上约 9 秒/千个窗口，数字与限制见 `docs/PERFORMANCE.md` 第 2 节。下面是只有你能在自己电脑上做的事。
+
+1. **安装并建库（验收命令）**
+   - 做什么：Windows 上 `uv sync` 会按 `uv.lock` 装 PyPI 的 torch（Windows 的 PyPI 轮子本来就是 CPU 版）和 LanceDB。第一次编码时会把模型下载到 `data/models/embeddings/`（约 100 MB，需要能访问 `huggingface.co` 一次；之后不再联网）。然后（应用没在运行时）：
+     ```
+     uv run twin retrieval rebuild --foreground
+     uv run twin retrieval stats
+     ```
+     应用在运行时去掉 `--foreground`，命令只入队、运行中的应用执行，用 `twin retrieval stats` 看进度（“last index run”一行有已完成/总数、速度、预计剩余）。任务可随时 Ctrl+C，再次运行会从停下的地方继续。
+   - 预期：`stats` 里有“windows (her reply blocks)”总数、“held out”（约占 10%）、“windows with a vector”（= 有上下文且未留出的窗口数）、“vectors in the index”与前者相同、模型名 `BAAI/bge-small-zh-v1.5`，且没有以 `problem:` 开头的行。
+   - 请把这些数字告诉我：窗口总数、留出数、`last index run` 里的“每千个窗口多少秒”（沙箱 4 核 CPU 是 9 秒；你的 CPU 不同会有几倍差别）。另外：`uv run pytest tests/unit/test_retrieval_real_backend.py -q`（约 10 秒）确认 Windows 上 torch + sentence-transformers 能正常加载一个小模型；`$env:TWIN_LIVE=1; uv run pytest tests/integration/test_retrieval_live.py -s -q` 用真实模型再跑一遍（会下载模型，约一分钟）。
+   - 如果访问不了 Hugging Face：在能访问的电脑上跑一次，再把整个 `data/models/embeddings/` 文件夹拷到本机同一位置；或设置环境变量 `HF_ENDPOINT` 指向你信任的镜像。
+
+2. **想用 GPU 编码（可选；bge-small 在 CPU 上已经够用）**
+   - 只有换成 `BAAI/bge-m3`（`retrieval.model`）才值得：它在 CPU 上约慢 20 倍（10 万个窗口约 5 小时）。有 NVIDIA 显卡时按 PyTorch 官网的命令装 CUDA 版 torch（例如 `uv pip install torch --index-url https://download.pytorch.org/whl/cu128 --reinstall`），`retrieval.device: auto` 会自动用 GPU；注意之后每次 `uv sync` 会把 torch 换回锁定的 CPU 版，运行命令时用 `uv run --no-sync ...`。`retrieval.device: cuda` 但没有可用 GPU 时会明确报错，不会悄悄改用 CPU。
+   - 换模型后必须 `uv run twin retrieval rebuild`（旧索引的向量与新模型不在同一个空间，增量导入会拒绝混用并发一条告警）。
+
+3. **数据安全检查（一次就行）**
+   - 向量库在 `data/vectors/`，只有窗口 id、向量、时间、15 分钟格、日类型，没有任何文字；`twin retrieval stats` 的输出里也只有计数。如果想自己确认：`data/vectors/` 下的文件用任意工具搜她的某句话，应当找不到。
+
+4. **何时重切留出集（`twin retrieval resplit`）**
+   - 背景：留出切分点在第一次计算后固定，之后导入的**更新的**消息全部落在切分点之后，算留出集、**不会进检索库**（评估集不能悄悄变化）。所以每次导入新记录后，最新的那一段对话要等你重切才会被她的“类似情况下怎么回”检索到。
+   - 什么时候做：新记录积累到一定量（例如准备重训风格模型之前）。命令：
+     ```
+     uv run twin retrieval resplit            # 会先问一次；--yes 免问；--foreground 在应用没运行时就地执行排队的作业
+     ```
+     它把切分点移到“今天的数据的最新 10%”，立刻把新进入留出集的窗口从索引里删掉、把退出留出集的窗口排队编码，并排队重算 pre_holdout 的画像与作息。**重切后，重切之前的评估结果与之后的不可比**（留出集换了），第 09b 轮起请在重切之后重新评估。
+   - 平时不需要重切。
+
+5. **每次导入之后**
+   - `uv run twin import <新导出>` 的导入后钩子会自动排队检索库的增量更新（只编码新增的、未留出的窗口；没有新消息时跳过）。导入报告“导入后钩子”一节里有 `retrieval` 一行。钩子的回填命令就是第 1 条的 `twin retrieval rebuild`。
+   - 如果钩子一行显示 failed 且写着 `retrieval.model` 与索引不一致：你改过模型，运行 `uv run twin retrieval rebuild`。
+
+6. **（后续轮次）**
+   - 第 09 轮把 `render_example()` 的输出放进提示词、用 `BudgetLimits.examples_k` 限制条数；第 06 轮给表情包例子接上标签（`sticker_label`）；第 07 轮的记忆向量用同一个 `EmbeddingService` 与 `VectorStore`（各自独立的表）。这些都不需要你做什么。

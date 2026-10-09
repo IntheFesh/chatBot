@@ -199,7 +199,7 @@ def test_round_04_migration_adds_the_profile_and_routine_tables(tmp_path: Path) 
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0003_import_tables")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0004_profile_activity_tables")
     assert table_names(path) - before == {
         "profile_versions",
         "activity_models",
@@ -222,4 +222,49 @@ def test_round_04_migration_adds_the_profile_and_routine_tables(tmp_path: Path) 
     finally:
         connection.close()
     migrate.downgrade(path, "0003_import_tables")
+    assert table_names(path) == before
+
+
+INSERT_WINDOW = (
+    "INSERT INTO example_windows (id, conversation_id, reply_block_ids, context_block_ids, "
+    "context_turns, reply_reproducible, reply_at_utc, local_slot, day_type, holdout, signature, "
+    "created_at, updated_at) VALUES ('w', 'c', '[]', '[]', 0, 1, '2026-01-01', {slot}, "
+    "'{day_type}', 0, 's', '2026-01-01', '2026-01-01')"
+)
+
+
+def test_round_05_migration_adds_the_example_windows_table(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0004_profile_activity_tables")
+    before = table_names(path)
+    migrate.upgrade(path)
+    assert table_names(path) - before == {"example_windows"}
+    assert migrate.revision_history()[4] == "0005_example_windows"
+    connection = sqlite3.connect(path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(example_windows)")}
+        # ids, times and flags only: no column can hold what she wrote
+        assert columns == {
+            "id",
+            "conversation_id",
+            "reply_block_ids",
+            "context_block_ids",
+            "context_turns",
+            "reply_reproducible",
+            "reply_at_utc",
+            "local_slot",
+            "day_type",
+            "holdout",
+            "signature",
+            "embed_version",
+            "created_at",
+            "updated_at",
+        }
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(INSERT_WINDOW.format(slot=96, day_type="workday"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(INSERT_WINDOW.format(slot=5, day_type="someday"))
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0004_profile_activity_tables")
     assert table_names(path) == before

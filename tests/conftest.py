@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.embedding import HashingBackend
 from tests.support.network import OfflineTransport
 from twin.clock import SystemClock, set_active_clock
 from twin.config.loader import load_settings
@@ -17,6 +18,8 @@ from twin.config.secrets import SecretStore, select_backend
 from twin.config.settings import Settings
 from twin.ops.jobs import get_offpeak_policy, set_offpeak_policy
 from twin.ops.logging import shutdown_logging
+from twin.retrieval import embedder as embedder_module
+from twin.retrieval.embedder import reset_embedding_services
 from twin.services import CliContext, Services, build_services, set_cli_context
 from twin.storage import migrate
 from twin.storage.crypto import KeyRing, generate_key, set_active_keyring, use_keyring
@@ -99,3 +102,13 @@ def services(tmp_path: Path, clock: ManualClock, secret_store: SecretStore) -> I
     container = build_services(built_settings, root=home, secrets=secret_store, clock=clock)
     yield container
     container.close()
+
+
+@pytest.fixture
+def embedder(monkeypatch: pytest.MonkeyPatch) -> Iterator[HashingBackend]:
+    """The tiny offline embedding model, installed as the model of the retrieval library."""
+    backend = HashingBackend()
+    monkeypatch.setattr(embedder_module, "backend_factory", lambda config, paths: backend)
+    reset_embedding_services()
+    yield backend
+    reset_embedding_services()

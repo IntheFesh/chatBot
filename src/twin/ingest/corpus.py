@@ -10,6 +10,7 @@ of writing their own ``SELECT`` on ``messages``.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import datetime
 
 from sqlalchemy import Select, select
@@ -54,6 +55,37 @@ def conversation_messages(conversation_id: str | None = None) -> Select[Message]
     if conversation_id is not None:
         stmt = stmt.where(Message.conversation_id == conversation_id)
     return stmt.order_by(Message.create_time_utc, Message.sort_seq, Message.id)
+
+
+def conversation_skeleton(conversation_id: str | None = None) -> Select[Message]:
+    """Both sides in time order with only the columns that place a message in the conversation.
+
+    ``id``, ``conversation_id``, ``create_time_utc``, ``is_sent`` and ``kind``: no text, no raw
+    JSON.  The example windows of the retrieval library (round 05) are laid out from it; the
+    words are fetched by id when a window is encoded or rendered.  ``system`` notices are
+    included; the caller drops them.
+    """
+    stmt = select(Message).options(
+        load_only(
+            Message.id,
+            Message.conversation_id,
+            Message.create_time_utc,
+            Message.is_sent,
+            Message.kind,
+        )
+    )
+    if conversation_id is not None:
+        stmt = stmt.where(Message.conversation_id == conversation_id)
+    return stmt.order_by(Message.create_time_utc, Message.sort_seq, Message.id)
+
+
+def messages_by_ids(ids: Sequence[str]) -> Select[Message]:
+    """The ``messages`` rows with these ids (both sides, any order).
+
+    Ids of the bot's own turns are not rows of this table, so they simply never match: the
+    retrieval library renders its windows from ids and cannot be handed the bot's words.
+    """
+    return select(Message).where(Message.id.in_(list(ids)))
 
 
 def conversation_timeline(

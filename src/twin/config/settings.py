@@ -201,6 +201,16 @@ class RetrievalConfig(_Section):
     model: str = "BAAI/bge-small-zh-v1.5"
     device: str = "auto"
     holdout_ratio: float = Field(default=0.10, gt=0, lt=1)
+    context_turns: int = Field(default=6, ge=1, le=20)  # merged turns before a reply (R-RET-001)
+    candidates: int = Field(default=50, ge=1)  # nearest windows taken before re-ranking (R-RET-005)
+    mmr_lambda: float = Field(default=0.7, ge=0, le=1)  # 1 = pure relevance, 0 = pure diversity
+    slot_weight: float = Field(default=0.06, ge=0)  # bonus for the same time of day
+    slot_sigma_slots: float = Field(default=8, gt=0)  # width of that bonus in 15-minute slots
+    recency_weight: float = Field(default=0.04, ge=0)  # bonus for recent windows
+    recency_half_life_days: float = Field(default=180, gt=0)
+    dedup_similarity: float = Field(default=0.9, gt=0, le=1)  # reply texts alike above this
+    event_only_factor: float = Field(default=0.6, ge=0, le=1)  # score factor of event-only replies
+    batch_size: int = Field(default=64, ge=1, le=4096)  # texts per encoding call
 
 
 class MemoryConfig(_Section):
