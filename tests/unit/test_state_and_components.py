@@ -118,6 +118,7 @@ async def test_heartbeat_writes_a_liveness_record_and_reports_health(
         assert read_state_version(session) == 0  # a heartbeat is not a user-visible change
     assert first["at"] == clock.now_utc().isoformat()
     assert component.health().status is HealthStatus.OK
+    await wait_until(lambda: clock.pending_sleepers >= 1)  # the loop is waiting for its next beat
     await clock.advance(10)
     await wait_until(lambda: _heartbeat_at(db) != first["at"])
     clock.tick(31)

@@ -58,6 +58,17 @@ class ManualClock:
         return sum(1 for _, _, fut in self._waiters if not fut.done())
 
     async def settle(self, rounds: int = 25) -> None:
+        """Let every runnable task, and work handed to threads, reach its next await.
+
+        Yielding to the loop alone is not enough: a component that starts with
+        ``asyncio.to_thread`` only reaches ``clock.sleep()`` after the thread finishes, which
+        on a loaded machine takes longer than any fixed number of loop turns.  A short real
+        pause between two batches of turns lets that completion land, so ``advance`` does not
+        move time before the sleeper exists (it would then never be woken).
+        """
+        for _ in range(rounds):
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.005)
         for _ in range(rounds):
             await asyncio.sleep(0)
 
