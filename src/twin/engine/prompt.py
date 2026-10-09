@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from twin.engine.types import ReplyContext, ReplyMaterial
 from twin.llm.layout import PromptLayout
 from twin.llm.types import ChatMessage, Role
+from twin.memory.asof import LocalMoment
 from twin.profile.prompt_templates import PromptText, TemplateStore
 
 if TYPE_CHECKING:
@@ -100,15 +101,22 @@ class BuiltPrompt:
         }
 
 
-def render_context(context: ReplyContext, material: ReplyMaterial, notes: Sequence[str]) -> str:
-    """The context block of the last user message (see the module description)."""
-    local = material.local
+def moment_text(local: LocalMoment) -> str:
+    """The moment as the prompts say it: "2026年10月9日 周五（工作日） 中午 13:30".
+
+    The one rendering of the local time for the DeepSeek prompt and for the style model's prompt
+    (training and inference), so the two never describe a moment differently.
+    """
     day = DAY_TYPES.get(local.day_type, local.day_type)
-    moment = (
+    return (
         f"{local.local.year}年{local.local.month}月{local.local.day}日 {local.weekday_name}"
         f"（{day}） {day_part(local.local.hour)} {local.local:%H:%M}"
     )
-    now = [f"当地时间：{moment}"]
+
+
+def render_context(context: ReplyContext, material: ReplyMaterial, notes: Sequence[str]) -> str:
+    """The context block of the last user message (see the module description)."""
+    now = [f"当地时间：{moment_text(material.local)}"]
     if material.state in STATE_LINES:
         now.append(f"她现在的状态：{STATE_LINES[material.state]}")
     if material.lifeline:
@@ -153,6 +161,22 @@ def history_messages(context: ReplyContext) -> list[ChatMessage]:
     return messages
 
 
+def lay_out(rendered: Sequence[ChatMessage], context: ReplyContext) -> PromptLayout:
+    """A rendered template (system, last user message) and the history as a cache-friendly layout.
+
+    The history goes between the two; when it ends with a user message that message is carried
+    into the last one, so that the request still alternates and ends with one user message.
+    """
+    history = history_messages(context)
+    carried = ""
+    if history and history[-1]["role"] == "user":
+        carried = str(history.pop()["content"])
+    system, last = rendered
+    if carried:
+        last = {"role": "user", "content": f"{carried}\n\n{last['content']}"}
+    return PromptLayout.of([system, *history], [last])
+
+
 class PromptBuilder:
     """Builds the request of the DeepSeek backend from a round and its material."""
 
@@ -178,10 +202,6 @@ class PromptBuilder:
         emoji_codes: Sequence[str] = (),
         notes: Sequence[str] = (),
     ) -> BuiltPrompt:
-        history = history_messages(context)
-        carried = ""
-        if history and history[-1]["role"] == "user":
-            carried = str(history.pop()["content"])
         rendered = self._template.render(
             persona=material.persona.strip() or NO_PERSONA,
             sticker_tags="、".join(self._tags) or "（没有可用的表情包标签，不要发表情包）",
@@ -189,10 +209,7 @@ class PromptBuilder:
             context=render_context(context, material, notes),
             message=context.user_text,
         )
-        system, last = rendered
-        if carried:
-            last = {"role": "user", "content": f"{carried}\n\n{last['content']}"}
-        layout = PromptLayout.of([system, *history], [last])
+        layout = lay_out(rendered, context)
         return BuiltPrompt(
             layout, self._template.ref, len(context.history), material.persona_ref, tuple(notes)
         )

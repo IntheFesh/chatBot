@@ -49,11 +49,34 @@ StopReason = Literal["stop", "length"]
 
 
 @dataclass(frozen=True)
+class PromptMeta:
+    """Where a rendered prompt came from (kept in the audit trail, never sent to the model)."""
+
+    template_version: str
+    persona_scope: str | None = None  # "live" or "pre_holdout"; None: the prompt has no card
+    persona_version: str | None = None  # "v3": the number of the card that was rendered
+    persona_id: str | None = None
+    locked: bool = False  # rendered with the versions a registered model is bound to
+    context_turns: int = 0  # merged turns of the conversation part
+    prelude_turns: int = 0  # leading turns of hers moved into the "前文" section
+    trimmed_turns: int = 0  # oldest turns dropped to fit a token budget
+    over_budget: bool = False  # still too long after dropping everything that could go
+    has_plan: bool = False
+    memory_item_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class RenderedPrompt:
-    """A prompt rendered by ``StylePromptBuilder``; the string is sent exactly as it is."""
+    """A prompt rendered by ``StylePromptBuilder``; the string is sent exactly as it is.
+
+    ``stop`` are the stop strings the prompt wants (``<|im_end|>``); ``meta`` says which template
+    and card it was made with.  Both are optional so that a prompt can be built by hand.
+    """
 
     text: str
     template: str = "qwen3_nothink"
+    stop: tuple[str, ...] = (IM_END,)
+    meta: PromptMeta | None = None
 
     def __post_init__(self) -> None:
         if not self.text:

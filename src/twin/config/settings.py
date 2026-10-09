@@ -129,6 +129,13 @@ class ThinkingConfig(_Section):
 
 class BackendConfig(_Section):
     active: Literal["deepseek", "style", "hybrid"] = "deepseek"
+    health_check_s: float = Field(
+        default=30, gt=0
+    )  # how often the style model is looked at (R-SRV-004)
+    fallback_violations: int = Field(
+        default=3, ge=1
+    )  # hard violations in a row that cause a fallback
+    recover_after_min: float = Field(default=10, ge=0)  # healthy this long before switching back
 
 
 class JobsConfig(_Section):
@@ -318,6 +325,10 @@ class StyleModelConfig(_Section):
     endpoint: str = "http://127.0.0.1:8081"
     model_id: str | None = None
     tunnel: TunnelConfig = Field(default_factory=TunnelConfig)
+    memory_tokens: int = Field(default=300, ge=0)  # memory block in the system segment (R-TRN-002)
+    n_predict: int = Field(default=200, ge=1)  # the most tokens one reply may have
+    temperature: float = Field(default=0.7, ge=0)
+    top_p: float = Field(default=0.9, gt=0, le=1)
 
 
 class AutoDlConfig(_Section):

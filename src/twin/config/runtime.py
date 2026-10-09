@@ -112,6 +112,14 @@ BACKEND_ACTIVE = register_setting(
         "Generation backend",
     )
 )
+BACKEND_FALLBACK = register_setting(
+    SettingSpec(
+        "backend.fallback",
+        TypeAdapter(dict[str, Any] | None),
+        lambda s: None,
+        "Why the style model is not in use although backend.active asks for it (R-SRV-004)",
+    )
+)
 PROACTIVE_DAILY_MIN = register_setting(
     SettingSpec(
         "proactive.daily_min",

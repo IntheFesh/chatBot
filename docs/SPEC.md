@@ -83,7 +83,8 @@ pricing:
 budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00,
           degrade_ratios: [1.0, 1.25, 1.5, 2.0] }   # 进入降级级别 1/2/3/4 时的花费占预算比例（R-LLM-008）
 thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
-backend: { active: "deepseek" }        # deepseek|style|hybrid
+backend: { active: "deepseek", health_check_s: 30, fallback_violations: 3,
+           recover_after_min: 10 }   # deepseek|style|hybrid；第 09 轮新增：后端回退的 3 个键（R-SRV-004）
 jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
 ingest:                                 # 第 03 轮新增，R-IMP-004/008/012
   batch_size: 2000                     # 导入时每批事务写入的消息条数
@@ -139,6 +140,10 @@ style_model:
   endpoint: "http://127.0.0.1:8081"
   model_id: null
   tunnel: { local_port: 8082, remote_port: 8000 }
+  memory_tokens: 300                   # 第 09 轮新增：风格模型提示词里记忆块的 token 预算，与训练集导出共用
+  n_predict: 200                       # 一次生成最多多少 token
+  temperature: 0.7
+  top_p: 0.9
 autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
 training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
 eval: { blind_n: 50, memory_questions: 20 }

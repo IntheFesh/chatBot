@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
@@ -117,6 +118,11 @@ class ForgetResult:
     @property
     def found(self) -> bool:
         return bool(self.deleted or self.ambiguous)
+
+
+def _cites_only(fact: FactRecord, wanted: set[str]) -> bool:
+    ids = (fact.evidence or {}).get("ids")
+    return isinstance(ids, list) and bool(ids) and {str(i) for i in ids} <= wanted
 
 
 class MemoryManager:
@@ -260,6 +266,26 @@ class MemoryManager:
             restored=len(restored_ids),
         )
         return ForgetResult(tuple(deleted), restored)
+
+    def forget_derived_from(self, source_ids: Collection[str]) -> ForgetResult:
+        """Delete what the bot made up from exactly these rows of its conversation (``/重来``).
+
+        A fact of source ``bot_invented`` whose evidence lies **entirely** in ``source_ids`` is
+        deleted with what hangs on it (follow-ups, life line entries made from it, its vector);
+        a fact that also cites other rows stays, because something else than the thrown-away reply
+        said it.  Facts the user or the real records gave are never touched.
+        """
+        wanted = set(source_ids)
+        if not wanted:
+            return ForgetResult()
+        self._memory.refresh()
+        derived = [
+            fact
+            for fact in self._memory.corpus.facts.values()
+            if fact.source == "bot_invented" and _cites_only(fact, wanted)
+        ]
+        audit.info("memory_audit", action="forget_derived", matched=len(derived))
+        return self._delete(derived) if derived else ForgetResult()
 
     async def aforget(self, query_or_id: str, *, all_matches: bool = False) -> ForgetResult:
         return await asyncio.to_thread(self.forget, query_or_id, all_matches=all_matches)
