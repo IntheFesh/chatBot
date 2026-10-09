@@ -17,6 +17,7 @@ from tests.support.engine_harness import (
     build_harness,
     make_draft,
     run_to_idle,
+    waiting_for,
 )
 from tests.support.synthetic import us_phone
 from tests.support.waiting import wait_until
@@ -94,6 +95,8 @@ async def test_more_messages_in_the_night_join_the_same_morning_round(sleeping: 
         until=lambda: sleeping.engine.snapshot().state == "DECIDING",
     )
     planned = sleeping.engine.snapshot().planned_send_at
+    assert planned is not None
+    await waiting_for(sleeping.engine, planned)
     await sleeping.clock.advance(3 * 3600)  # three hours later: far from 80 % of the wait
     await sleeping.message("晚安哦")
     await wait_until(lambda: RoundData.of(sleeping.engine.snapshot()).decided_for == 2)
@@ -113,6 +116,7 @@ async def test_a_message_just_before_she_wakes_adds_a_short_pause(sleeping: Harn
     )
     planned = sleeping.engine.snapshot().planned_send_at
     assert planned is not None
+    await waiting_for(sleeping.engine, planned)
     await sleeping.clock.advance((planned - sleeping.clock.now_utc()).total_seconds() - 2.0)
     await sleeping.message("在不在")  # two seconds before she would start: past 80 %
     await wait_until(lambda: RoundData.of(sleeping.engine.snapshot()).decided_for == 2)
@@ -182,6 +186,9 @@ async def test_during_a_pause_there_is_no_reply_and_afterwards_she_has_just_seen
     )
     decision = RoundData.of(rig.engine.snapshot()).decision
     assert decision is not None and decision.mode == "paused" and decision.paused_until == until
+    planned = rig.engine.snapshot().planned_send_at
+    assert planned is not None
+    await waiting_for(rig.engine, planned)
     await rig.clock.advance(1800)
     assert rig.channel.texts == [] and rig.writer.calls == 0
     await run_to_idle(rig.engine, rig.clock)
@@ -197,6 +204,9 @@ async def test_lifting_the_pause_early_makes_her_answer_soon(rig: Harness) -> No
     await run_to_idle(
         rig.engine, rig.clock, until=lambda: rig.engine.snapshot().state == "DECIDING"
     )
+    planned = rig.engine.snapshot().planned_send_at
+    assert planned is not None
+    await waiting_for(rig.engine, planned)
     await rig.clock.advance(600)
     resumed = rig.clock.now_utc()
     rig.services.runtime.set(ENGINE_PAUSED_UNTIL, None)  # /恢复
@@ -221,6 +231,9 @@ async def test_a_pause_set_while_she_waits_holds_the_round_back(rig: Harness) ->
     rig.services.runtime.set(ENGINE_PAUSED_UNTIL, until)
     await rig.engine.on_state_change(1, 2)
     await wait_until(lambda: decision_mode(rig) == "paused")
+    planned = rig.engine.snapshot().planned_send_at
+    assert planned is not None
+    await waiting_for(rig.engine, planned)
     await rig.clock.advance(3600)
     assert rig.writer.calls == 0 and rig.channel.texts == []
     await run_to_idle(rig.engine, rig.clock)
@@ -235,6 +248,7 @@ async def test_a_pause_set_just_as_the_time_comes_is_respected(rig: Harness) -> 
     planned = rig.engine.snapshot().planned_send_at
     assert planned is not None
     until = planned + timedelta(hours=1)
+    await waiting_for(rig.engine, planned)  # she waits; only then the pause is set
     rig.services.runtime.set(ENGINE_PAUSED_UNTIL, until)  # no state watcher call this time
     await rig.clock.advance((planned - rig.clock.now_utc()).total_seconds())
     await wait_until(lambda: decision_mode(rig) == "paused")

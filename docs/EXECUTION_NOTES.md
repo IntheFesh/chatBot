@@ -35,4 +35,4 @@ CI 同时在 `ubuntu-latest` 与 `windows-latest` 上跑,沙箱里只有 Linux,�
 4. **POSIX 专属语义**(信号、文件权限、`flock`、`fork`)的测试必须带平台跳过原因,并在 Windows 上有表达同一需求的对应测试。
 5. **路径与编码**:一律 `pathlib`;读写文本显式 `encoding="utf-8"`;不要假设 `/` 或 `\n`;临时目录用 `tmp_path`。
 6. 并发/时序类测试在本机用 `(for i in 1 2 3; do uv run pytest -q & done; wait)` 三路并发跑一遍,通过才算稳。
-7. **"观察点"要是已写下的状态,不是"通道收到了"**。通道先拿到气泡,引擎随后才写行和状态;库里先有入站行,引擎随后才入队。Windows 上线程往返加 SQLite 提交要几十毫秒,在这个间隙里观察、`stop()`、`restart()`、读 `snapshot()` 的测试会稳定失败。等 `EngineComponent.handled`(消息已入队)、`tests/support/engine_harness.bubbles_written()`(气泡已记下)这类条件。写完时序类测试后用 `SLOWDB_MS=30 uv run pytest -p tests.support.slow_db <文件>` 再跑一遍(每次数据库读写都慢 30 毫秒,在 Linux 上复现 Windows 的时序),0 毫秒与 30 毫秒都要通过。
+7. **"观察点"要是已写下的状态,不是"通道收到了"**。通道先拿到气泡,引擎随后才写行和状态;库里先有入站行,引擎随后才入队。Windows 上线程往返加 SQLite 提交要几十毫秒,在这个间隙里观察、`stop()`、`restart()`、读 `snapshot()` 的测试会稳定失败。等 `EngineComponent.handled`(消息已入队)、`tests/support/engine_harness.bubbles_written()`(气泡已记下)这类条件;推进手动时钟之前先 `waiting_for(engine, 时刻)`,等引擎真的在等(它的睡眠是相对注册那一刻的,时钟先动了就会晚醒同样久)。写完时序类测试后用 `SLOWDB_MS=30 uv run pytest -p tests.support.slow_db <文件>` 再跑一遍(每次数据库读写都慢 30 毫秒,在 Linux 上复现 Windows 的时序),0 毫秒与 30 毫秒都要通过。
