@@ -529,5 +529,5 @@ def test_round_09_migration_adds_the_conversation_tables_and_their_constraints(
         assert found == (None,)  # the feedback outlives the row it was about
     finally:
         connection.close()
-    migrate.downgrade(path, "0008_daily_plans_timezone")
+    migrate.downgrade(path, "0009_training_tables")
     assert table_names(path) == before
