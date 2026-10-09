@@ -167,6 +167,8 @@ class ProfileConfig(_Section):
     segment_gap_min: int = Field(default=60, ge=1)
     recent_days: int = Field(default=90, ge=1)
     recency_weight: float = Field(default=0.6, ge=0, le=1)
+    rules_file: str = "config/lists/style_rules.yaml"
+    emoji_codes_file: str = "config/lists/wechat_emoji_codes.txt"
 
 
 class ActivityConfig(_Section):
@@ -174,6 +176,9 @@ class ActivityConfig(_Section):
     edge_minutes: int = Field(default=30, ge=0)
     smoothing_sigma_slots: float = Field(default=2, ge=0)
     min_valid_days: int = Field(default=14, ge=1)
+    sleep_rate_ratio: float = Field(default=0.25, gt=0, le=1)
+    busy_rate_ratio: float = Field(default=0.5, gt=0, le=1)
+    busy_latency_ratio: float = Field(default=3.0, gt=1)
 
 
 class ProactiveConfig(_Section):

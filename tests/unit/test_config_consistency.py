@@ -87,6 +87,8 @@ def test_every_top_level_section_of_settings_is_documented_in_the_spec() -> None
         ("engine", "ai_phrases_file"),
         ("engine", "commitment_patterns_file"),
         ("safety", "crisis_keywords_file"),
+        ("profile", "emoji_codes_file"),
+        ("profile", "rules_file"),
     ],
 )
 def test_configured_word_list_files_ship_with_the_repository(section: str, key: str) -> None:

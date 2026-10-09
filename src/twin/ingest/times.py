@@ -59,13 +59,17 @@ class SourceTime:
                 return zone
         return self._default
 
-    def local_date(self, moment: datetime) -> date:
-        """The local calendar date of ``moment`` in the source zone."""
+    def zone_for(self, moment: datetime) -> ZoneInfo:
+        """The zone she was in at ``moment``: the first range containing its local date."""
         utc = moment.astimezone(UTC)
         for start, end, zone in self._ranges:
             if start <= utc.astimezone(zone).date() <= end:
-                return utc.astimezone(zone).date()
-        return utc.astimezone(self._default).date()
+                return zone
+        return self._default
+
+    def local_date(self, moment: datetime) -> date:
+        """The local calendar date of ``moment`` in the source zone."""
+        return moment.astimezone(self.zone_for(moment)).date()
 
     def parse_local_text(self, text: str | None) -> datetime | None:
         """``createTimeText`` as an aware UTC datetime; ``None`` if it cannot be read."""

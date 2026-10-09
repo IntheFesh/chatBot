@@ -67,13 +67,26 @@ def expected_names() -> list[str]:
         "import inspect",
         "images caption-backfill",
         "stickers download",
+        "profile rebuild",
+        "profile history",
+        "profile show",
+        "profile phrases",
+        "profile diff",
+        "profile rollback",
+        "routine list",
+        "routine add sleep",
+        "routine add busy",
+        "routine add holiday",
+        "routine remove",
+        "routine enable",
+        "routine disable",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 31 == len(expected_names())
+    assert len(names) == 44 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -105,6 +118,19 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "import inspect": CommandKind.READ,
         "images caption-backfill": CommandKind.HEAVY,
         "stickers download": CommandKind.HEAVY,
+        "profile rebuild": CommandKind.HEAVY,
+        "profile history": CommandKind.READ,
+        "profile show": CommandKind.READ,
+        "profile phrases": CommandKind.READ,
+        "profile diff": CommandKind.READ,
+        "profile rollback": CommandKind.LIGHT,
+        "routine list": CommandKind.READ,
+        "routine add sleep": CommandKind.LIGHT,
+        "routine add busy": CommandKind.LIGHT,
+        "routine add holiday": CommandKind.LIGHT,
+        "routine remove": CommandKind.LIGHT,
+        "routine enable": CommandKind.LIGHT,
+        "routine disable": CommandKind.LIGHT,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

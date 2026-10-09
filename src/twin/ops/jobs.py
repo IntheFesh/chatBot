@@ -508,6 +508,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "twin.ingest.jobs",
     "twin.ingest.captions",
     "twin.stickers.download",
+    "twin.profile.jobs",
 )
 
 
