@@ -405,10 +405,9 @@ def test_round_08_migration_adds_the_plan_and_time_zone_tables(tmp_path: Path) -
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0007_memory_tables")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0008_daily_plans_timezone")
     assert table_names(path) - before == {"daily_plans", "timezone_history"}
     assert migrate.revision_history()[7] == "0008_daily_plans_timezone"
-    assert migrate.head_revision() == "0008_daily_plans_timezone"
     connection = sqlite3.connect(path)
     connection.execute("PRAGMA foreign_keys=ON")
     try:

@@ -55,5 +55,5 @@ def test_round_13_migration_adds_the_training_tables_and_their_constraints(tmp_p
             connection.execute(model.format(id="m3", kind="onnx", quant="Q8_0"))
     finally:
         connection.close()
-    migrate.downgrade(path, "0007_memory_tables")
+    migrate.downgrade(path, "0008_daily_plans_timezone")
     assert table_names(path) == before
