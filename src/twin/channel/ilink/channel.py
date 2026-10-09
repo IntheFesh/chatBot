@@ -42,12 +42,18 @@ from twin.channel.ilink.outbound import IlinkSender
 from twin.channel.ilink.poller import IlinkPoller, PollOutcome, system_jitter
 from twin.channel.ilink.store import IlinkStore
 from twin.channel.ilink.wire import TEXT_CHUNK_LIMIT
-from twin.channel.policy import CompositeMediaPolicy, OutboundMediaPolicy, ProbeImageManifest
+from twin.channel.policy import (
+    CompositeMediaPolicy,
+    OutboundMediaPolicy,
+    ProbeImageManifest,
+    StickerAllowList,
+)
 from twin.channel.state import ChannelStateStore
 from twin.channel.window import SessionWindow
 from twin.clock import Clock
 from twin.ops.alerts import AlertSink
 from twin.ops.logging import get_logger
+from twin.stickers.library import StickerLibraryAllowList
 from twin.storage.db import Database
 from twin.storage.media import MediaStore
 
@@ -76,6 +82,7 @@ class IlinkChannel(Channel):
         window_h: float,
         quota: int,
         media_policy: OutboundMediaPolicy | None = None,
+        stickers: StickerAllowList | None = None,
         http_client: httpx.AsyncClient | None = None,
         banner: AlertBanner | None = None,
         jitter: Callable[[], float] = system_jitter,
@@ -96,8 +103,9 @@ class IlinkChannel(Channel):
         self._banner = banner or StderrBanner()
         self.state = ChannelStateStore(db)
         self.store = IlinkStore(self.state, clock)
+        # Only stickers from the library and the probe's own test pictures may leave (R-SAFE-006).
         self._media_policy: OutboundMediaPolicy = media_policy or CompositeMediaPolicy(
-            [ProbeImageManifest(self.state)]
+            [*([stickers] if stickers is not None else []), ProbeImageManifest(self.state)]
         )
         self._http = IlinkHttp(http_client)
         self.guard = RecipientGuard(self._bound_user_id)
@@ -129,12 +137,18 @@ class IlinkChannel(Channel):
         self._supervisor = TaskSupervisor(self.name, clock, alerts)
         self._started = False
 
+    @property
+    def media_policy(self) -> OutboundMediaPolicy:
+        """What may leave as a picture: library stickers and the probe's own test pictures."""
+        return self._media_policy
+
     @classmethod
     def from_services(
         cls,
         services: Services,
         *,
         media_policy: OutboundMediaPolicy | None = None,
+        stickers: StickerAllowList | None = None,
         poll: bool = True,
         banner: AlertBanner | None = None,
         http_client: httpx.AsyncClient | None = None,
@@ -149,6 +163,7 @@ class IlinkChannel(Channel):
             window_h=config.proactive_window_safe_h,
             quota=config.outbound_quota_safe,
             media_policy=media_policy,
+            stickers=stickers if stickers is not None else StickerLibraryAllowList(services.db),
             banner=banner,
             http_client=http_client,
             poll=poll,

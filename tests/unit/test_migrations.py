@@ -31,9 +31,27 @@ def table_names(path: Path) -> set[str]:
 
 def test_round_00_migration_creates_exactly_the_five_tables(tmp_path: Path) -> None:
     path = tmp_path / "m.db"
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0001")
     assert table_names(path) == {"settings", "jobs", "cost_ledger", "alerts", "channel_state"}
     assert migrate.revision_history()[:2] == ["0001", "0002"]
+
+
+def test_round_03_migration_adds_the_import_tables_and_keeps_the_old_ones(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0002")
+    before = table_names(path)
+    migrate.upgrade(path)
+    assert table_names(path) - before == {
+        "conversations",
+        "messages",
+        "media_assets",
+        "stickers",
+        "sticker_uses",
+        "import_runs",
+    }
+    assert migrate.revision_history()[2] == "0003_import_tables"
+    migrate.downgrade(path, "0002")
+    assert table_names(path) == before
 
 
 def test_round_01_migration_adds_ledger_accounts_and_keeps_old_rows(tmp_path: Path) -> None:
@@ -113,7 +131,7 @@ def test_downgrade_removes_the_tables_and_upgrade_is_repeatable(tmp_path: Path) 
     assert table_names(path) == set()
     migrate.upgrade(path)
     migrate.upgrade(path)  # already current: nothing happens
-    assert len(table_names(path)) == 5
+    assert len(table_names(path)) == 11
 
 
 def test_status_transitions(tmp_path: Path) -> None:
@@ -153,7 +171,7 @@ def test_outdated_state_is_reported_when_revisions_are_behind(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "o.db"
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0002")
     monkeypatch.setattr(migrate, "head_revision", lambda: "9998")
     monkeypatch.setattr(migrate, "revision_history", lambda: ["0001", "0002", "9998"])
     status = migrate.schema_status(path)

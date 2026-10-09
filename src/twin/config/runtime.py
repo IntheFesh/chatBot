@@ -128,6 +128,14 @@ PROACTIVE_DAILY_MAX = register_setting(
         "Maximum proactive messages per day (/主动)",
     )
 )
+TARGET_USERNAME = register_setting(
+    SettingSpec(
+        "target.username",
+        TypeAdapter(str | None),
+        lambda s: s.target.username,
+        "WeChat id of the conversation the bot imitates (chosen at the first import)",
+    )
+)
 PAUSED = register_setting(
     SettingSpec("paused", TypeAdapter(bool), lambda s: False, "Bot paused (/暂停)")
 )

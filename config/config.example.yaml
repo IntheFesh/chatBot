@@ -28,6 +28,11 @@ budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 3
 thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
 backend: { active: "deepseek" }        # deepseek|style|hybrid
 jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
+ingest:                                 # 第 03 轮新增，R-IMP-004/008/012
+  batch_size: 2000                     # 导入时每批事务写入的消息条数
+  caption_recent_days: 90              # 图片描述只为最近 N 天的图片排队
+  caption_wait_timeout_s: 30           # 用户刚发来的图片在线同步描述的超时（秒）
+  sticker_download: { concurrency: 4, per_second: 4, retries: 3, timeout_s: 30 }   # 表情包下载
 engine:
   quiet_window_s: 15
   quiet_window_adaptive: false         # true 时按用户连发间隔 p75 自适应，上限 quiet_window_max_s

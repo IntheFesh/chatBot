@@ -17,6 +17,7 @@ from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
+from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
 from twin.ops.cli import jobs_app
 from twin.ops.components import build_application
@@ -27,6 +28,7 @@ from twin.ops.logging import configure_logging, get_logger, shutdown_logging
 from twin.ops.power import default_power_manager
 from twin.ops.process_model import CliError, CommandKind, command
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
+from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
 
 app = typer.Typer(
@@ -42,6 +44,9 @@ app.add_typer(db_app, name="db")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(llm_app, name="llm")
 app.add_typer(channel_app, name="channel")
+app.add_typer(import_app, name="import")
+app.add_typer(stickers_app, name="stickers")
+app.add_typer(images_app, name="images")
 
 log = get_logger("twin.cli")
 
