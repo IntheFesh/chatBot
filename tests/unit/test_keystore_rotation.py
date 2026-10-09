@@ -162,6 +162,12 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "channel_state": {"value"},
         "jobs": {"payload"},
         "settings": {"value", "history"},
+        # round 03: the import tables join the rotation automatically
+        "conversations": {"username", "display_name"},
+        "import_runs": {"source_dir", "target_username", "stats", "hooks"},
+        "media_assets": {"source_path", "caption"},
+        "messages": {"text", "raw", "quote"},
+        "stickers": {"url", "source_path"},
     }
 
 

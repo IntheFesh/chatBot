@@ -135,6 +135,20 @@ class JobsConfig(_Section):
     concurrency: int = Field(default=2, ge=1, le=32)
 
 
+class StickerDownloadConfig(_Section):
+    concurrency: int = Field(default=4, ge=1, le=16)
+    per_second: float = Field(default=4, gt=0, le=50)
+    retries: int = Field(default=3, ge=0, le=10)
+    timeout_s: float = Field(default=30, gt=0)
+
+
+class IngestConfig(_Section):
+    batch_size: int = Field(default=2000, ge=1)
+    caption_recent_days: int = Field(default=90, ge=1)
+    caption_wait_timeout_s: float = Field(default=30, gt=0)
+    sticker_download: StickerDownloadConfig = Field(default_factory=StickerDownloadConfig)
+
+
 class EngineConfig(_Section):
     quiet_window_s: int = Field(default=15, ge=0)
     quiet_window_adaptive: bool = False
@@ -338,6 +352,7 @@ class Settings(BaseSettings):
     thinking: ThinkingConfig = Field(default_factory=ThinkingConfig)
     backend: BackendConfig = Field(default_factory=BackendConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
+    ingest: IngestConfig = Field(default_factory=IngestConfig)
     engine: EngineConfig = Field(default_factory=EngineConfig)
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)

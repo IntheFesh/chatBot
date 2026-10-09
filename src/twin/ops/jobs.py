@@ -504,7 +504,11 @@ class HandlerRegistry:
 default_registry = HandlerRegistry()
 
 # Modules that register job handlers on import; each business round appends its module.
-HANDLER_MODULES: tuple[str, ...] = ()
+HANDLER_MODULES: tuple[str, ...] = (
+    "twin.ingest.jobs",
+    "twin.ingest.captions",
+    "twin.stickers.download",
+)
 
 
 def job_handler(

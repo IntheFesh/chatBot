@@ -60,3 +60,50 @@
 5. **`twin doctor` 的新提示**
    - `holiday-calendar` 目前是 `warn`：已安装的 `chinese-calendar` 只收录到 2026 年，明年的节假日表官方还没发布。这不是故障；新版本发布后运行 `uv lock --upgrade-package chinese-calendar` 并 `uv sync`。
    - `deepseek-key` 在存入 Key 之前是 `warn`，存入后变 `ok`。
+
+## 第 03 轮 —— 聊天记录导入（流式、可续传、媒体与表情包、图片描述、报告、导入后钩子）
+
+沙箱里没有真实导出目录，整套导入只用 `tests/fixtures/synth_export.py` 生成的合成数据验证过。下面这些步骤需要你在自己的 Windows 电脑上、用真实导出做一遍，**顺序很重要**：先看结构，再导入。
+
+1. **先看结构：对真实导出运行 `twin import inspect`（本轮最重要的一步）**
+   - 做什么：`uv run twin import inspect "<你的导出目录>"`（目录名含中文也没关系，给引号）。大导出可加 `--sample 20000` 多看一些消息；默认每个 `messages.json` 看前 5000 条。
+   - 预期：终端打印并保存 `data/reports/inspect-<UTC时间>.md`。**报告里只有结构，不含任何值**：文件树（会话文件夹显示成 `序号_昵称字数_哈希前4位`）、`report.json` / `meta.json` / `messages.json` 的键名与值类型和出现次数、`renderType` / `type` / `offlineMedia[].kind` 等枚举字段的取值计数、`_integrity/` 的文件清单和 JSON 键名。报告里不应出现任何消息文字、昵称、wxid、媒体文件名；如果你发现有，请不要贴出来，告诉我是哪一行。
+   - 然后：把这份报告整个贴回给我。我据此核对四件事，有出入先告诉你再继续：
+     1. SPEC R-IMP-002 的字段表和 `src/twin/ingest/schema.py`（是否有字段缺失、类型不同——例如 `createTime` 是秒还是毫秒，`isSent` 是布尔还是 0/1，`voiceLength` 的单位）；
+     2. `offlineMedia[].kind` 的真实取值（`src/twin/ingest/normalize.py::classify_media` 目前按名字里含 image / emoji / avatar / thumb / cover / voice / video / file 归类，没见过的名字会被跳过并计数）；
+     3. `renderType` 的真实取值（没见过的会保存为"未识别"类型、原始记录完整保留，并在导入报告里按名字列出）；
+     4. **`_integrity/` 的真实格式**（见下一条）。
+
+2. **`_integrity/` 的格式（决策 D-007）**
+   - 代码现在能读两类常见形态：JSON（`files` / `entries` / `items` / `manifest` / `checksums` / `hashes` 成员，或顶层列表/映射，条目里有路径与 `sha256`/`sha1`/`md5`/`size`）和 `sha256sum` 风格的文本行。真实格式没见过，所以对不上时导入报告的"数据质量提示"里会写"完整性文件夹格式无法识别，没有校验任何文件"，导入照常进行。
+   - 做什么：看 inspect 报告里 `_integrity/` 一节；若出现这条提示，把该节贴给我，我改 `src/twin/ingest/integrity.py::parse_manifest_text`。
+   - 预期：格式被识别后，导入报告里会有"完整性校验（_integrity）：读到 N 条记录；messages.json ok；媒体通过 X，失败 0，未列入清单 Y"。校验失败的文件不会被导入（`messages.json` 失败则整次导入中止并报错）。
+
+3. **配置并首次导入**
+   - 做什么：在 `config/config.yaml` 里设置 `paths.export_dir`（全量导出目录，不要放进仓库），确认 `time.source_timezone` 是 `createTimeText` 所用的时区（芝加哥导出就保持默认；如果一段时间在国内导出，用 `time.source_timezone_ranges`，见 SPEC R-CFG-004）。然后：
+     ```
+     uv run twin db upgrade
+     uv run twin import "<导出目录>" --foreground
+     ```
+     （应用在运行时去掉 `--foreground`，命令会入队后立即返回，用 `uv run twin import status --watch` 看进度。）
+   - 预期：首次导入会列出**所有一对一会话**（昵称、消息数、打码的 wxid），让你输入编号选目标会话，选择写入运行时设置 `target.username`（`twin settings list` 里显示为打码）。群聊不会被列出。随后看到进度条（阶段 messages → media → stickers → finalize → hooks），最后打印导入报告并保存到 `data/reports/import-<UTC时间>.md`。报告不含任何消息文字和 wxid。
+   - 请核对报告：①"按类型与发送方计数"里"她"和"用户"没有互换（`isSent=false` 是她）；②"日期范围"和你的记忆吻合；③"数据质量提示"里**没有**"createTime 与 createTimeText 相差超过一小时"（有的话说明 `time.source_timezone` 不对，改好后重新导入，幂等）；④"无法导入"为 0 或很小。把统计部分（不含正文）贴给我。
+
+4. **续传与增量**
+   - 做什么：在导入进行中按 Ctrl+C（或关掉窗口），再运行 `uv run twin import --resume --foreground`；以后有新导出时再次 `uv run twin import "<新导出目录>"` 即可（按消息 id 去重，新导出里改过的消息按 `exportedAt` 较新者为准）。
+   - 预期：续传从上次提交的批次继续，最终条数与一次性导入完全一致；增量导入的报告里"新增 / 重复 / 冲突"三项各自有数。
+
+5. **表情包下载**
+   - 做什么：导入后 `uv run twin stickers download --foreground`（应用在运行时去掉 `--foreground`）。
+   - 预期：并发 4、每秒不超过 4 个请求；结束后按状态列出表情包数量：`available`（MD5 一致）、`md5_mismatch`（已保存但不会被发送）、`unavailable`（带原因，例如 `http_404`、`timeout`）、`pending`。失败的可以稍后 `uv run twin stickers download --retry-failed`。这一步沙箱里只用模拟服务器验证过，没有访问过真实的表情包 CDN。
+
+6. **图片描述（需要 DeepSeek Key，会花钱）**
+   - 做什么：先 `uv run twin secrets set deepseek_api_key`（第 01 轮），然后 `uv run twin images caption-backfill`（导入结束时钩子已经排过一次，重复运行只会提示"已在队列中"）。命令会列出批次号、图片数和**估算费用**，但不会执行；确认金额后 `uv run twin jobs approve <批次号>`，任务在 DeepSeek 非高峰时段由运行中的应用执行（应用没运行时 `uv run twin jobs run --until-idle`）。
+   - 预期：费用记在 `one_time` 账目（`uv run twin llm status` 可见），不计入日/月预算；实际花费超过估算 20% 时批次会自动暂停并告警。描述先经脱敏（电话、地址等被替换成 `[手机号]` 之类）再加密保存。沙箱里没有 Key，这条链路只在模拟接口上验证过，没有对真实 DeepSeek 跑过。
+
+7. **性能（可选）**
+   - 做什么：`uv run python scripts/bench_import.py --messages 1000000`（合成数据，不碰你的真实数据；需要约 1.5 GB 空闲磁盘）。
+   - 预期：输出每秒条数、峰值内存和两个 PASS。沙箱里的实测数字见 `docs/PERFORMANCE.md`；你的电脑上的数字请告诉我，Windows 上的磁盘与杀毒软件可能让速度差一个数量级，但门槛是 30 分钟。
+
+8. **（可选）Windows 长路径与中文路径**
+   - 如果导出目录很深（媒体文件路径超过 260 字符），代码已对 Windows 使用 `\\?\` 前缀；若仍有"文件不存在"的缺失媒体，开启系统的长路径支持（`LongPathsEnabled`）后重新导入，缺失项会被补上。

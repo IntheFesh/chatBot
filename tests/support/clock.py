@@ -89,3 +89,39 @@ class ManualClock:
             self._now += timedelta(seconds=remaining)
             self._mono = target
         await self.settle()
+
+
+class InstantClock:
+    """Implements :class:`twin.clock.Clock` with virtual time: sleeping never makes a test wait.
+
+    A sleeper wakes, in order of wake-up time, as soon as no earlier sleeper is left; the clock
+    then jumps to its wake-up time.  Code that spaces its work out in time (rate limits,
+    back-off) therefore sees realistic time stamps (``monotonic()``) while the test runs at
+    full speed.  ``sleeps`` lists the requested pauses.
+    """
+
+    def __init__(self, start: datetime = DEFAULT_START) -> None:
+        self._start = start.astimezone(UTC)
+        self._mono = 1000.0
+        self._pending: list[float] = []
+        self.sleeps: list[float] = []
+
+    def now_utc(self) -> datetime:
+        return self._start + timedelta(seconds=self._mono - 1000.0)
+
+    def monotonic(self) -> float:
+        return self._mono
+
+    async def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        if seconds <= 0:
+            await asyncio.sleep(0)
+            return
+        target = self._mono + seconds
+        self._pending.append(target)
+        try:
+            while min(self._pending) < target:  # noqa: ASYNC110 - lets earlier sleepers run first
+                await asyncio.sleep(0)
+            self._mono = max(self._mono, target)
+        finally:
+            self._pending.remove(target)

@@ -9,7 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from twin.config.loader import ConfigError
-from twin.config.mask import masked_settings
+from twin.config.mask import mask_value, masked_settings
 from twin.config.runtime import (
     SettingSpec,
     SettingValueError,
@@ -49,6 +49,16 @@ def _services_for_runtime() -> Any:
     return get_cli_context().services()
 
 
+SENSITIVE_SETTINGS = frozenset({"target.username"})
+
+
+def _shown(key: str, value: Any) -> Any:
+    """A setting value as shown in the terminal (personal ids are partially masked)."""
+    if key in SENSITIVE_SETTINGS and isinstance(value, str):
+        return mask_value(value)
+    return value
+
+
 def _find_spec(key: str) -> SettingSpec[Any]:
     specs = registered_settings()
     if key not in specs:
@@ -63,7 +73,7 @@ def settings_list() -> None:
     services = _services_for_runtime()
     table = Table("key", "value", "description")
     for key, spec in sorted(registered_settings().items()):
-        table.add_row(key, str(services.runtime.get(spec)), spec.description)
+        table.add_row(key, str(_shown(key, services.runtime.get(spec))), spec.description)
     _console().print(table)
 
 
@@ -81,7 +91,7 @@ def settings_set(
         changed = services.runtime.set(spec, parsed, by="cli")
     except (yaml.YAMLError, SettingValueError) as exc:
         raise CliError(str(exc), ExitCode.USAGE) from exc
-    typer.echo(f"{key} = {parsed!r}" if changed else f"{key} unchanged")
+    typer.echo(f"{key} = {_shown(key, parsed)!r}" if changed else f"{key} unchanged")
 
 
 @settings_app.command("history")
@@ -92,7 +102,9 @@ def settings_history(key: Annotated[str, typer.Argument(help="Setting key")]) ->
     services = _services_for_runtime()
     table = Table("at (UTC)", "by", "old", "new")
     for change in services.runtime.history(spec):
-        table.add_row(change.at, change.by, repr(change.old), repr(change.new))
+        table.add_row(
+            change.at, change.by, repr(_shown(key, change.old)), repr(_shown(key, change.new))
+        )
     _console().print(table)
 
 

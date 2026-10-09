@@ -5,7 +5,7 @@
 - 需求与规格：[`docs/SPEC.md`](docs/SPEC.md)（唯一事实源）、追踪表 [`docs/TRACEABILITY.md`](docs/TRACEABILITY.md)
 - 项目规则：[`CLAUDE.md`](CLAUDE.md)；取舍与偏差：[`docs/DECISIONS.md`](docs/DECISIONS.md)；需要你手动做的事：[`docs/PENDING_USER_ACTIONS.md`](docs/PENDING_USER_ACTIONS.md)
 
-> 当前进度：第 01 轮（LLM 层）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`；DeepSeek 客户端（思考开关、JSON、看图、重试与熔断）、费用记账与非高峰判定、预算降级、一次性批任务预算、脱敏、风格模型客户端、M0 探针。通道、聊天等从第 02 轮起逐轮加入。
+> 当前进度：第 03 轮（聊天记录导入）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`；DeepSeek 客户端（思考开关、JSON、看图、重试与熔断）、费用记账与非高峰判定、预算降级、一次性批任务预算、脱敏、风格模型客户端、M0 探针；聊天记录导入（流式、可续传、增量、媒体与表情包、图片描述、导入报告与导入后钩子）。通道、聊天等逐轮加入。
 
 ## 安装（Windows 10/11 x64 或 Linux）
 
@@ -38,6 +38,11 @@ uv run twin run              # Ctrl+C 优雅退出
 | `twin llm probe` | M0 探针：对真实 DeepSeek 接口做七项检查并写 `docs/LLM_REPORT.md`（需要 Key；先 `twin secrets set deepseek_api_key`） | 轻量修改 |
 | `twin llm status` | 模型、探针学到的能力、预算级别与今日花费 | 只读 |
 | `twin jobs list\|show\|retry\|cancel\|approve` | 任务队列；`jobs run --until-idle` 在应用未运行时前台执行 | 只读 / 轻量修改 / 重任务 |
+| `twin import <目录> [--foreground] [--resume] [--target N]` | 导入聊天记录：首次让你选目标会话；默认入队后立即返回，`--foreground` 在应用未运行时前台执行（进度条），`--resume` 续跑 | 重任务 |
+| `twin import status [--watch]` | 阶段、已处理条数 / 总数、速度、预计剩余时间与各导入后钩子 | 只读 |
+| `twin import inspect <目录>` | 只输出导出目录的结构（键名、类型、枚举取值计数），不含任何值；写 `data/reports/inspect-*.md` | 只读 |
+| `twin stickers download [--retry-failed]` | 下载导出里没有文件的表情包（并发 4、每秒 ≤ 4） | 重任务 |
+| `twin images caption-backfill [--days N]` | 为最近 N 天的图片排队描述（一次性批任务，先给估算费用，`twin jobs approve` 后执行） | 重任务 |
 
 全局选项：`--config <文件>`、`--set 键.路径=值`（可重复）、`--log-level`。配置优先级：命令行 > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config/config.yaml` > 默认值。
 
