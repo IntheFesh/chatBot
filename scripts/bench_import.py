@@ -68,8 +68,18 @@ def peak_rss_bytes() -> int:
 
         counters = Counters()
         counters.cb = ctypes.sizeof(Counters)
-        kernel = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+        kernel = ctypes.WinDLL("kernel32")  # type: ignore[attr-defined]
+        psapi = ctypes.WinDLL("psapi")  # type: ignore[attr-defined]
+        # Without these declarations ctypes passes the pseudo handle (-1) as a 32-bit int, which
+        # is not the all-ones 64-bit handle on a 64-bit Windows, and the call fails.
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.GetCurrentProcess.argtypes = []
+        psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+        psapi.GetProcessMemoryInfo.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(Counters),
+            wintypes.DWORD,
+        ]
         handle = kernel.GetCurrentProcess()
         if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
             return int(counters.PeakWorkingSetSize)
