@@ -284,7 +284,8 @@ async def test_a_conversation_is_handed_to_the_extractor_after_the_quiet_minutes
     await rig.clock.advance(2 * 60)
     await wait_until(lambda: len(rig.queued) == 1)
     assert [(m.role, m.text) for m in rig.queued[0]] == [("user", "我周五有面试"), ("bot", "好呀")]
-    assert rig.engine.snapshot().extracted_through is not None
+    # the hand-over comes first, the mark of how far it got a thread-hop later
+    await wait_until(lambda: rig.engine.snapshot().extracted_through is not None)
     assert await rig.engine.extract_if_quiet() is False  # handed over once
 
 

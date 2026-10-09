@@ -27,14 +27,13 @@ from tests.support.clock import ManualClock
 from tests.support.console import RecordingOutput, ScriptedInput
 from tests.support.deepseek import API, TEST_KEY, ok
 from tests.support.embedding import HashingBackend
-from tests.support.engine_harness import START, FixedDay, run_to_idle
+from tests.support.engine_harness import START, FixedDay, bubbles_written, run_to_idle
 from tests.support.synth_chat import ChatSpec, build_chat
 from tests.support.waiting import wait_until
 from twin.channel.local import TYPING_TEXT, LocalConsoleChannel
 from twin.engine.component import EngineComponent, build_engine
 from twin.engine.machine import ConversationEngine
 from twin.engine.roundstate import RoundData
-from twin.engine.turns import BotTurnStore
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
 from twin.memory.recent import BotMessage
 from twin.profile.api import load_activity_model, load_profile
@@ -82,10 +81,14 @@ class World:
         self.input.feed(text)
 
     async def said(self, count: int) -> None:
-        """Wait until ``count`` messages of the user are stored (and so queued or answered)."""
-        await wait_until(
-            lambda: BotTurnStore(self.services.db, self.clock).count(direction="in") >= count
-        )
+        """Wait until ``count`` messages of the user are stored *and queued* by the engine.
+
+        A stored row is not yet a queued message: the engine writes the row first and queues it a
+        thread-hop later, and a test that runs the engine to idle in between sees "idle, nothing
+        waiting" - which is what a slow disk (Windows) shows every time.  The component counts a
+        message as handled when ``handle_message`` has returned, i.e. after it is queued.
+        """
+        await wait_until(lambda: self.component.handled >= count)
 
     def rows(self) -> list[BotTurn]:
         with self.services.db.session() as session:
@@ -291,7 +294,7 @@ async def test_a_message_while_she_sends_keeps_what_is_out_and_writes_the_rest_a
     world.replies.extend(["第一条\n第二条\n第三条", "好的 接着说"])
     world.say("给我讲个故事")
     await world.said(1)
-    await run_to_idle(world.engine, world.clock, until=lambda: "bot: 第一条" in world.output.lines)
+    await run_to_idle(world.engine, world.clock, until=bubbles_written(world.engine, 1))
     world.say("等等")
     await world.said(2)
     await run_to_idle(world.engine, world.clock)
@@ -306,7 +309,7 @@ async def test_a_kill_in_the_middle_of_sending_is_resumed_from_the_same_database
     world.replies.append("一\n二\n三")
     world.say("数数")
     await world.said(1)
-    await run_to_idle(world.engine, world.clock, until=lambda: "bot: 一" in world.output.lines)
+    await run_to_idle(world.engine, world.clock, until=bubbles_written(world.engine, 1))
     await world.component.stop()  # the process dies here; the channel is the platform's
     stored = world.engine.snapshot()
     assert stored.state == "SENDING" and [s["text"] for s in stored.sent] == ["一"]
@@ -344,7 +347,7 @@ async def test_when_the_platform_leaves_few_messages_the_bubbles_are_merged(
     try:
         world.replies.append("一\n二\n三\n四\n五")
         tight_input.feed("说五句")
-        await wait_until(lambda: BotTurnStore(services.db, world.clock).count(direction="in") >= 1)
+        await wait_until(lambda: component.handled >= 1)
         await run_to_idle(engine, world.clock)
         assert len(world.bot_lines) == 2  # 4 left - 2 kept for what she starts = 2 bubbles
         first = next(r for r in world.rows() if r.direction == "out")

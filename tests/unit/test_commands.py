@@ -460,6 +460,21 @@ async def test_redo_has_nothing_to_redo_before_the_first_reply_or_after_a_new_me
     assert world.feedback.unprocessed() == []
 
 
+async def test_redo_never_throws_away_the_answer_given_out_of_the_role_to_a_crisis(
+    world: World,
+) -> None:
+    now = world.clock.now_utc()
+    world.turns.add_inbound(at=now, kind="text", text="我真的不想活了")
+    rows = world.turns.add_reply(
+        [OutboundBubble("我很担心你", now + timedelta(seconds=2))], ReplyMeta("safety")
+    )
+    world.clock.tick(30)
+    outcome = await world.say("/重来")
+    assert outcome == CommandOutcome(PREFIX + texts.REDO_SAFETY, False)
+    assert world.turns.reply(rows[0].reply_id or "")[0].rejected_at is None
+    assert world.feedback.unprocessed() == []  # no verdict is recorded either
+
+
 async def test_redo_also_takes_back_what_the_reply_made_up(world: World) -> None:
     _, row_ids = one_exchange(world)
     now = world.clock.now_utc()

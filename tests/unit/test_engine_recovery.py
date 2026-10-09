@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from datetime import timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -17,6 +19,7 @@ from tests.support.engine_harness import (
     Harness,
     ScriptedChannel,
     ScriptedWriter,
+    bubbles_written,
     build_harness,
     make_draft,
     run_to_idle,
@@ -172,7 +175,7 @@ async def test_generating_goes_back_to_deciding_for_a_fresh_draw(rig: Harness) -
 async def test_sending_goes_on_with_the_bubbles_that_were_not_out(rig: Harness) -> None:
     rig.writer.add(make_draft("一", "二", "三"))
     await rig.message("数数")
-    await run_to_idle(rig.engine, rig.clock, until=lambda: rig.channel.texts == ["一"])
+    await run_to_idle(rig.engine, rig.clock, until=bubbles_written(rig.engine, 1))
     killed = rig.engine.snapshot()
     stored = RoundData.of(killed).outgoing
     assert killed.state == "SENDING" and stored is not None
@@ -197,12 +200,45 @@ async def test_sending_goes_on_with_the_bubbles_that_were_not_out(rig: Harness) 
         await second.engine.stop()
 
 
+async def test_a_stop_while_a_bubble_is_being_written_down_still_notes_it_so_it_is_not_sent_twice(
+    rig: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The channel has the bubble first; the engine's note of it (row, then state) comes later.
+
+    On a slow disk a stop (``Ctrl+C``, the end of ``twin chat --local``) lands in that gap all the
+    time; the note must still be written, or the next start sends the bubble again.
+    """
+    entered, release = threading.Event(), threading.Event()
+    real = rig.store.add_bubble
+
+    def held(*args: Any, **kwargs: Any) -> Any:
+        entered.set()
+        assert release.wait(10), "the test never let the write go on"
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rig.store, "add_bubble", held)
+    rig.writer.add(make_draft("一", "二", "三"))
+    await rig.message("数数")
+    await run_to_idle(rig.engine, rig.clock, until=entered.is_set)
+    assert rig.channel.texts == ["一"] and rig.engine.snapshot().sent == ()  # out, not noted yet
+    restarting = asyncio.create_task(restart(rig, clock_jump_s=60))
+    await wait_until(lambda: rig.engine._driver is None)  # type: ignore[attr-defined]  # stopped
+    release.set()
+    second = await restarting
+    try:
+        await run_to_idle(second.engine, second.clock)
+        assert second.channel.texts == ["二", "三"]  # not "一" again
+        assert out_texts(second) == ["一", "二", "三"]
+    finally:
+        await second.engine.stop()
+
+
 async def test_sending_with_a_message_that_came_meanwhile_continues_like_an_interruption(
     rig: Harness,
 ) -> None:
     rig.writer.add(make_draft("一", "二", "三"))
     await rig.message("数数")
-    await run_to_idle(rig.engine, rig.clock, until=lambda: rig.channel.texts == ["一"])
+    await run_to_idle(rig.engine, rig.clock, until=bubbles_written(rig.engine, 1))
     second = await restart(rig, clock_jump_s=60)
     try:
         second.writer.add(make_draft("好的不数了"))
@@ -218,7 +254,10 @@ async def test_sending_with_a_message_that_came_meanwhile_continues_like_an_inte
 async def test_a_kill_after_the_last_bubble_leaves_nothing_to_send(rig: Harness) -> None:
     rig.writer.add(make_draft("一"))
     await rig.message("嗨")
-    await run_to_idle(rig.engine, rig.clock, until=lambda: rig.channel.texts == ["一"])
+    written = bubbles_written(rig.engine, 1)
+    await run_to_idle(
+        rig.engine, rig.clock, until=lambda: rig.channel.texts == ["一"] and written()
+    )
     second = await restart(rig)
     try:
         await run_to_idle(second.engine, second.clock)
@@ -278,7 +317,7 @@ async def test_a_wake_up_cancels_a_generation_whose_connection_is_gone(rig: Harn
 async def test_a_wake_up_while_sending_goes_on_with_the_next_bubble(rig: Harness) -> None:
     rig.writer.add(make_draft("一", "二"))
     await rig.message("数数")
-    await run_to_idle(rig.engine, rig.clock, until=lambda: rig.channel.texts == ["一"])
+    await run_to_idle(rig.engine, rig.clock, until=bubbles_written(rig.engine, 1))
     await rig.engine.on_resumed(Resumed(rig.clock.now_utc(), "wake", 600.0, None))
     await run_to_idle(rig.engine, rig.clock)
     assert rig.channel.texts == ["一", "二"] and rig.writer.calls == 1

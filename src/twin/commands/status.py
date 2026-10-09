@@ -10,12 +10,13 @@ The sections, in order: time zone and local time; what she is doing and until wh
 and the thinking mode; proactive messages; the platform window and the messages that may still
 be sent; the cost of today with the cache hit rate; the budget level; the style model; the last
 three alerts; reminders (training data left on a rented machine, the retraining reminder).
-Rounds that add something to show (the suggested quiet window of step 3, say) put a callable in
-:attr:`StatusSources.extra`.
+Rounds that add something to show (the suggested quiet window of step 4, say) put a callable in
+:attr:`StatusSources.extra`; it may be a plain function or a coroutine function.
 """
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
@@ -68,7 +69,7 @@ class StatusSources:
     proactive: Callable[[], ProactiveStatus | None] | None = None
     retrain: Callable[[], str | None] | None = None
     uncleaned: Callable[[], int] | None = None
-    extra: Sequence[Callable[[], str | None]] = field(default_factory=tuple)
+    extra: Sequence[Callable[[], str | Awaitable[str | None] | None]] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         if self.uncleaned is None:
@@ -117,7 +118,8 @@ class StatusReport:
                 lines.append(f"{label}：{texts.STATUS_NONE}")
         for extra in self._s.extra:
             try:
-                line = extra()
+                found = extra()
+                line = await found if inspect.isawaitable(found) else found
             except Exception as exc:
                 log.warning("status_section_failed", section="extra", error=type(exc).__name__)
                 continue

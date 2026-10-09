@@ -16,6 +16,7 @@ from tests.support.engine_harness import (
     START,
     Harness,
     ScriptedWriter,
+    bubbles_written,
     build_harness,
     make_draft,
     reference_pacing,
@@ -350,7 +351,7 @@ async def test_the_recent_stickers_and_what_was_already_said_reach_the_context(
 async def test_a_message_while_she_sends_keeps_what_is_out_and_continues(rig: Harness) -> None:
     rig.writer.add(make_draft("第一条", "第二条", "第三条"), make_draft("好的接着说"))
     await rig.message("给我讲个故事")
-    await run_to_idle(rig.engine, rig.clock, until=lambda: rig.channel.texts == ["第一条"])
+    await run_to_idle(rig.engine, rig.clock, until=bubbles_written(rig.engine, 1))
     await rig.message("等等")  # she is about to type the second bubble
     await run_to_idle(rig.engine, rig.clock)
     assert rig.channel.texts == ["第一条", "好的接着说"]  # the unsent two were dropped

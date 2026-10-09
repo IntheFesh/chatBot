@@ -280,6 +280,23 @@ async def test_what_later_rounds_add_appears_at_the_end_and_one_broken_source_co
     assert "暗号甲" not in report and "也坏了" not in report
 
 
+async def test_an_extra_line_may_be_a_coroutine_and_a_broken_one_costs_only_itself(
+    rig: Rig,
+) -> None:
+    async def asked() -> str | None:
+        return "等你说完：15 秒；按你的连发习惯建议 33 秒（自适应：关）"
+
+    async def broken() -> str | None:
+        raise RuntimeError("协程里坏了")
+
+    async def nothing() -> str | None:
+        return None
+
+    report = await rig.report(extra=(asked, broken, nothing))
+    assert report.split("\n")[-1] == "等你说完：15 秒；按你的连发习惯建议 33 秒（自适应：关）"
+    assert "协程里坏了" not in report and lines_of(report)["后端"] == "deepseek"
+
+
 async def test_the_command_sends_the_same_report(
     rig: Rig, services: Services, llm: LlmRuntime
 ) -> None:

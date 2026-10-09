@@ -32,6 +32,16 @@
     engine = build_engine(services, channel)                         # wired as the app does it
     await engine.handle_message(message)                             # stored, queued; returns
 
+    component = register_engine(application, services, channel)     # + the style model's monitor
+    component.router.register(CommandSpec(...))                      # a later round's command
+    engine.quiet_window()                                            # for /状态 (R-ENG-002)
+
+``build_engine`` is the one place where the style model's backends, the backend selector (the
+engine asks it ``choose()`` before and ``record()`` after every reply, :class:`BackendChooser`),
+the budget manager's last level, the command router and the pipeline are put together; later
+rounds register their commands on ``component.router`` and read the data of a moment through the
+data view of ``LiveDataSource`` (``AsOfView(t)`` for evaluation and training instead).
+
 ``ReplyPipeline.run(context, data_view)`` is the single implementation of "write a reply" for the
 running bot and for the evaluation sandbox (round 09b, which passes ``AsOfView(t)`` as the data
 view).  The backends (``deepseek``, ``style`` and ``hybrid``) implement :class:`ReplyBackend`.  The
@@ -59,6 +69,7 @@ from twin.engine.component import (
     EngineComponent,
     build_engine,
     command_port_for,
+    quiet_window_line,
     register_engine,
 )
 from twin.engine.dataview import LiveDataSource, LiveDataView, ReplyDataView
@@ -69,7 +80,7 @@ from twin.engine.feedback import FeedbackRecord, FeedbackStore
 from twin.engine.history import HistoryLoader
 from twin.engine.hybrid_backend import HybridBackend, HybridPlan
 from twin.engine.inbound import InboundRenderer
-from twin.engine.machine import ConversationEngine, QuietWindow
+from twin.engine.machine import BackendChooser, ConversationEngine, QuietWindow
 from twin.engine.pacing import PacingModel
 from twin.engine.pipeline import FALLBACK_BACKEND, ReplyPipeline
 from twin.engine.postprocess import (
@@ -124,6 +135,7 @@ __all__ = [
     "FALLBACK_BACKEND",
     "ActiveStyleModel",
     "BackendChoice",
+    "BackendChooser",
     "BackendMonitorComponent",
     "BackendRequest",
     "BackendResult",
@@ -200,6 +212,7 @@ __all__ = [
     "command_port_for",
     "fit_bubbles_to_quota",
     "normalize_context",
+    "quiet_window_line",
     "register_engine",
     "style_turns",
 ]

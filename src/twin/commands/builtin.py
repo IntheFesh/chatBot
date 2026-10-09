@@ -11,7 +11,8 @@ verdict goes to the ``feedback`` table as ``redo`` (a negative example for round
 and what the thrown-away reply made up - facts the bot invented, the follow-ups and life line
 entries made from them - is deleted.  Writing the new reply is the engine's job: the outcome
 says ``redo=True``.  The command refuses when there is nothing to redo: no reply yet, or the last
-reply was already thrown away and the next one has not been written.
+reply was already thrown away and the next one has not been written.  The one reply it never
+throws away is the answer given out of the role to a crisis (R-SAFE-001): that is not "redone".
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ from twin.engine.turns import BotTurnStore
 from twin.ops.logging import get_logger
 
 log = get_logger("twin.commands.builtin")
+
+SAFETY_BACKEND = "safety"  # the backend label of the replies given out of the role (R-SAFE-001)
 
 
 @dataclass
@@ -147,6 +150,8 @@ class BuiltinCommands:
         reply_id = reply[0].reply_id
         if reply_id is None:
             return CommandOutcome(texts.REDO_NOTHING)
+        if reply[0].backend == SAFETY_BACKEND:  # what she said out of the role stays said
+            return CommandOutcome(texts.REDO_SAFETY)
         await asyncio.to_thread(deps.turns.reject_reply, reply_id, call.context.at)
         await asyncio.to_thread(deps.feedback.add, "redo", reply_id, bot_turn_id=reply[0].id)
         undone = 0

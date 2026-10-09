@@ -48,6 +48,15 @@ user wrote meanwhile, continues like an interruption.
 
 Commands (:class:`~twin.engine.command_port.CommandPort`) are answered the moment they arrive,
 without a delay, outside the round, and are marked ``is_command`` (never memory or training data).
+``/重来`` (``redo``) writes the reply to the thrown-away round again: from IDLE at once (no quiet
+window, no first delay, her pace), and while that reply is still being sent the rest of it is
+dropped first.  A command that comes while a *new* round is under way finds no reply to redo (the
+router refuses it) and does nothing to the round.
+
+Backends: with a :class:`BackendChooser` (``BackendSelector`` of the style model) every reply asks
+it which backend to use and tells it how the reply went, which is what makes the fallback to
+DeepSeek and the way back work (R-SRV-004); without one the setting ``backend.active`` is used
+as it is.
 """
 
 from __future__ import annotations
@@ -55,7 +64,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any, Protocol
@@ -77,6 +86,7 @@ from twin.config.runtime import (
     RuntimeSettings,
 )
 from twin.config.settings import Settings
+from twin.engine.backend_select import BackendChoice
 from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
 from twin.engine.dataview import ReplyDataView
 from twin.engine.decision import MAX_RETRIES, Decider, Decision, Situation
@@ -119,12 +129,21 @@ SCREENED_KINDS = ("text", "voice")
 CRISIS_CONTEXT_TURNS = 4
 STATE_IDLE, STATE_COLLECTING, STATE_DECIDING = "IDLE", "COLLECTING", "DECIDING"
 STATE_GENERATING, STATE_SENDING = "GENERATING", "SENDING"
+DEFAULT_BACKEND = "deepseek"
 
 
 class DraftWriter(Protocol):
     """Writes the reply to one round: :class:`~twin.engine.pipeline.ReplyPipeline`."""
 
     async def run(self, context: ReplyContext, data: ReplyDataView) -> ReplyDraft: ...
+
+
+class BackendChooser(Protocol):
+    """Chooses the backend of each reply and learns how it went: ``BackendSelector`` (R-SRV-004)."""
+
+    async def choose(self) -> BackendChoice: ...
+
+    def record(self, backend: str, draft: ReplyDraft) -> None: ...
 
 
 class DataSource(Protocol):
@@ -200,6 +219,7 @@ class ConversationEngine:
         settings: Settings,
         rng: random.Random,
         commands: CommandPort | None = None,
+        backends: BackendChooser | None = None,
         pacing: PacingSource = PacingModel.from_view,
         queue_extraction: ExtractionQueue | None = None,
     ) -> None:
@@ -221,6 +241,7 @@ class ConversationEngine:
         self._settings = settings
         self._rng = rng
         self._commands = commands
+        self._backends = backends
         self._pacing_source = pacing
         self._queue_extraction = queue_extraction
         low, high = settings.schedule.greeting_window_min
@@ -235,6 +256,10 @@ class ConversationEngine:
         self._resume_pending = False
         self._pacing: PacingModel | None = None
         self._reasoning: str | None = None
+        self._thrown_away: str | None = None  # the reply a ``/重来`` stopped while it was sent
+        self._open_reply: str | None = (
+            None  # the reply whose bubbles are being sent, once it has a row
+        )
         self._failures = 0
         self._waiting_until: datetime | None = None
         self._driver: asyncio.Task[None] | None = None
@@ -253,6 +278,11 @@ class ConversationEngine:
     def attach_commands(self, port: CommandPort) -> None:
         """Hand the engine the command router (the application wires it after building)."""
         self._commands = port
+
+    @property
+    def commands(self) -> CommandPort | None:
+        """The command port in use (the router of ``twin.commands`` in the running application)."""
+        return self._commands
 
     async def stop(self) -> None:
         """Stop the driver; whatever state is stored stays and is resumed by the next start."""
@@ -415,17 +445,64 @@ class ConversationEngine:
         )
 
     async def _redo(self) -> None:
-        """``/重来``: write the reply to the previous round again (the old one is thrown away)."""
+        """``/重来``: write the reply to the previous round again (the old one is thrown away).
+
+        The router has already marked the old reply ``rejected`` and written the ``redo`` feedback.
+        From IDLE the messages it answered are queued again, without the quiet window and the
+        first delay (the user has just asked, not written).  While that reply is still being sent
+        its unsent bubbles are dropped first.  Any other state is a *new* round in the making (the
+        router refuses a ``/重来`` then, but a message may land in between): it is left alone.
+        """
         latest = await asyncio.to_thread(self._store.latest_reply, include_rejected=True)
         if not latest or latest[0].reply_id is None:
             log.info("redo_without_a_reply")
             return
-        ids = await asyncio.to_thread(self._rounds.inbound_of_reply, latest[0].reply_id)
-        snap = await self._load()
-        if not ids or snap.state != STATE_IDLE or snap.pending:
-            log.info("redo_skipped", messages=len(ids), state=snap.state)
+        reply_id = latest[0].reply_id
+        ids = await asyncio.to_thread(self._rounds.inbound_of_reply, reply_id)
+        if not ids:
+            log.info("redo_without_messages")
             return
+        if not await self._drop_unsent(reply_id):
+            snap = await self._load()
+            if snap.state != STATE_IDLE or snap.pending:
+                log.info("redo_skipped", messages=len(ids), state=snap.state)
+                return
         await self._register(ids, redo=True)
+
+    async def _drop_unsent(self, reply_id: str) -> bool:
+        """Stop sending ``reply_id`` (the user threw it away); ``True`` if it was being sent.
+
+        The round ends as if the reply had been sent in full - without the thinking that would
+        have followed it - and the sender, which may be waiting for its next bubble, is woken so
+        that it stops.  A bubble that was already on its way when this ran is marked ``rejected``
+        by the sender's loop (:attr:`_thrown_away`).
+        """
+        snap = await self._load()
+        data = RoundData.of(snap)
+        outgoing = data.outgoing
+        if snap.state != STATE_SENDING or outgoing is None:
+            return False
+        # the state notes the reply once its first bubble is written down; the row exists a moment
+        # earlier, and ``_open_reply`` is the sender's own knowledge of it for that moment
+        if (outgoing.reply_id or self._open_reply) != reply_id:
+            return False
+        if any(p not in data.answering for p in snap.pending):
+            return False  # a new message is queued: the interruption rules deal with the rest
+        self._thrown_away = reply_id
+        self._reasoning = None
+        noted = replace(
+            outgoing,
+            unsent=(),
+            extra_actions=(
+                *outgoing.extra_actions,
+                {"step": "send_stopped_by_redo", "count": len(outgoing.unsent)},
+            ),
+        )
+        await asyncio.to_thread(self._store.update_meta, reply_id, noted.final_meta())
+        await self._complete(data.answering)
+        self._arrival_seq += 1  # the sender waits on this: it stops before the next bubble
+        self._wake.set()
+        return True
 
     # ================================================================ the driver
 
@@ -716,6 +793,7 @@ class ConversationEngine:
             log.warning("generation_raised", error=type(exc).__name__)
             await self._failed("backend_error", None)
             return
+        self._record_backend(context.backend, draft)
         current = await self._load()
         if any(p not in data.answering for p in current.pending):
             await self._cancelled()  # the user wrote just as the reply was ready
@@ -767,7 +845,7 @@ class ConversationEngine:
         turn_ids = [item.turn_id for item in items if item.turn_id]
         window = await asyncio.to_thread(self._history.load, exclude_ids=turn_ids)
         thinking = await asyncio.to_thread(self._runtime.get, THINKING_CHAT)
-        backend = await asyncio.to_thread(self._runtime.get, BACKEND_ACTIVE)
+        backend = await self._backend()
         recent = await asyncio.to_thread(
             self._store.recent_stickers, self._settings.stickers.no_repeat_window
         )
@@ -788,6 +866,31 @@ class ConversationEngine:
             recent_stickers=tuple(recent),
         )
         return context, view
+
+    async def _backend(self) -> str:
+        """The backend of this reply: the selector's choice, or the user's setting without one.
+
+        A selector that breaks must not keep her from answering: DeepSeek is always there.
+        """
+        if self._backends is None:
+            return str(await asyncio.to_thread(self._runtime.get, BACKEND_ACTIVE))
+        try:
+            choice = await self._backends.choose()
+        except Exception as exc:
+            log.warning("backend_choice_failed", error=type(exc).__name__)
+            return DEFAULT_BACKEND
+        if choice.fell_back:
+            log.info("backend_fell_back", backend=choice.name, asked=choice.requested)
+        return choice.name
+
+    def _record_backend(self, backend: str, draft: ReplyDraft) -> None:
+        """Tell the selector how the reply of ``backend`` went (failures and hard violations)."""
+        if self._backends is None:
+            return
+        try:
+            self._backends.record(backend, draft)
+        except Exception as exc:  # the books of the selector are not worth a lost reply
+            log.warning("backend_record_failed", error=type(exc).__name__)
 
     def _meta(self, draft: ReplyDraft, data: RoundData, draft_ms: int) -> ReplyMeta:
         """The numbers stored with the reply: the pipeline's plus how long she made it wait."""
@@ -984,9 +1087,12 @@ class ConversationEngine:
         bubbles = tuple(OutBubble("text", text) for text in outcome.bubbles)
         recorder = _Recorder(self._store, meta)
 
-        async def keep(sent: SentBubble) -> None:
+        async def note(sent: SentBubble) -> None:
             await recorder.record(sent)
             await self._edit(last_outbound_at=sent.at)
+
+        async def keep(sent: SentBubble) -> None:
+            await _written(note(sent))
 
         await self._sender.send(
             bubbles,
@@ -1025,13 +1131,18 @@ class ConversationEngine:
             else None
         )
         recorder = _Recorder(self._store, outgoing.final_meta(), outgoing.reply_id)
+        self._open_reply = outgoing.reply_id
 
         async def wait(seconds: float) -> bool:
             return await self._interruptible(seconds, seq)
 
-        async def keep(sent: SentBubble) -> None:
+        async def note(sent: SentBubble) -> None:
             await recorder.record(sent)
+            self._open_reply = recorder.reply_id
             await self._after_bubble(sent, recorder.reply_id, data.answering)
+
+        async def keep(sent: SentBubble) -> None:
+            await _written(note(sent))
 
         report = await self._sender.send(
             outgoing.unsent,
@@ -1041,6 +1152,11 @@ class ConversationEngine:
             first_of_reply=outgoing.reply_id is None,
             quote=quote if outgoing.reply_id is None else None,
         )
+        thrown = self._thrown_away
+        if thrown is not None and recorder.reply_id == thrown:
+            self._thrown_away = None  # a ``/重来`` ended this reply (see ``_drop_unsent``)
+            await asyncio.to_thread(self._store.reject_reply, thrown)  # a bubble that was in flight
+            return
         await self._after_send(report, snap)
 
     async def _after_bubble(
@@ -1216,7 +1332,7 @@ class ConversationEngine:
             elif wait > 0:
                 await self._wait_activity(wait)
             else:
-                await self._extract(latest, through)
+                await _written(self._extract(latest, through))
 
     async def _extraction_plan(self) -> tuple[float | None, datetime | None, datetime | None]:
         """Seconds until the conversation has been quiet long enough (``None``: nothing new)."""
@@ -1237,7 +1353,7 @@ class ConversationEngine:
         wait, latest, through = await self._extraction_plan()
         if wait != 0.0 or latest is None:
             return False
-        await self._extract(latest, through)
+        await _written(self._extract(latest, through))
         return True
 
     async def _extract(self, latest: datetime, through: datetime | None) -> None:
@@ -1347,6 +1463,24 @@ def _with_extra(data: RoundData, action: dict[str, Any]) -> RoundData:
 
 async def _never_interrupted(_seconds: float) -> bool:
     return False
+
+
+async def _written(work: Coroutine[Any, Any, None]) -> None:
+    """Finish writing down a bubble that is out, even if the driver is stopped meanwhile.
+
+    The channel has the bubble before the engine notes it (its row, then ``sent`` in the stored
+    state); the same goes for a conversation that is handed to the extractor and the mark of how
+    far it got.  A stop that lands in between - ``Ctrl+C``, the end of ``twin chat --local`` - would
+    leave the state without it and the next start would send it again.  The write is therefore
+    not cancelled with the driver: the driver waits for it, and then stops.  (A kill of the whole
+    process in that instant cannot be helped; the bubble is then sent twice rather than never.)
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
 
 
 class _Recorder:

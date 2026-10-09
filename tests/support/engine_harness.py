@@ -434,6 +434,7 @@ def build_harness(
     pacing: PacingModel | None = None,
     crisis: ScriptedCrisis | None = None,
     commands: Any = None,
+    backends: Any = None,
     answers: Sequence[str] = ("嗯嗯", "好的"),
     seed: int = 7,
     short_answers: ShortAnswers | None = None,
@@ -482,6 +483,7 @@ def build_harness(
         settings=services.settings,
         rng=random.Random(seed),
         commands=commands,
+        backends=backends,
         pacing=lambda view: chosen_pacing,
         queue_extraction=queue,
     )
@@ -549,6 +551,22 @@ async def run_to_idle(
         else:
             await asyncio.sleep(0.003)
     raise AssertionError("the engine did not settle")
+
+
+def bubbles_written(engine: ConversationEngine, count: int) -> Callable[[], bool]:
+    """``run_to_idle(until=...)``: ``count`` bubbles of a reply are out *and noted by the engine*.
+
+    The channel gets a bubble before the engine writes it down (its row in ``bot_turns``, then
+    ``sent`` in the stored state), so a test that kills the engine, restarts it or writes again
+    at "the channel has it" can look at the state from before the bubble - always on a slow disk,
+    which is what the Windows runners have.  ``sent`` holds the bubbles until the reply is over.
+    """
+
+    def written() -> bool:
+        snap = engine.snapshot()
+        return len(snap.sent) >= count or (snap.state == "IDLE" and not snap.pending)
+
+    return written
 
 
 async def wait_for_state(engine: ConversationEngine, state: str, limit_s: float = 10.0) -> None:
