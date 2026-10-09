@@ -513,6 +513,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "twin.profile.persona.jobs",
     "twin.stickers.tag_jobs",
     "twin.memory.jobs",
+    "twin.learning.jobs",  # the weekly consolidation of the correction rules (round 11)
     "twin.schedule.jobs",
     "twin.engine.turns",  # registers the reader of the bot's conversation (R-MEM-001)
     "twin.training.export_job",  # the training-set export (round 13b)

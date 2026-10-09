@@ -369,6 +369,49 @@ class BotTurnStore:
             )
             return [_record(row) for row in rows]
 
+    def reply_before(self, moment: datetime) -> list[TurnRecord]:
+        """The newest reply of the conversation that began before ``moment`` (may be empty).
+
+        Commands, silence and replies the user threw away do not count: it is the reply a remark
+        written at ``moment`` can be about.
+        """
+        with self._db.session() as session:
+            newest = session.scalars(
+                select(BotTurn)
+                .where(
+                    BotTurn.direction == "out",
+                    BotTurn.is_command.is_(False),
+                    BotTurn.rejected_at.is_(None),
+                    BotTurn.kind.in_(BUBBLE_KINDS),
+                    BotTurn.reply_id.is_not(None),
+                    BotTurn.at < ensure_aware(moment),
+                )
+                .order_by(BotTurn.at.desc(), BotTurn.id.desc())
+            ).first()
+            if newest is None or newest.reply_id is None:
+                return []
+            rows = session.scalars(
+                select(BotTurn)
+                .where(BotTurn.reply_id == newest.reply_id)
+                .order_by(BotTurn.bubble_index)
+            )
+            return [_record(row) for row in rows]
+
+    def spoke_since(self, moment: datetime) -> bool:
+        """Did the bot say something (a bubble of the conversation) after ``moment``?"""
+        stmt = (
+            select(func.count())
+            .select_from(BotTurn)
+            .where(
+                BotTurn.direction == "out",
+                BotTurn.is_command.is_(False),
+                BotTurn.kind.in_(BUBBLE_KINDS),
+                BotTurn.at > ensure_aware(moment),
+            )
+        )
+        with self._db.session() as session:
+            return int(session.scalar(stmt) or 0) > 0
+
     def recent_stickers(self, limit: int) -> list[str | None]:
         """For each of the last ``limit`` bubbles: the sticker MD5, or ``None`` for text.
 

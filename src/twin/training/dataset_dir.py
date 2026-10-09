@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -273,6 +274,54 @@ def write_dataset_dir(
         newline="\n",
     )
     return load_dataset_dir(directory)
+
+
+def derive_with_dpo(
+    base: DatasetDir,
+    directory: Path,
+    dpo: Iterable[DpoSample],
+    *,
+    dataset_version: str,
+    created_at: str,
+    stats: Mapping[str, Any] | None = None,
+) -> DatasetDir:
+    """A new dataset directory: the files of ``base`` as they are, plus a preference file.
+
+    A dataset version names one content (``dataset_versions``), so adding the preference pairs
+    makes a new version rather than changing the old one: the SFT files are copied byte for byte
+    (their hashes stay), ``dpo_train.jsonl`` is written, and ``dataset_meta.json`` gets the new
+    version id, the count and the hashes.  The result is read back and checked like any dataset.
+    """
+    if directory.exists() and any(directory.iterdir()):
+        raise DatasetError(f"{directory} is not empty; use a new directory")
+    samples = list(dpo)
+    if not samples:
+        raise DatasetError("a preference file needs at least one pair")
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        for name in base.data_files():
+            if name != FILE_DPO:
+                shutil.copy2(base.path / name, directory / name)
+        count = _write_lines(directory / FILE_DPO, (sample.to_json() for sample in samples))
+        meta = base.meta.model_dump(by_alias=True)
+        meta["dataset_version"] = dataset_version
+        meta["created_at"] = created_at
+        meta["counts"] = {**meta["counts"], "dpo": count}
+        meta["files"] = {
+            **{name: digest for name, digest in base.meta.files.items() if name != FILE_DPO},
+            FILE_DPO: file_sha256(directory / FILE_DPO),
+        }
+        meta["stats"] = {**base.meta.stats, **dict(stats or {})}
+        validated = DatasetMeta.model_validate(meta)
+        (directory / FILE_DATASET_META).write_text(
+            json.dumps(validated.model_dump(by_alias=True), indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return load_dataset_dir(directory)
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
 
 
 def _check_conversation(name: str, number: int, row: Mapping[str, Any], *, pairwise: bool) -> None:

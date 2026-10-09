@@ -25,14 +25,14 @@ from twin.clock import get_clock
 from twin.config.mask import mask_value
 from twin.config.runtime import TARGET_USERNAME
 from twin.ingest.captions import plan_caption_batches
-from twin.ingest.importer import ImportFailure, prepare_import, resumable_run
+from twin.ingest.importer import ImportFailure, resumable_run
 from twin.ingest.inspect import (
     DEFAULT_SAMPLE,
     inspect_export,
     render_inspect,
     write_inspect_report,
 )
-from twin.ingest.jobs import IMPORT_JOB, handle_import, queue_import
+from twin.ingest.jobs import IMPORT_JOB, enqueue_import, handle_import, queue_import
 from twin.ingest.layout import ConversationEntry, ExportLayout, ExportLayoutError
 from twin.ingest.runs import RunView, get_run, latest_run
 from twin.ingest.schema import UnsupportedSchema
@@ -304,19 +304,19 @@ def import_start(
             raise CliError("there is no unfinished import to resume")
         run_id = unfinished.id
         typer.echo(f"resuming import run {run_id} at {unfinished.processed:,} messages")
+        job_id = queue_import(services, run_id)
     else:
         directory = _export_directory(services, export_dir)
         try:
             layout = ExportLayout(directory)
             layout.validate()
             username = choose_target(services, layout, target, assume_yes=yes)
-            prepared = prepare_import(services, directory, target_username=username)
+            queued = enqueue_import(services, directory, username)
         except (ExportLayoutError, UnsupportedSchema, ImportFailure) as exc:
             raise CliError(str(exc)) from exc
-        run_id = prepared.run_id
-        if prepared.resumed:
+        run_id, job_id = queued.run_id, queued.job_id
+        if queued.resumed:
             typer.echo(f"continuing the unfinished run {run_id} of the same export files")
-    job_id = queue_import(services, run_id)
     if not foreground:
         typer.echo(
             f"queued import run {run_id} (job {job_id}); the running application executes it"

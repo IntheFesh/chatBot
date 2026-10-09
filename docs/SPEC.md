@@ -147,6 +147,9 @@ style_model:
 autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
 training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
 eval: { blind_n: 50, memory_questions: 20 }
+commands: { confirm_window_min: 60, pause_max_h: 168, morning_hour: 8, import_poll_s: 5.0 }
+learning: { rules_max: 30, rules_interval_days: 7, rule_max_chars: 40, detect_corrections: true,
+            check_interval_s: 3600.0 }   # 第 11 轮新增：commands 的 4 个键与 learning 的 5 个键
 safety:
   crisis_keywords_file: "config/lists/crisis_keywords.txt"
   hotlines: { US: "988（美国心理危机热线，电话或短信）", CN: "12356（全国心理援助热线）" }
