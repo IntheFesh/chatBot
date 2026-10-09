@@ -722,3 +722,20 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 17 | 媒体报道称"不支持 AI 主动推送"（C4）是否属实 | 非协议来源 | 由 1–4 的真机结果直接回答；若不可行按 R-CH-010 停止并报告 |
 
 > 以上全部需要**用户在手机上扫码并运行探针**（已记入 `docs/PENDING_USER_ACTIONS.md` 第 02 轮一节）。在拿到真机数据之前，`docs/CHANNEL_REPORT.md` 只能是"待实测"模板。
+
+---
+
+## 14. 02b 的实现对照（实现者笔记，不是协议事实）
+
+> 02b 按上文实现了通道；这里只记录"文档建议"与"实现"之间的**差别和补充**，协议事实以前面各节为准。所有行为都只用合成响应（respx）验证过，标 † 的响应形状仍待首次联调。
+
+| 主题 | 文档建议 | 实现（`src/twin/channel/`） |
+| --- | --- | --- |
+| 模块 | §10.2 | 与建议一致，另加 `ilink/store.py`（`channel_state` 的类型化访问）、`ilink/auth.py`（登录失效处理）、`ilink/flows.py`（登录与绑定的交互）、`ilink/status.py`、`ilink/connectivity.py`、`component.py`（`twin run` 里的组件）、`console.py`（可注入的终端交互）。`ProbeSendPolicy` 留给 02c，通道侧只定义 `SendBypass` 协议（`base.py`） |
+| 持久化键 | §10.3 | 在建议的键之外增加 `ilink.pending_bind`（未绑定时的第一个发送者）、`ilink.inbox`（已接受、未被消费的消息）、`ilink.item_stats`（最近入站 item 类型号与解析失败计数）、`ilink.poll_status`（连续失败次数与最近错误）；`ilink.probe_images` 由 `ProbeImageManifest` 读写 |
+| 退避 | §10.4 | `min(60, 2^(n-1)) × U(0.5, 1.5)` 之后**再封顶 60 s**（抖动不会超过上限）；长轮询读超时不退避，但如果一次轮询在不足 1 s 内就返回空结果，补一个 1 s 的停顿，避免对"立刻返回"的服务器空转；客户端读超时 = `longpolling_timeout_ms`（默认 35 s）+ 5 s |
+| 登录失效 | §8、§10.6 | 任何接口的 `ret`/`errcode == -14` → `NEEDS_RELOGIN`（`alerts` 一条 critical、控制台红色面板，一个周期只报一次）；每小时用旧 token 做一次恢复探测（成功或读超时视为恢复，写一条 info 告警）。**HTTP 401/403 不当作 -14**（源码没有这样的约定），按普通错误退避，连续 3 次写 warning |
+| 发送 | §10.6 | 与表一致；补充：结果未知（读超时、5xx、坏响应）的发送**计入**条数，连接失败和被服务器拒绝的不计入；`ret=-2` 之后窗口保持关闭到下一条入站，不再发请求；文字 > 4000 字符或为空直接拒绝（不拆分、不发空串） |
+| 入站 | §6.5 | 一个 `WeixinMessage` 去掉工具调用 item 后只有一个 item → `id = message_id`，多个 → `message_id#<序号>`；**文件不下载**，只取文件名（D-128）；窗口与 context_token 以"用户的任意消息"为准（即使消息里没有可交付的内容）；`create_time_ms` 同时接受毫秒与秒；引用的 `partial_text` 下标按 0 起算【推断：源码示例是 0，未被证实】，有 `quotemd5` 时用它在两种读法里选，没有时取"全局第 n 次" |
+| 地址 | §7.2 | `baseurl`、`redirect_host`、`full_url`、`upload_full_url` 只接受 https |
+| 绑定 | D-012 | 未绑定时消息不处理，只记录第一个发送者和它的 `context_token`；绑定时沿用该 token，所以 `send-test` 在绑定后立刻可用 |

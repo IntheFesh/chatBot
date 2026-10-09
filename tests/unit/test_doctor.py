@@ -8,10 +8,12 @@ import sys
 from collections import namedtuple
 from pathlib import Path
 
+import httpx
 import pytest
 
 import twin.ops.doctor as doctor
 from tests.support.credentials import BrokenCredentials, MemoryCredentials
+from tests.support.network import OfflineTransport
 from twin.config.loader import load_settings
 from twin.config.secrets import BackendInfo, SecretStore
 from twin.ops.doctor import CheckResult, CheckStatus, DoctorContext, exit_code, run_checks
@@ -28,6 +30,7 @@ def context(tmp_path: Path, **overrides: object) -> DoctorContext:
         "settings": settings,
         "secrets": SecretStore(MemoryCredentials()),
         "root": tmp_path,
+        "http_transport": OfflineTransport(),
     }
     values.update(overrides)
     return DoctorContext(**values)  # type: ignore[arg-type]
@@ -55,10 +58,12 @@ def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
         "holiday-calendar",
         "llm-config",
         "deepseek-key",
+        "ilink-api",
+        "ilink-cdn",
     }
-    # these depend on the day (does the holiday library know next year?) and on a key the
-    # user has not stored yet; they warn but never fail
-    advisory = {"holiday-calendar", "deepseek-key"}
+    # these depend on the day (does the holiday library know next year?), on a key the user has
+    # not stored yet and on the network (the test network is offline); they warn but never fail
+    advisory = {"holiday-calendar", "deepseek-key", "ilink-api", "ilink-cdn"}
     assert all(r.status is CheckStatus.OK for r in results if r.name not in advisory), [
         r for r in results if r.status is not CheckStatus.OK
     ]
@@ -282,3 +287,49 @@ def test_deepseek_key_check_reports_presence_and_store_failures(tmp_path: Path) 
     assert present.status is CheckStatus.OK and "synthetic-key-1" not in present.detail
     broken = doctor.check_deepseek_key(context(tmp_path, secrets=SecretStore(BrokenCredentials())))
     assert broken.status is CheckStatus.WARN and "cannot read" in broken.detail
+
+
+# ------------------------------------------------------- WeChat connectivity
+
+
+def reachable(status: int = 404) -> httpx.MockTransport:
+    return httpx.MockTransport(lambda request: httpx.Response(status))
+
+
+def test_ilink_hosts_that_answer_are_reported_as_reachable(tmp_path: Path) -> None:
+    ctx = context(tmp_path, http_transport=reachable(404))
+    for check in (doctor.check_ilink_api, doctor.check_ilink_cdn):
+        result = result_of(check, ctx)
+        assert result.status is CheckStatus.OK
+        assert "reachable (HTTP 404" in result.detail
+    assert "ilinkai.weixin.qq.com" in doctor.check_ilink_api(ctx).detail
+    assert "novac2c.cdn.weixin.qq.com" in doctor.check_ilink_cdn(ctx).detail
+
+
+def test_ilink_hosts_that_cannot_be_reached_warn_with_a_hint(tmp_path: Path) -> None:
+    ctx = context(tmp_path)  # the default test transport refuses every connection
+    for check in (doctor.check_ilink_api, doctor.check_ilink_cdn):
+        result = result_of(check, ctx)
+        assert result.status is CheckStatus.WARN
+        assert "cannot connect (ConnectError)" in result.detail
+        assert "proxy or VPN" in result.hint
+    assert exit_code(run_checks(ctx)) == 0  # a network problem never fails the doctor
+
+
+def test_a_slow_ilink_host_is_reported_as_a_timeout(tmp_path: Path) -> None:
+    def slow(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no answer", request=request)
+
+    ctx = context(tmp_path, http_transport=httpx.MockTransport(slow))
+    result = doctor.check_ilink_api(ctx)
+    assert result.status is CheckStatus.WARN and "timed out" in result.detail
+
+
+def test_the_connectivity_checks_are_skipped_for_the_console_channel(tmp_path: Path) -> None:
+    settings = load_settings(
+        None, {"paths": {"data_dir": str(tmp_path / "d")}, "channel": {"kind": "console"}}
+    )
+    ctx = context(tmp_path, settings=settings)
+    for check in (doctor.check_ilink_api, doctor.check_ilink_cdn):
+        result = result_of(check, ctx)
+        assert result.status is CheckStatus.OK and "not needed" in result.detail

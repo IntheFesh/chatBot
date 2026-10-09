@@ -11,6 +11,8 @@ from rich.table import Table
 
 from twin import __version__
 from twin.app import ComponentStartError, ShutdownSignals
+from twin.channel.cli import channel_app
+from twin.channel.component import register_channel
 from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
@@ -39,6 +41,7 @@ app.add_typer(secrets_app, name="secrets")
 app.add_typer(db_app, name="db")
 app.add_typer(jobs_app, name="jobs")
 app.add_typer(llm_app, name="llm")
+app.add_typer(channel_app, name="channel")
 
 log = get_logger("twin.cli")
 
@@ -82,6 +85,7 @@ def main(
             overrides=overrides,
             log_level=log_level,
             secrets=previous.secrets,
+            http_transport=previous.http_transport,
         )
     )
 
@@ -91,6 +95,7 @@ def main(
 
 async def _serve(services: Services) -> None:
     application, _watcher = build_application(services)
+    register_channel(application, services)
     stop = asyncio.Event()
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()
@@ -145,6 +150,7 @@ def doctor() -> None:
             settings_error=error,
             secrets=context.secrets,
             root=context.paths().root if settings else None,
+            http_transport=context.http_transport,
         )
     )
     table = Table("check", "status", "detail")

@@ -57,13 +57,18 @@ def expected_names() -> list[str]:
         "jobs approve",
         "llm probe",
         "llm status",
+        "channel login",
+        "channel status",
+        "channel send-test",
+        "channel unbind",
+        "channel listen",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 21 == len(expected_names())
+    assert len(names) == 26 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -85,6 +90,11 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "jobs run": CommandKind.HEAVY,
         "llm probe": CommandKind.LIGHT,
         "llm status": CommandKind.READ,
+        "channel login": CommandKind.LIGHT,
+        "channel status": CommandKind.READ,
+        "channel send-test": CommandKind.LIGHT,
+        "channel unbind": CommandKind.LIGHT,
+        "channel listen": CommandKind.EXCLUSIVE,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])
@@ -92,6 +102,8 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
     run_spec = get_spec(names["run"])
     assert run_spec is not None
     assert run_spec.acquires == (LOCK_RUN,) and run_spec.tolerates == (LOCK_SUPERVISOR,)
+    listen_spec = get_spec(names["channel listen"])  # polls, so it must exclude `twin run`
+    assert listen_spec is not None and listen_spec.acquires == (LOCK_RUN,)
 
 
 def test_the_check_detects_an_undeclared_command() -> None:

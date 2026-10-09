@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 
 from twin.clock import Clock, SystemClock, set_active_clock
@@ -108,6 +109,7 @@ class CliContext:
     overrides: dict[str, Any] = field(default_factory=dict)
     log_level: str = "INFO"
     secrets: SecretStore | None = None  # injected by tests; otherwise the default store
+    http_transport: httpx.BaseTransport | None = None  # injected by tests; network checks only
     _settings: Settings | None = field(default=None, repr=False)
     _services: Services | None = field(default=None, repr=False)
 

@@ -27,6 +27,7 @@ dependencies = [
     "chinese-calendar>=1.10",
     "holidays>=0.60",
     "orjson>=3.10",
+    "qrcode>=8.0",
 ]
 
 [project.scripts]
@@ -90,7 +91,7 @@ files = ["src/twin"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["chinese_calendar", "chinese_calendar.*", "ijson", "ijson.*"]
+module = ["chinese_calendar", "chinese_calendar.*", "ijson", "ijson.*", "qrcode", "qrcode.*"]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

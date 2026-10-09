@@ -20,6 +20,9 @@ from enum import StrEnum
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
+
+from twin.channel.ilink.connectivity import EndpointProbe, probe_api, probe_cdn
 from twin.clock import now_utc
 from twin.config.loader import DataPaths, ensure_consent, resolve_paths
 from twin.config.secrets import SecretStore, SecretStoreError
@@ -79,6 +82,7 @@ class DoctorContext:
     secrets: SecretStore | None = None
     root: Path | None = None
     platform: str = field(default_factory=lambda: sys.platform)
+    http_transport: httpx.BaseTransport | None = None  # network checks use it when given
 
     def paths(self) -> DataPaths | None:
         return resolve_paths(self.settings, self.root) if self.settings else None
@@ -367,6 +371,36 @@ def check_deepseek_key(ctx: DoctorContext) -> CheckResult:
         "deepseek_api_key is not set",
         "run `twin secrets set deepseek_api_key`, then `twin llm probe`",
     )
+
+
+def _channel_host_check(
+    ctx: DoctorContext, name: str, probe: Callable[[httpx.BaseTransport | None], EndpointProbe]
+) -> CheckResult:
+    if ctx.settings is not None and ctx.settings.channel.kind != "ilink":
+        return CheckResult(name, CheckStatus.OK, "not needed (the console channel is selected)")
+    result = probe(ctx.http_transport)
+    if result.reachable:
+        return CheckResult(name, CheckStatus.OK, f"{result.url} {result.detail}")
+    return CheckResult(
+        name,
+        CheckStatus.WARN,
+        f"{result.url} {result.detail}",
+        "the WeChat channel cannot work from this network: check the internet connection, a "
+        "proxy or VPN, and whether this host is blocked (docs/ILINK_PROTOCOL.md section 13, "
+        "item 15)",
+    )
+
+
+@doctor_check
+def check_ilink_api(ctx: DoctorContext) -> CheckResult:
+    """The iLink API host answers (R-CH-002)."""
+    return _channel_host_check(ctx, "ilink-api", probe_api)
+
+
+@doctor_check
+def check_ilink_cdn(ctx: DoctorContext) -> CheckResult:
+    """The WeChat media CDN host answers (R-CH-005, R-CH-006)."""
+    return _channel_host_check(ctx, "ilink-cdn", probe_cdn)
 
 
 def run_checks(ctx: DoctorContext) -> list[CheckResult]:

@@ -63,20 +63,23 @@
 
 ## 第 02 轮 —— 微信通道（openclaw-weixin / iLink 协议）、本地控制台通道、M0 通道实测
 
-协议文档 `docs/ILINK_PROTOCOL.md`（步骤 02a）已根据官方源码写好（`@tencent-weixin/openclaw-weixin` 2.4.9，并对照 AstrBot 4.28.2 的 `weixin_oc`）。**官方源码已由沙箱拉取阅读，你不需要安装 Node.js**（除非想自己复核：`npm pack @tencent-weixin/openclaw-weixin`）。沙箱里没有微信账号，所以下面这些步骤**从未真实运行过**：`docs/CHANNEL_REPORT.md` 在拿到你的实测数据之前只能是"待实测"模板，源码读不出来的行为（主动发送窗口、可连发条数、`ret:-2` 的真实含义等，清单见协议文档第 13 节）都等这些步骤的结果。以下命令随第 02 轮后续步骤（02b 及之后）实现并合入，实现之前不可用。
+协议文档 `docs/ILINK_PROTOCOL.md`（步骤 02a）已根据官方源码写好（`@tencent-weixin/openclaw-weixin` 2.4.9，并对照 AstrBot 4.28.2 的 `weixin_oc`）。**官方源码已由沙箱拉取阅读，你不需要安装 Node.js**（除非想自己复核：`npm pack @tencent-weixin/openclaw-weixin`）。沙箱里没有微信账号，所以下面这些步骤**从未真实运行过**：`docs/CHANNEL_REPORT.md` 在拿到你的实测数据之前只能是"待实测"模板，源码读不出来的行为（主动发送窗口、可连发条数、`ret:-2` 的真实含义等，清单见协议文档第 13 节）都等这些步骤的结果。02b 步骤已提供 `twin channel login / status / send-test / unbind` 与 `twin doctor` 里的 WeChat 连通性检查（下面第 1–3 项现在可以做，**全部用合成响应测试过，从未对真实服务运行过**）；`twin channel probe` 与 `report` 随 02c、`twin chat --local` 与 `channel echo-test` 随 02d 合入，合入之前第 4、5 项不可用。
 
-1. **准备手机微信**
-   - 做什么：把手机微信升级到支持 ClawBot 的版本（iOS ≥ 8.0.70 / Android ≥ 8.0.69），在"我 → 设置 → 插件"里确认能看到 ClawBot。
-   - 预期：能进入 ClawBot 的会话页面。名字和头像由你在会话设置里自己改，代码不会改。
+1. **准备手机微信，并检查这台电脑能不能连上微信服务器**
+   - 做什么：把手机微信升级到支持 ClawBot 的版本（iOS ≥ 8.0.70 / Android ≥ 8.0.69），在"我 → 设置 → 插件"里确认能看到 ClawBot。然后在 Windows 电脑上运行 `uv run twin doctor`，看 `ilink-api` 与 `ilink-cdn` 两行。
+   - 预期：能进入 ClawBot 的会话页面（名字和头像由你在会话设置里自己改，代码不会改）；`ilink-api`、`ilink-cdn` 显示 `ok` 和 `reachable (HTTP …)`。显示 `warn`（`cannot connect` / `timed out`）表示这台电脑从当前网络到微信服务器不通：检查网络、代理或 VPN；你人在美国，协议文档第 13 节第 15 项就是要确认这个，请把这两行的原文发给维护者。
 
 2. **扫码登录并确认绑定（需要用户在手机上扫码）**
-   - 做什么：在 Windows 电脑上 `uv run twin channel login`；终端会打印字符二维码，同时保存 PNG 并用默认图片查看器打开；用手机微信扫码并确认。遇到"请输入手机上显示的数字"时，按提示输入。然后在 ClawBot 会话里给机器人发一条消息，按终端提示核对打码后的发送者 id 并输入确认。
-   - 预期：终端显示登录成功与已绑定（id 打码），`uv run twin channel status` 显示已登录、已绑定、窗口剩余。二维码 5 分钟内过期会自动刷新（最多 3 个码）。如果提示"需要重新登录"（协议错误码 `-14`），重新运行本命令即可。
-   - 如果这台电脑访问不了 `ilinkai.weixin.qq.com`：把终端里的连通性错误发给维护者（你人在美国，协议文档第 13 节第 15 项就是要确认这个）。
+   - 做什么：`uv run twin channel login`。终端会打印字符二维码和一个备用链接，同时把 PNG 存到 `data/tmp/` 并用默认图片查看器打开；用手机微信扫码并确认；遇到"Enter the number shown on your phone"时输入手机上显示的数字。登录成功后命令会等你在 ClawBot 会话里给机器人发**一条消息**（最多等 10 分钟），然后显示打码的发送者 id（如 `o9cq****@im.wechat`）并问你"是不是你"，输入 `y` 才绑定。这第一条消息本身不会被机器人处理。
+   - 预期：终端显示 `Logged in` 与 `Bound to …`，`uv run twin channel status` 显示已登录（bot id 打码）、已绑定、`context token: present`、窗口剩余约 22 小时、条数 8/8。二维码约 5 分钟过期会自动换新（最多 3 个码），PNG 登录结束后自动删除。
+   - 如果终端警告"NOT the account that scanned the login code"：说明给机器人发消息的账号和扫码的账号不是同一个，默认应该拒绝（输入 `bind` 以外的任何内容）。已绑定后用另一个账号重新扫码会被拒绝，需要先 `uv run twin channel unbind`（要确认两次）。
+   - 如果提示"需要重新登录"（协议错误码 `-14`，状态里显示 `NEEDS RE-LOGIN`，`alerts` 表有一条 critical 记录）：运行 `uv run twin channel login --force` 重新扫码，绑定保留。
+   - 请把登录后 `uv run twin channel status` 的输出（不含内容，只有打码 id 与类型号）发给维护者，用来回填协议文档里标 † 的响应形状。
 
-3. **收发冒烟**
-   - 做什么：`uv run twin channel send-test "你好"`，在手机上确认收到的是 `[测试]你好`；再给机器人发几条不同类型的消息（文字、图片、语音、视频、文件、引用一条旧消息、微信自带表情包各一条），用 `uv run twin channel status` 查看最近记录的入站消息类型。
-   - 预期：手机收到测试消息；入站消息被解析（只显示类型，不显示内容）。把状态里出现的"未知类型"或解析失败原样告诉维护者，用来补全协议文档里标"需 M0 实测确认"的入站形态（表情包、视频封面、只带 id 的引用）。
+3. **收发冒烟与入站形态采集**
+   - 做什么：先 `uv run twin channel send-test "你好"`，在手机上确认收到的是 `[测试]你好`。然后（`twin run` 没有在运行时）`uv run twin channel listen`，在 ClawBot 会话里依次发送：文字、图片、语音、视频、文件、引用一条旧消息（对文字和对图片各一次）、微信自带表情包各一条，终端每收到一条就打印一行（只有形态：`kind`、`item_type` 类型号、文字字数、媒体类型与大小、`quote=resolved/unresolved`、`flags`，**不显示内容**）。结束后 Ctrl+C，再 `uv run twin channel status` 看 `recent inbound item types` 与 `parse and handling counters`。`twin run` 运行时它自己也会轮询并记录同样的信息（`listen` 与 `run` 互斥，同一时间只有一个在轮询）。
+   - 预期：手机收到测试消息；每条入站消息都出现一行。`send-test` 在窗口或条数用尽时会拒绝并提示"send the bot a message from your phone first"（先给机器人发一条消息）。如果 `send-test` 报 `code -2`，把 `errmsg` 原文发给维护者（协议文档第 13 节第 3 项要确认的 `-2` 含义）。
+   - 请把 `listen` 的输出和 `status` 里出现的 `UNKNOWN` 类型号或解析失败计数（例如 `image.decrypt_failed`、`video_no_cover`、`voice_untranscribed`、`quote=unresolved`）原样发给维护者，用来补全协议文档里标"需 M0 实测确认"的入站形态（表情包、视频封面、语音转写覆盖率、只带 id 的引用）。不要贴任何聊天内容。
 
 4. **运行 M0 通道探针（需要用户在手机上操作，约 26 小时）**
    - 做什么：`uv run twin channel probe start`，按终端和微信里的提示依次操作。每一步开始前，终端和微信都会提示你先给机器人发一条新消息；完成后才开始该步。第 3 步（窗口）开始后约 25 小时内**不要给机器人发任何消息**，否则该步作废、需要重做。过程中探针会问你：GIF 在手机上是否在动、是否看到"对方正在输入"，并且每步结束后问"手机上实际收到几条 [测试] 消息"（接口返回成功不一定等于手机收到，以你手机上的数为准）。源码不支持发送引用，所以不会有引用子步骤。
