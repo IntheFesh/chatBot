@@ -199,6 +199,8 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "bot_turns": {"text", "media", "plan", "timings", "actions"},
         "conversation_state": {"pending", "sent", "data"},
         "feedback": {"correction"},
+        # round 09b: the texts of the pairs and questions of the evaluation
+        "eval_items": {"payload"},
     }
 
 

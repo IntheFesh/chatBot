@@ -15,13 +15,13 @@ then falls back and the user never reads the model's refusal (R-SAFE-005).
 from __future__ import annotations
 
 from twin.engine.backend import BackendRequest, BackendResult
-from twin.engine.prompt import PromptBuilder
+from twin.engine.prompt import BuiltPrompt, PromptBuilder
 from twin.engine.refusal import FILTER_FINISHES, looks_like_refusal
 from twin.engine.thinking import resolve_thinking
 from twin.engine.types import UsageSummary
 from twin.llm.deepseek import DeepSeekClient
 from twin.llm.errors import InvalidRequestError
-from twin.llm.types import ChatResult, Purpose
+from twin.llm.types import ChatMessage, ChatResult, Purpose
 from twin.ops.logging import get_logger
 
 log = get_logger("twin.engine.deepseek_backend")
@@ -54,15 +54,25 @@ class DeepSeekBackend:
         self._builder = builder
         self._auto_rules = auto_rules
 
-    async def generate(self, request: BackendRequest) -> BackendResult:
-        context = request.context
+    def _build(self, request: BackendRequest) -> BuiltPrompt:
         emoji = request.data.emoji_codes
-        built = self._builder.build(
-            context,
+        return self._builder.build(
+            request.context,
             request.material,
             emoji_codes=emoji.codes if emoji is not None else (),
             notes=request.notes,
         )
+
+    def preview(self, request: BackendRequest) -> list[ChatMessage]:
+        """The messages :meth:`generate` would send for ``request``; nothing is sent.
+
+        The evaluation prices a batch from it (R-LLM-014) with the very prompt the run will use.
+        """
+        return self._build(request).messages
+
+    async def generate(self, request: BackendRequest) -> BackendResult:
+        context = request.context
+        built = self._build(request)
         wanted = not request.non_thinking and resolve_thinking(
             context.thinking_mode, context.user_text, auto_rules=self._auto_rules
         )

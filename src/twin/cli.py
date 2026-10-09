@@ -22,6 +22,7 @@ from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
 from twin.engine.component import register_engine
+from twin.eval.cli import eval_app
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
 from twin.memory.cli import memory_app
@@ -70,6 +71,7 @@ app.add_typer(timezone_app, name="timezone")
 app.add_typer(plan_app, name="plan")
 app.add_typer(train_app, name="train")
 app.add_typer(model_app, name="model")
+app.add_typer(eval_app, name="eval")
 
 log = get_logger("twin.cli")
 
