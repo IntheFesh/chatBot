@@ -5,7 +5,7 @@
 - 需求与规格：[`docs/SPEC.md`](docs/SPEC.md)（唯一事实源）、追踪表 [`docs/TRACEABILITY.md`](docs/TRACEABILITY.md)
 - 项目规则：[`CLAUDE.md`](CLAUDE.md)；取舍与偏差：[`docs/DECISIONS.md`](docs/DECISIONS.md)；需要你手动做的事：[`docs/PENDING_USER_ACTIONS.md`](docs/PENDING_USER_ACTIONS.md)
 
-> 当前进度：第 00 轮（工程骨架）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`。聊天、通道、LLM 等从第 01 轮起逐轮加入。
+> 当前进度：第 01 轮（LLM 层）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`；DeepSeek 客户端（思考开关、JSON、看图、重试与熔断）、费用记账与非高峰判定、预算降级、一次性批任务预算、脱敏、风格模型客户端、M0 探针。通道、聊天等从第 02 轮起逐轮加入。
 
 ## 安装（Windows 10/11 x64 或 Linux）
 
@@ -35,6 +35,8 @@ uv run twin run              # Ctrl+C 优雅退出
 | `twin secrets set\|delete\|list\|check <名字>` | 凭据管理器里的秘密（从不显示值） | 轻量修改 / 只读 |
 | `twin secrets rotate-db-key` | 轮换数据库主密钥（可中断续跑） | 独占 |
 | `twin db upgrade\|status` | 数据库迁移 | 独占 / 只读 |
+| `twin llm probe` | M0 探针：对真实 DeepSeek 接口做七项检查并写 `docs/LLM_REPORT.md`（需要 Key；先 `twin secrets set deepseek_api_key`） | 轻量修改 |
+| `twin llm status` | 模型、探针学到的能力、预算级别与今日花费 | 只读 |
 | `twin jobs list\|show\|retry\|cancel\|approve` | 任务队列；`jobs run --until-idle` 在应用未运行时前台执行 | 只读 / 轻量修改 / 重任务 |
 
 全局选项：`--config <文件>`、`--set 键.路径=值`（可重复）、`--log-level`。配置优先级：命令行 > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config/config.yaml` > 默认值。
@@ -46,9 +48,9 @@ uv run ruff check . ; uv run ruff format --check .
 uv run mypy src/twin
 uv run pytest -q --cov=src/twin --cov-report=json
 uv run python scripts/coverage_gate.py                 # 总体 >= 85%，每个子包 >= 75%
-uv run python scripts/trace_check.py --round 00        # 需求追踪
+uv run python scripts/trace_check.py --round 01        # 需求追踪
 uv run python scripts/privacy_scan.py                  # 提交前隐私扫描
-powershell -File scripts/check.ps1 -Round 00           # 以上全部一键运行（Windows）
+powershell -File scripts/check.ps1 -Round 01           # 以上全部一键运行（Windows）
 ```
 
 规则摘要（完整见 `CLAUDE.md`）：不留桩和玩具实现；时间一律带时区并通过 `twin.clock`；真实数据永远不进 git，测试只用合成数据；日志 INFO 及以上不含正文；秘密只存凭据管理器；机器人自己的回复永远不进风格样本、检索库和训练集。

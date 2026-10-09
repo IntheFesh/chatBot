@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from datetime import date
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, Literal
 
@@ -98,11 +99,26 @@ class PricingConfig(_Section):
     extra_peak_dates: list[date] = Field(default_factory=list)
 
 
+def _default_degrade_ratios() -> list[float]:
+    return [1.0, 1.25, 1.5, 2.0]
+
+
 class BudgetConfig(_Section):
     daily_usd: float = Field(default=1.00, ge=0)
     monthly_usd: float = Field(default=15.00, ge=0)
     alert_ratio: float = Field(default=0.8, gt=0, le=1)
     one_time_usd: float = Field(default=30.00, ge=0)
+    # share of the budget at which degradation levels 1..4 begin (R-LLM-008)
+    degrade_ratios: list[float] = Field(default_factory=_default_degrade_ratios)
+
+    @field_validator("degrade_ratios")
+    @classmethod
+    def _four_increasing_ratios(cls, value: list[float]) -> list[float]:
+        if len(value) != 4:
+            raise ValueError("degrade_ratios needs exactly four values (levels 1 to 4)")
+        if any(ratio <= 0 for ratio in value) or any(a >= b for a, b in pairwise(value)):
+            raise ValueError("degrade_ratios must be positive and strictly increasing")
+        return value
 
 
 class ThinkingConfig(_Section):

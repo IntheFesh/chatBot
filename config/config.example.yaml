@@ -23,7 +23,8 @@ pricing:
   offpeak_multiplier: 0.5              # 官方取消非高峰优惠时改为 1.0
   extra_offpeak_dates: []              # 额外按非工作日处理的北京日期
   extra_peak_dates: []                 # 额外按工作日处理的北京日期
-budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00 }
+budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00,
+          degrade_ratios: [1.0, 1.25, 1.5, 2.0] }   # 进入降级级别 1/2/3/4 时的花费占预算比例（R-LLM-008）
 thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
 backend: { active: "deepseek" }        # deepseek|style|hybrid
 jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）

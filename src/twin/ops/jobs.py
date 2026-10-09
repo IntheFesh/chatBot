@@ -28,12 +28,13 @@ import uuid
 from collections.abc import Awaitable, Callable, Collection, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any, Protocol
 
 from sqlalchemy import and_, func, or_, select
 
 from twin.clock import Clock
-from twin.llm.redaction import redact
+from twin.llm.redaction import redact_text
 from twin.ops.alerts import AlertSink
 from twin.ops.logging import get_logger
 from twin.storage.db import Database
@@ -50,6 +51,20 @@ MAX_ERROR_CHARS = 500
 
 class JobError(RuntimeError):
     """Base class for job queue errors."""
+
+
+class JobDeferred(Exception):
+    """Raised by a handler to hand its job back unchanged (no attempt is counted).
+
+    Used when the work cannot continue for a reason that is neither a failure nor a
+    completion, for example when the job's one-time batch was paused for overspending
+    (R-LLM-014) or the budget level forbids the work until the next day (R-LLM-008).
+    The job is claimable again after ``retry_in_s`` seconds.
+    """
+
+    def __init__(self, reason: str, *, retry_in_s: float = 300.0) -> None:
+        super().__init__(reason)
+        self.retry_in_s = retry_in_s
 
 
 class BatchNotFoundError(JobError):
@@ -321,8 +336,8 @@ class JobQueue:
         status = "pending" if retry_at is not None else "failed"
         return self._finish(job_id, worker_id, status=status, error=error, retry_at=retry_at)
 
-    def release(self, job_id: str, worker_id: str) -> bool:
-        """Give back a job interrupted by shutdown without counting the attempt."""
+    def release(self, job_id: str, worker_id: str, *, run_after: datetime | None = None) -> bool:
+        """Give back a job without counting the attempt (shutdown, or ``JobDeferred``)."""
         with self._db.transaction(bump_state=False) as session:
             job = session.get(Job, job_id)
             if job is None or job.status != "running" or job.locked_by != worker_id:
@@ -330,6 +345,8 @@ class JobQueue:
             job.status = "pending"
             job.locked_by = None
             job.attempts = max(0, job.attempts - 1)
+            if run_after is not None:
+                job.run_after = run_after
             return True
 
     def recover_running(self) -> tuple[int, list[JobView]]:
@@ -400,6 +417,27 @@ class JobQueue:
             estimated_usd=sum(j.estimated_cost_usd or 0.0 for j in jobs),
             approved_usd=sum(j.approved_usd or 0.0 for j in jobs),
         )
+
+    def revoke_approval(self, batch_id: str) -> int:
+        """Withdraw the approval of the unfinished jobs of a batch (pauses it, R-LLM-014).
+
+        The jobs stay in the queue; they are claimed again only after ``approve_batch``.
+        Returns the number of jobs affected.
+        """
+        with self._db.transaction() as session:
+            jobs = list(
+                session.execute(
+                    select(Job).where(
+                        Job.batch_id == batch_id,
+                        Job.requires_approval.is_(True),
+                        Job.status.in_(("pending", "running")),
+                    )
+                ).scalars()
+            )
+            for job in jobs:
+                job.approved_at = None
+                job.approved_usd = None
+            return len(jobs)
 
     def approve_batch(self, batch_id: str, *, max_usd: float) -> BatchApproval:
         """Approve every job of ``batch_id`` that is waiting (R-LLM-014)."""
@@ -499,6 +537,7 @@ class RunSummary:
     retried: int = 0
     failed: int = 0
     discarded: int = 0  # finished after being cancelled
+    deferred: int = 0  # handed back by the handler (JobDeferred)
     failures: list[str] = field(default_factory=list)
 
 
@@ -509,7 +548,7 @@ def backoff_delay(attempts: int, base_s: float, cap_s: float) -> float:
 
 def describe_failure(exc: BaseException) -> str:
     """Redacted, truncated error text safe to store and show (no chat content)."""
-    return f"{type(exc).__name__}: {redact(str(exc))}"[:MAX_ERROR_CHARS]
+    return f"{type(exc).__name__}: {redact_text(str(exc))}"[:MAX_ERROR_CHARS]
 
 
 class Worker:
@@ -607,6 +646,13 @@ class Worker:
         except asyncio.CancelledError:
             await asyncio.shield(asyncio.to_thread(self._queue.release, job.id, self._worker_id))
             raise
+        except JobDeferred as deferred:
+            retry_at = self._clock.now_utc() + timedelta(seconds=deferred.retry_in_s)
+            await asyncio.to_thread(
+                partial(self._queue.release, job.id, self._worker_id, run_after=retry_at)
+            )
+            self._summary.deferred += 1
+            log.info("job_deferred", job_id=job.id, job_type=job.type, reason=str(deferred)[:200])
         except Exception as exc:
             await self._record_failure(job, exc)
         else:

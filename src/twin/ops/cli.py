@@ -6,6 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from twin.llm.runtime import activate_offpeak_policy, build_llm_runtime
 from twin.ops.jobs import (
     BatchNotFoundError,
     BatchTooLargeError,
@@ -157,6 +158,7 @@ def jobs_run(
             ExitCode.BUSY,
         )
     load_handlers()
+    activate_offpeak_policy(services)
     worker = Worker(
         _queue(services),
         default_registry,
@@ -198,8 +200,13 @@ def jobs_approve(
     )
     if not yes and not typer.confirm("Approve this batch?"):
         raise typer.Exit(1)
+    # the batch manager also records the approval and sets the overspend cap (R-LLM-014)
+    batches = build_llm_runtime(services).batches
     try:
-        approval = queue.approve_batch(batch, max_usd=limit)
+        approval = batches.approve(batch)
     except (BatchNotFoundError, BatchTooLargeError) as exc:
         raise CliError(str(exc)) from exc
+    status = batches.status(batch)
     typer.echo(f"approved {approval.job_count} job(s), ${approval.total_usd:.2f}")
+    if status.cap_usd is not None:
+        typer.echo(f"the batch pauses itself if it spends more than ${status.cap_usd:.2f}")

@@ -19,6 +19,7 @@ from twin.ops.jobs import (
     DeferredOffPeakPolicy,
     HandlerRegistry,
     JobContext,
+    JobDeferred,
     JobQueue,
     Worker,
     backoff_delay,
@@ -557,3 +558,58 @@ def test_job_view_reflects_the_table(queue: JobQueue, db: Database) -> None:
     with db.session() as session:
         row = session.get(Job, job_id)
         assert row is not None and row.estimated_cost_usd == 1.5 and row.batch_id == "b"
+
+
+# ------------------------------------------------------------------ deferral
+
+
+async def test_a_deferred_job_goes_back_unchanged_and_waits_before_it_is_claimed_again(
+    queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
+) -> None:
+    calls: list[int] = []
+
+    async def handler(ctx: JobContext) -> None:
+        calls.append(ctx.job.attempts)
+        raise JobDeferred("budget level forbids this today", retry_in_s=120)
+
+    registry.register("held", handler)
+    job_id = queue.enqueue("held", {"n": 1}, max_attempts=1)
+    worker = make_worker(queue, registry, db, clock)
+    summary = await worker.run_until_idle()
+    assert (summary.deferred, summary.failed, summary.retried, summary.done) == (1, 0, 0, 0)
+    job = queue.get(job_id)
+    assert job is not None and job.status == "pending" and job.attempts == 0
+    assert job.run_after == clock.now_utc() + timedelta(seconds=120)
+    assert job.last_error is None
+    clock.tick(121)
+    await worker.run_until_idle()
+    assert calls == [1, 1]  # claimed again after the wait, still on its first attempt
+
+
+def test_revoking_the_approval_of_a_batch_pauses_only_its_unfinished_jobs(
+    queue: JobQueue,
+) -> None:
+    ids = [
+        queue.enqueue("t", {}, batch_id="b", estimated_cost_usd=1.0, requires_approval=True)
+        for _ in range(3)
+    ]
+    other = queue.enqueue("t", {}, batch_id="c", estimated_cost_usd=1.0, requires_approval=True)
+    queue.approve_batch("b", max_usd=10)
+    queue.approve_batch("c", max_usd=10)
+    first = queue.claim_next({"t"}, offpeak_allowed=True, worker_id="w")
+    assert first is not None
+    queue.complete(first.id, "w")
+    assert queue.revoke_approval("b") == 2
+    views = {i: queue.get(i) for i in [*ids, other]}
+    finished = views[first.id]
+    assert finished is not None and finished.status == "done"
+    for job_id in ids:
+        view = views[job_id]
+        assert view is not None
+        if job_id != first.id:
+            assert view.approved_at is None
+    survivor = views[other]
+    assert survivor is not None and survivor.approved_at is not None
+    assert queue.claim_next({"t"}, offpeak_allowed=True, worker_id="w") is not None  # batch c
+    assert queue.claim_next({"t"}, offpeak_allowed=True, worker_id="w") is None
+    assert queue.revoke_approval("missing") == 0

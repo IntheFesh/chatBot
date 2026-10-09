@@ -12,6 +12,7 @@ from collections.abc import Sequence
 
 from twin.app import Application, ComponentHealth, HealthStatus, TaskSupervisor
 from twin.clock import Clock
+from twin.llm.runtime import activate_offpeak_policy
 from twin.ops.alerts import AlertSink
 from twin.ops.jobs import HandlerRegistry, JobQueue, Worker, default_registry, load_handlers
 from twin.ops.logging import get_logger
@@ -135,8 +136,12 @@ class JobWorkerComponent:
 def build_application(
     services: Services, registry: HandlerRegistry | None = None
 ) -> tuple[Application, StateWatcher]:
-    """Assemble the application of round 00 (state watcher, heartbeat, job worker)."""
+    """Assemble the application (state watcher, heartbeat, job worker).
+
+    The production off-peak policy (R-LLM-007) is registered here, before the worker starts.
+    """
     load_handlers()
+    activate_offpeak_policy(services)
     clock = services.clock
     watcher = StateWatcher(services.db, clock)
     worker = Worker(

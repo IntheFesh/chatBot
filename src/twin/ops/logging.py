@@ -8,7 +8,7 @@ dependency, and third-party libraries already log through it.
 The rule: **message content never appears in INFO-or-above logs.**  Callers use
 :class:`StructLogger`, whose keyword fields named like content (``content``,
 ``text``, ``body``, ...) are dropped at INFO and above and passed through
-:func:`twin.llm.redaction.redact` at DEBUG.  Exceptions are logged as type plus a
+:func:`twin.llm.redaction.redact_text` at DEBUG.  Exceptions are logged as type plus a
 redacted, truncated message and bare stack locations, never with local values.
 
 Files: ``<logs_dir>/twin.log`` for the application and ``twin-cli.log`` for CLI
@@ -29,7 +29,7 @@ from typing import Any, Literal
 
 import orjson
 
-from twin.llm.redaction import redact
+from twin.llm.redaction import redact_text
 
 CONTENT_FIELDS = frozenset(
     {
@@ -74,7 +74,7 @@ def sanitize_fields(level: int, fields: dict[str, Any]) -> dict[str, Any]:
             if level >= logging.INFO:
                 omitted.append(key)
                 continue
-            clean[name] = redact(value if isinstance(value, str) else repr(value))
+            clean[name] = redact_text(value if isinstance(value, str) else repr(value))
         else:
             clean[name] = value
     if omitted:
@@ -136,7 +136,7 @@ def get_logger(name: str) -> StructLogger:
 def describe_exception(exc_info: Any) -> tuple[str, str]:
     """``(summary, stack)`` for an exception: no local values, message redacted."""
     exc_type, exc_value, tb = exc_info
-    message = redact(str(exc_value))[:_EXC_MESSAGE_LIMIT]
+    message = redact_text(str(exc_value))[:_EXC_MESSAGE_LIMIT]
     summary = f"{exc_type.__name__}: {message}"
     frames = traceback.extract_tb(tb)
     stack = " <- ".join(

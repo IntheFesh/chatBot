@@ -24,6 +24,7 @@ from twin.ops.jobs import JobContext, JobQueue, default_registry
 from twin.ops.process_model import ExitCode
 from twin.services import Services, build_services
 from twin.storage.db import Database
+from twin.storage.migrate import head_revision
 
 runner = CliRunner()
 SECRET = "sk-synthetic-not-a-real-key-123456"
@@ -144,11 +145,11 @@ def test_db_upgrade_and_status(data_dir: Path) -> None:
     before = runner.invoke(app, ["db", "status"])
     assert before.exit_code == 0 and "missing" in before.output
     upgraded = runner.invoke(app, ["db", "upgrade"])
-    assert upgraded.exit_code == 0 and "new -> 0001" in upgraded.output
+    assert upgraded.exit_code == 0 and f"new -> {head_revision()}" in upgraded.output
     after = runner.invoke(app, ["db", "status"])
-    assert "current (applied 0001, latest 0001)" in after.output
+    assert f"current (applied {head_revision()}, latest {head_revision()})" in after.output
     again = runner.invoke(app, ["db", "upgrade"])
-    assert "0001 -> 0001" in again.output
+    assert f"{head_revision()} -> {head_revision()}" in again.output
 
 
 # ------------------------------------------------------------------- settings

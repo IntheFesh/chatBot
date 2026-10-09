@@ -55,13 +55,15 @@ def expected_names() -> list[str]:
         "jobs cancel",
         "jobs run",
         "jobs approve",
+        "llm probe",
+        "llm status",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 19 == len(expected_names())
+    assert len(names) == 21 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -81,6 +83,8 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "jobs cancel": CommandKind.LIGHT,
         "jobs approve": CommandKind.LIGHT,
         "jobs run": CommandKind.HEAVY,
+        "llm probe": CommandKind.LIGHT,
+        "llm status": CommandKind.READ,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])
