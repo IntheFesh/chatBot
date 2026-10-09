@@ -76,6 +76,7 @@ ignore = [
 "tests/**" = ["S101", "S105", "S106", "S108", "S311", "S603", "S607", "PT011", "PT012", "PT018", "T20"]
 "scripts/**" = ["T20", "S603", "S607", "S101"]
 "src/twin/llm/probe_report.py" = ["E501"]  # prose of the written report
+"src/twin/channel/probe/report.py" = ["E501"]  # prose of the written report
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

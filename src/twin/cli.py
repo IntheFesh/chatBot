@@ -11,8 +11,9 @@ from rich.table import Table
 
 from twin import __version__
 from twin.app import ComponentStartError, ShutdownSignals
-from twin.channel.cli import channel_app
+from twin.channel.cli import channel_app, chat_command
 from twin.channel.component import register_channel
+from twin.channel.probe.component import register_probe
 from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
@@ -47,6 +48,7 @@ app.add_typer(channel_app, name="channel")
 app.add_typer(import_app, name="import")
 app.add_typer(stickers_app, name="stickers")
 app.add_typer(images_app, name="images")
+app.command("chat")(chat_command)
 
 log = get_logger("twin.cli")
 
@@ -101,6 +103,7 @@ def main(
 async def _serve(services: Services) -> None:
     application, _watcher = build_application(services)
     register_channel(application, services)
+    register_probe(application, services)
     stop = asyncio.Event()
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()

@@ -23,6 +23,7 @@ from typing import Any, Literal
 
 from twin.channel.base import (
     AuthState,
+    BypassGrant,
     BypassRequest,
     MediaNotAllowed,
     OutboundKind,
@@ -204,10 +205,13 @@ class IlinkSender:
             return OutboundResult.failure(
                 OutboundKind.WINDOW_REJECTED, refusal, session_expired=True
             )
+        grant: BypassGrant | None = None
         if bypass is not None:
-            bypass.authorize(BypassRequest(kind, text, now, refusal))
+            grant = bypass.authorize(BypassRequest(kind, text, now, refusal))
         elif refusal is not None:
             return OutboundResult.failure(OutboundKind.WINDOW_REJECTED, refusal)
+        if grant is not None and grant.empty_context_token:  # the probe's optional experiment
+            context = ContextToken("", context.received_at)
         return _Ready(user, ApiAuth(credentials.api_base_url, credentials.bot_token), context)
 
     # ---------------------------------------------------------- the request
@@ -258,10 +262,14 @@ class IlinkSender:
                 code=response.error_code,
                 errmsg=_clean(response.errmsg),
                 client_id=client_id,
+                ret=response.ret,
+                errcode=response.errcode,
             )
         code = response.error_code
         if code == ERR_SEND_REJECTED:
-            return await self._window_rejected(code, response.errmsg, client_id)
+            return await self._window_rejected(
+                code, response.errmsg, client_id, ret=response.ret, errcode=response.errcode
+            )
         if code is not None:
             return await self._failed(
                 OutboundKind.REJECTED,
@@ -270,6 +278,8 @@ class IlinkSender:
                 code=code,
                 errmsg=response.errmsg,
                 client_id=client_id,
+                ret=response.ret,
+                errcode=response.errcode,
             )
         message_id = as_text(response.data.get("message_id"))
         await asyncio.to_thread(self._record_sent)
@@ -281,7 +291,13 @@ class IlinkSender:
         self._store.update_window(self._window_h, self._quota, lambda w: w.on_outbound(1))
 
     async def _window_rejected(
-        self, code: int, errmsg: str | None, client_id: str
+        self,
+        code: int,
+        errmsg: str | None,
+        client_id: str,
+        *,
+        ret: int | None = None,
+        errcode: int | None = None,
     ) -> OutboundResult:
         clean = _clean(errmsg)
         now = self._clock.now_utc()
@@ -299,6 +315,8 @@ class IlinkSender:
             errmsg=clean,
             session_expired=True,
             client_id=client_id,
+            ret=ret,
+            errcode=errcode,
         )
 
     async def _failed(
@@ -311,6 +329,8 @@ class IlinkSender:
         code: int | None = None,
         errmsg: str | None = None,
         client_id: str | None = None,
+        ret: int | None = None,
+        errcode: int | None = None,
     ) -> OutboundResult:
         clean = _clean(errmsg)
         now = self._clock.now_utc()
@@ -328,7 +348,14 @@ class IlinkSender:
         await asyncio.to_thread(self._store.update_window, self._window_h, self._quota, change)
         log.warning("send_failed", kind=kind.value, reason=reason, code=code)
         return OutboundResult.failure(
-            kind, reason, code=code, errmsg=clean, http_status=status, client_id=client_id
+            kind,
+            reason,
+            code=code,
+            errmsg=clean,
+            http_status=status,
+            client_id=client_id,
+            ret=ret,
+            errcode=errcode,
         )
 
     # -------------------------------------------------------------- typing
