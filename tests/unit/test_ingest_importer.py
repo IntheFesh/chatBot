@@ -187,8 +187,11 @@ def test_message_text_is_not_readable_in_the_database_file(
     run_import(services, export)
     services.db.engine.dispose()
     blob = b"".join(path.read_bytes() for path in tmp_path.glob("data/twin.db*") if path.is_file())
-    assert len(export.texts) > 20
-    for sentence in list(export.texts)[:50]:
+    # A needle of one or two characters (3-6 bytes) can occur inside random ciphertext by chance;
+    # from four characters on (12 bytes) a chance hit is out of the question.
+    needles = [sentence for sentence in export.texts if len(sentence) >= 4][:50]
+    assert len(needles) > 20
+    for sentence in needles:
         assert sentence.encode("utf-8") not in blob
     assert export.target_username.encode() not in blob
     connection = sqlite3.connect(tmp_path / "data" / "twin.db")
