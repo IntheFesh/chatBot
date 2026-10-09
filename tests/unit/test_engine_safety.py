@@ -356,10 +356,12 @@ def test_other_talk_is_not_taken_for_that_question(talk: str) -> None:
 
 
 def test_nothing_in_the_engine_package_sends_a_picture_by_itself() -> None:
-    """R-SAFE-006: pictures leave only as library stickers, never through ``send_image``."""
+    """R-SAFE-006: pictures leave only as library stickers, through the sticker sender alone."""
     root = Path(__file__).resolve().parents[2] / "src" / "twin" / "engine"
     offenders = []
     for path in sorted(root.rglob("*.py")):
+        if path.name == "sticker_sender.py":  # the one door, guarded by its own test (09-3)
+            continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Attribute) and node.attr == "send_image":
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")

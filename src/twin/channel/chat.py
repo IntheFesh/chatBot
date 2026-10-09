@@ -1,23 +1,31 @@
-"""``twin chat --local``: the application skeleton with only the terminal channel (R-CH-011).
+"""``twin chat --local``: the whole application with the terminal as the chat (R-CH-011).
 
-The persona engine is connected in round 09.  Until then the chat command starts the real
-application (state watcher, heartbeat, job worker) with a :class:`LocalConsoleChannel` and a
-:class:`MessageHandler` that tells the user, truthfully, that nobody is answering yet and what
-the channel received.  When the engine exists it is passed as the handler; nothing else in this
-module changes.  The echo diagnostic (:mod:`twin.channel.echo`) is another handler and is never
-a reply path of the product.
+``twin chat --local`` runs the application the way ``twin run`` does - state watcher, heartbeat,
+job worker and the reply engine - with a :class:`LocalConsoleChannel` in place of WeChat (the
+schedule's daily jobs are ``twin run``'s; her state in the day plan is made on demand).  What you
+type is a message of the user, and she answers in the terminal at her pace (R-SCOPE-006: there is
+no switch that makes her answer at once).  The conversation is the real one: it is stored in
+``bot_turns`` and resumed by the next run.
+
+:func:`run_local_chat` also takes a *handler* instead of the engine; that is how the echo diagnostic
+(:mod:`twin.channel.echo`, ``twin channel echo-test --local``) checks the channel itself.  A handler
+is never a reply path of the product.
 """
 
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import Callable, Sequence
 from typing import Protocol
 
-from twin.app import ComponentHealth, ShutdownSignals, TaskSupervisor
-from twin.channel.base import Channel, InboundMessage, MessageKind
+from twin.app import ComponentHealth, HealthStatus, ShutdownSignals, TaskSupervisor
+from twin.channel.base import Channel, InboundMessage
 from twin.channel.local import LocalConsoleChannel, TextInput, TextOutput
 from twin.clock import Clock
+from twin.engine.command_port import CommandPort
+from twin.engine.component import register_engine
+from twin.engine.machine import DraftWriter
 from twin.ops.alerts import AlertSink
 from twin.ops.components import build_application
 from twin.ops.logging import get_logger
@@ -26,30 +34,32 @@ from twin.services import Services
 log = get_logger("twin.channel.chat")
 
 COMPONENT_NAME = "local_chat"
-ENGINE_NOT_CONNECTED = (
-    "The persona engine is not connected yet (it arrives in round 09): the channel receives "
-    "what you type, but nobody answers. `twin channel echo-test --local` checks the channel."
-)
+CHANNEL_COMPONENT_NAME = "local_channel"
 
 
 class MessageHandler(Protocol):
-    """What happens with each message from the user (the engine, from round 09)."""
+    """What happens with each message from the user (a diagnostic; the product uses the engine)."""
 
     async def __call__(self, message: InboundMessage, channel: Channel) -> None: ...
 
 
-class EngineNotConnected:
-    """The handler until the engine exists: it says what arrived and that no one replies."""
+class LocalChannelComponent:
+    """Starts and stops the terminal channel with the application."""
 
-    def __init__(self, output: TextOutput) -> None:
-        self._output = output
+    name = CHANNEL_COMPONENT_NAME
+    depends_on: Sequence[str] = ()
 
-    async def __call__(self, message: InboundMessage, channel: Channel) -> None:
-        if message.kind is MessageKind.IMAGE and message.media_ref is not None:
-            what = f"a picture ({message.media_ref.size} bytes) stored encrypted"
-        else:
-            what = f"{len(message.text or '')} character(s) of text"
-        self._output.write_line(f"  (received {what}; the engine is not connected, no reply)")
+    def __init__(self, channel: LocalConsoleChannel) -> None:
+        self.channel = channel
+
+    async def start(self) -> None:
+        await self.channel.start()
+
+    async def stop(self) -> None:
+        await self.channel.stop()
+
+    def health(self) -> ComponentHealth:
+        return ComponentHealth(HealthStatus.OK)
 
 
 class LocalChatComponent:
@@ -110,25 +120,46 @@ async def run_local_chat(
     quota: int | None = None,
     limit: int = 0,
     signals: bool = True,
+    pipeline: DraftWriter | None = None,
+    commands: CommandPort | None = None,
+    rng: random.Random | None = None,
+    drain: bool = False,
 ) -> int:
-    """Run the application with the terminal channel; returns how many messages were handled."""
-    application, _watcher = build_application(services)
+    """Run the application with the terminal channel; returns how many messages were handled.
+
+    Without a ``handler`` the reply engine answers (``pipeline``, ``commands`` and ``rng`` replace
+    its parts, for tests); ``drain`` makes the end of the input wait until she has answered
+    everything - the interactive chat leaves at once instead and the next run resumes.
+    """
+    application, watcher = build_application(services)
     channel = LocalConsoleChannel.from_services(
         services, input=input, output=output, window_h=window_h, quota=quota
     )
     stop = asyncio.Event()
-    component = LocalChatComponent(
-        channel,
-        handler or EngineNotConnected(output),
-        services.clock,
-        services.alerts,
-        on_finished=stop.set,
-        limit=limit,
-    )
-    application.register(component)
-    if handler is None:
-        output.write_line(ENGINE_NOT_CONNECTED)
+    counted: Callable[[], int]
+    if handler is not None:
+        chat = LocalChatComponent(
+            channel, handler, services.clock, services.alerts, on_finished=stop.set, limit=limit
+        )
+        application.register(chat)
+        counted = lambda: chat.handled  # noqa: E731
+    else:
+        application.register(LocalChannelComponent(channel))
+        engine = register_engine(
+            application,
+            services,
+            channel,
+            watcher=watcher,
+            after=(CHANNEL_COMPONENT_NAME,),
+            commands=commands,
+            pipeline=pipeline,
+            rng=rng,
+            on_finished=stop.set,
+            drain_on_end=drain,
+            restart_dispatch=False,
+        )
+        counted = lambda: engine.handled  # noqa: E731
     output.write_line("type /help for the commands; /quit leaves")
     shutdown = ShutdownSignals(asyncio.get_running_loop(), stop) if signals else None
     await application.run(stop, signals=shutdown)
-    return component.handled
+    return counted()

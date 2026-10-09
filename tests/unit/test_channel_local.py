@@ -45,7 +45,7 @@ from twin.channel.base import (
     QuoteTarget,
     RecipientNotAllowed,
 )
-from twin.channel.chat import ENGINE_NOT_CONNECTED, EngineNotConnected, run_local_chat
+from twin.channel.chat import run_local_chat
 from twin.channel.echo import EchoHandler
 from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.local import (
@@ -72,10 +72,6 @@ runner = CliRunner()
 
 def file_bytes(path: Path) -> bytes:
     return path.read_bytes()
-
-
-class NoChannel:
-    """A channel the handler under test never talks to."""
 
 
 STICKER = gif_bytes()
@@ -510,7 +506,7 @@ async def test_the_chat_component_reports_the_health_of_its_task(
 
     component = LocalChatComponent(
         console.channel,
-        EngineNotConnected(console.out),
+        EchoHandler(console.out),
         services.clock,
         services.alerts,
         on_finished=lambda: None,
@@ -598,22 +594,51 @@ async def test_the_channel_built_from_services_uses_the_configured_limits_and_al
 # ----------------------------------------------------------------- twin chat
 
 
-async def test_the_chat_application_says_the_engine_is_not_connected_and_what_it_received(
-    services: Services, tmp_path: Path
+async def test_the_chat_application_answers_through_the_engine_at_her_pace(
+    services: Services, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    picture = tmp_path / "p.png"
-    write_picture(picture)
-    inp = ScriptedInput("你好", f"/img {picture}", "/quit")
-    out = RecordingOutput()
-    handled = await asyncio.wait_for(
-        run_local_chat(services, input=inp, output=out, signals=False), timeout=20
+    from dataclasses import replace
+
+    from tests.support.clock import InstantClock
+    from tests.support.engine_harness import ScriptedWriter, make_draft
+    from twin.llm.runtime import DEEPSEEK_SECRET
+
+    services.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
+    extracted: list[list[str]] = []
+    monkeypatch.setattr(
+        "twin.engine.component.queue_bot_extraction",
+        lambda _services, turns: extracted.append([t.text for t in turns]),
     )
-    assert handled == 2
-    assert out.lines[0] == ENGINE_NOT_CONNECTED
-    assert "type /help for the commands" in out.lines[1]
-    assert "  (received 2 character(s) of text; the engine is not connected, no reply)" in out.lines
-    assert any(line.startswith("  (received a picture (") for line in out.lines)
-    assert not any(line.startswith("bot:") for line in out.lines)  # nothing answers
+    instant = replace(services, clock=InstantClock())  # her waiting costs no real time
+    writer = ScriptedWriter(make_draft("你好呀", "在做什么"))
+    inp, out = ScriptedInput("你好", close=True), RecordingOutput()
+    handled = await asyncio.wait_for(
+        run_local_chat(instant, input=inp, output=out, signals=False, pipeline=writer, drain=True),
+        timeout=60,
+    )
+    assert handled == 1
+    assert "type /help for the commands" in out.lines[0]
+    assert out.lines.count(TYPING_TEXT) >= 1  # she shows that she is typing
+    assert [line for line in out.lines if line.startswith("bot:")][:1] == ["bot: 你好呀"]
+    assert "bot: 在做什么" in out.lines
+    assert writer.contexts[0].user_text == "你好"
+    handed_over = [text for turns in extracted for text in turns]
+    conversation = ["你好", "你好呀", "在做什么"]
+    assert handed_over and handed_over == conversation[: len(handed_over)]  # once each, in order
+
+
+async def test_the_chat_application_needs_the_deepseek_key_and_says_how_to_set_it(
+    services: Services,
+) -> None:
+    from twin.config.secrets import SecretStoreError
+
+    with pytest.raises(SecretStoreError, match="twin secrets set deepseek_api_key"):
+        await asyncio.wait_for(
+            run_local_chat(
+                services, input=ScriptedInput(close=True), output=RecordingOutput(), signals=False
+            ),
+            timeout=20,
+        )
 
 
 async def test_a_handler_receives_the_messages_and_answers_through_the_channel(
@@ -626,7 +651,6 @@ async def test_a_handler_receives_the_messages_and_answers_through_the_channel(
     )
     assert handled == 2
     assert "bot: [测试]回显:one" in out.lines and "bot: [测试]回显:two" in out.lines
-    assert ENGINE_NOT_CONNECTED not in out.lines  # a handler is connected: no such notice
 
 
 async def test_one_failing_message_does_not_end_the_conversation(services: Services) -> None:
@@ -673,20 +697,6 @@ async def test_the_simulated_limits_apply_to_what_a_handler_sends(services: Serv
     assert "bot: first" in out.lines and "bot: second" not in out.lines
 
 
-async def test_the_engine_placeholder_describes_text_and_pictures_without_their_content() -> None:
-    out = RecordingOutput()
-    handler = EngineNotConnected(out)
-
-    await handler(
-        InboundMessage("m1", datetime(2026, 1, 1, tzinfo=UTC), MessageKind.TEXT, text="secret"),
-        NoChannel(),  # type: ignore[arg-type]
-    )
-    assert out.lines == [
-        "  (received 6 character(s) of text; the engine is not connected, no reply)"
-    ]
-    assert "secret" not in out.text
-
-
 # ---------------------------------------------------------------- the commands
 
 
@@ -721,13 +731,26 @@ def test_chat_needs_the_local_flag(svc: Services) -> None:
 
 
 def test_chat_local_runs_the_application_with_the_terminal_channel(svc: Services) -> None:
-    result = runner.invoke(app, ["chat", "--local"], input="hello there\n/quit\n")
+    from twin.llm.runtime import DEEPSEEK_SECRET
+
+    svc.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
+    result = runner.invoke(app, ["chat", "--local"], input="/quit\n")
     assert result.exit_code == 0, result.output
-    assert ENGINE_NOT_CONNECTED in result.output
-    assert "received 11 character(s) of text" in result.output
+    assert "type /help for the commands" in result.output
+    assert "not connected" not in result.output  # the engine is part of the application now
+    assert svc.runtime.snapshot()["engine.paused_until"] is None  # settings were seeded
+
+
+def test_chat_local_without_the_deepseek_key_says_how_to_set_it(svc: Services) -> None:
+    result = runner.invoke(app, ["chat", "--local"], input="/quit\n")
+    assert result.exit_code == 6, result.output  # the secrets exit code
+    assert "twin secrets set deepseek_api_key" in result.output
 
 
 def test_chat_local_takes_the_simulated_limits_from_options(svc: Services) -> None:
+    from twin.llm.runtime import DEEPSEEK_SECRET
+
+    svc.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
     result = runner.invoke(
         app, ["chat", "--local", "--window-h", "2", "--quota", "1"], input="/quit\n"
     )
@@ -748,7 +771,6 @@ def test_echo_test_local_answers_with_the_prefix_and_is_a_diagnostic(svc: Servic
     result = runner.invoke(app, ["channel", "echo-test", "--local", "--count", "1"], input="ping\n")
     assert result.exit_code == 0, result.output
     assert "bot: [测试]回显:ping" in result.output
-    assert ENGINE_NOT_CONNECTED not in result.output
 
 
 def test_echo_test_needs_a_bound_user_over_wechat(svc: Services) -> None:
@@ -808,12 +830,13 @@ def test_the_echo_diagnostic_is_used_by_the_diagnostic_command_and_nothing_else(
 
 
 def test_the_terminal_channel_is_not_the_product_channel() -> None:
-    # the product starts the WeChat channel (`twin run`); only the chat and echo commands use
-    # the terminal one, and `channel.kind=console` does not make `twin run` read the keyboard
+    # the product starts the WeChat channel (`twin run`); the terminal channel is for the chat and
+    # echo commands, and for `twin run` only where `channel.kind=console` asks for it
     assert importers_of("twin.channel.local") <= {
         "channel/chat.py",
         "channel/cli.py",
         "channel/echo.py",
+        "cli.py",
     }
 
 

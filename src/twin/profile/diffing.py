@@ -47,6 +47,7 @@ METRIC_LABELS: Mapping[str, str] = {
     "question_rate": "问句率",
     "burst_size": "连发条数",
     "burst_gap_s": "连发条间隔（秒）",
+    "typing_s_per_char": "打字速度（每个字的秒数）",
     "reply_latency_s": "回复延迟（秒）",
     "delayed_reply_rate": "隔了一个会话段才回复的比例",
     "closing_no_reply_rate": "对方说完结束性短句后她不回的比例",

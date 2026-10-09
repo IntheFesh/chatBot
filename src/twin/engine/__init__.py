@@ -21,7 +21,7 @@ Step 1 (stateless):
 
 Step 2 (the style model's side and the commands' port):
 
-==========================  =========================================================
+==========================  ==================================================
 :mod:`.style_prompt`        ``StylePromptBuilder``: the style model's prompt, for the running
                             bot and for the training export (ChatML of ``qwen3_nothink``,
                             ``normalize_context``, token budget, locked versions)
@@ -31,7 +31,21 @@ Step 2 (the style model's side and the commands' port):
 :mod:`.backend_select`      which backend answers: the setting, the fallback to DeepSeek when
                             the style model fails, the way back (R-SRV-004)
 :mod:`.style_runtime`       client, backends and selector wired from the services
-:mod:`.command_port`        what the engine asks of the command router (``twin.commands``)
+Step 3 (the running bot):
+
+==========================  =========================================================
+:mod:`.machine`             ``ConversationEngine``: IDLE, COLLECTING, DECIDING, GENERATING and
+                            SENDING, persisted in ``conversation_state`` and recovered per state
+:mod:`.roundstate`,         what a round keeps in ``conversation_state.data``; the queries the
+:mod:`.rounds`              machine needs about messages and replies
+:mod:`.decision`,           when she answers (free, busy, asleep, paused, retry) and how fast
+:mod:`.pacing`              she types, from her profile and her routine
+:mod:`.sender`,             the bubbles one after the other with typing; ``StickerSender`` is
+:mod:`.sticker_sender`      the only module that sends a picture
+:mod:`.fallback`            the short answer of hers for a reply that could not be made
+:mod:`.command_port`        what the engine asks of the command router (step 2)
+:mod:`.component`           ``build_engine`` and ``register_engine``: the wiring of ``twin run``
+                            and ``twin chat --local``
 ==========================  =========================================================
 
 :mod:`twin.engine.api` lists what other rounds import.

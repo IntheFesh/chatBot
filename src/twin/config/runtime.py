@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import AfterValidator, NonNegativeInt, TypeAdapter, ValidationError
+from pydantic import AfterValidator, AwareDatetime, NonNegativeInt, TypeAdapter, ValidationError
 
 from twin.clock import Clock
 from twin.config.settings import Settings
@@ -161,6 +161,14 @@ SHOW_THINKING = register_setting(
         TypeAdapter(bool),
         lambda s: False,
         "Show reasoning to the user (/显示思考)",
+    )
+)
+ENGINE_PAUSED_UNTIL = register_setting(
+    SettingSpec(
+        "engine.paused_until",
+        TypeAdapter(AwareDatetime | None),
+        lambda s: None,
+        "The bot does not reply before this UTC time (/暂停 <时长>, /恢复); empty: not paused",
     )
 )
 

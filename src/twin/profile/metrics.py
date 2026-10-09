@@ -26,6 +26,9 @@ Metric names (the same for both sides)::
     laugh_rate / laugh_length   runs of "哈" (distribution of their length)
     question_rate         questions among text messages
     burst_size / burst_gap_s    messages per burst, seconds between them (distributions)
+    typing_s_per_char     seconds of typing per character: the slope of the (median) pause before a
+                          message inside a burst against the length of that message (round 09,
+                          how long her bubbles take to appear, R-ENG-009)
     reply_latency_s / reply_latency_by_hour   seconds to answer (all day, per local hour)
     delayed_reply_rate    answers after more than the segment gap, among all answers
     closing_no_reply_rate (her only) how often a closing message of the user - a short reply that
@@ -38,7 +41,7 @@ Metric names (the same for both sides)::
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
@@ -52,6 +55,9 @@ TEXT_KINDS = frozenset({"text", "quote"})
 MAX_STICKER_ROWS = 3000
 LATENCY_BUCKET_MIN_SAMPLES = 20
 MIN_DAYS = 7
+TYPING_MAX_CHARS = 30  # longer messages share one length class
+TYPING_MIN_GAPS = 20  # pauses a length class needs before it counts for the slope
+TYPING_MIN_CLASSES = 3  # length classes needed to fit a slope at all
 
 
 def _ratio(part: float, whole: float) -> float:
@@ -60,6 +66,42 @@ def _ratio(part: float, whole: float) -> float:
 
 def _iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _median(counter: Counter[float]) -> float:
+    """The median of a histogram ``{value: count}`` (the lower middle for an even count)."""
+    half = sum(counter.values()) / 2
+    seen = 0
+    for value in sorted(counter):
+        seen += counter[value]
+        if seen >= half:
+            return value
+    return 0.0
+
+
+def typing_speed(gaps: Mapping[int, Counter[float]]) -> Scalar:
+    """Seconds per character: the weighted slope of the median pause against the length.
+
+    ``gaps`` maps the length of a message to the pauses (seconds) that came before it inside a
+    burst.  Each length class with enough pauses contributes its median pause, weighted by the
+    number of pauses; the fitted line is "pause = base + slope x length" and the slope - never
+    negative - is what typing a character costs her.  Fewer than :data:`TYPING_MIN_CLASSES`
+    usable classes: no estimate (``n`` is 0 and readers treat the metric as missing).
+    """
+    points = [
+        (float(length), _median(counter), float(sum(counter.values())))
+        for length, counter in gaps.items()
+        if sum(counter.values()) >= TYPING_MIN_GAPS
+    ]
+    if len(points) < TYPING_MIN_CLASSES:
+        return Scalar(0.0, 0)
+    weight = sum(w for _, _, w in points)
+    mean_x = sum(w * x for x, _, w in points) / weight
+    mean_y = sum(w * y for _, y, w in points) / weight
+    spread = sum(w * (x - mean_x) ** 2 for x, _, w in points)
+    covariance = sum(w * (x - mean_x) * (y - mean_y) for x, y, w in points)
+    slope = covariance / spread if spread > 0 else 0.0
+    return Scalar(max(0.0, slope), round(weight))
 
 
 @dataclass
@@ -87,6 +129,7 @@ class PartyAccumulator:
     sticker_last: dict[str, float] = field(default_factory=dict)
     burst_sizes: Counter[float] = field(default_factory=Counter)
     burst_gaps: Counter[float] = field(default_factory=Counter)
+    typing_gaps: dict[int, Counter[float]] = field(default_factory=dict)
     latency: Counter[float] = field(default_factory=Counter)
     latency_by_hour: dict[int, Counter[float]] = field(default_factory=dict)
     delayed_replies: int = 0
@@ -103,10 +146,15 @@ class PartyAccumulator:
             self.sticker_last[rec.sticker_md5] = max(
                 self.sticker_last.get(rec.sticker_md5, 0.0), rec.ts
             )
+        length = 0
         if rec.kind in TEXT_KINDS and rec.text and rec.text.strip():
-            self._feed_text(rec.text)
+            length = self._feed_text(rec.text)
         if step.intra_gap_s is not None:
-            self.burst_gaps[float(round(step.intra_gap_s))] += 1
+            pause = float(round(step.intra_gap_s))
+            self.burst_gaps[pause] += 1
+            if length > 0:
+                size = min(length, TYPING_MAX_CHARS)
+                self.typing_gaps.setdefault(size, Counter())[pause] += 1
         if step.initiation:
             self.initiations += 1
             self.initiation_hours[int(rec.stamp.minute // 60)] += 1
@@ -118,7 +166,8 @@ class PartyAccumulator:
         if step.delayed_reply:
             self.delayed_replies += 1
 
-    def _feed_text(self, text: str) -> None:
+    def _feed_text(self, text: str) -> int:
+        """Count one text message; returns its length in characters."""
         facts = analyse_text(text)
         self.text_n += 1
         self.length[float(facts.length)] += 1
@@ -142,6 +191,7 @@ class PartyAccumulator:
                 self.laugh_length[float(run)] += 1
         if facts.question:
             self.question_messages += 1
+        return int(facts.length)
 
     def close_block(self, block: Block) -> None:
         self.burst_sizes[float(block.size)] += 1
@@ -203,6 +253,7 @@ class PartyAccumulator:
             "question_rate": Scalar(_ratio(self.question_messages, text_n), text_n),
             "burst_size": Dist(EmpiricalDistribution.from_counter(self.burst_sizes, discrete=True)),
             "burst_gap_s": Dist(EmpiricalDistribution.from_counter(self.burst_gaps, discrete=True)),
+            "typing_s_per_char": typing_speed(self.typing_gaps),
             "reply_latency_s": Dist(
                 EmpiricalDistribution.from_counter(self.latency, discrete=True)
             ),

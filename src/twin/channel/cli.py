@@ -299,7 +299,7 @@ async def _echo_over_wechat(services: Services, count: int) -> None:
 def chat_command(
     local: Annotated[
         bool,
-        typer.Option("--local", help="Talk through the terminal (the only mode so far)"),
+        typer.Option("--local", help="Talk through the terminal instead of WeChat"),
     ] = False,
     window_h: Annotated[
         float | None,
@@ -310,10 +310,11 @@ def chat_command(
         typer.Option("--quota", help="Simulated message count (default: channel config)"),
     ] = None,
 ) -> None:
-    """Chat in the terminal with the application running (the engine joins in round 09).
+    """Chat with her in the terminal: the whole application runs, with the terminal as the chat.
 
-    Starts the application with only the local console channel.  Until the persona engine is
-    connected nothing answers; the command says so.
+    She answers at her own pace (waits to see whether you are done, thinks, types) - there is no
+    switch for an instant answer.  `/quit` leaves; an unfinished reply is resumed by the next run.
+    Needs the DeepSeek key (`twin secrets set deepseek_api_key`).  WeChat is served by `twin run`.
     """
     if not local:
         raise CliError(
@@ -325,6 +326,7 @@ def chat_command(
     configure_logging(
         services.paths.logs_dir, level=context.log_level, role="cli", console_level=logging.WARNING
     )
+    services.runtime.initialize()  # the runtime settings exist from the first run on (R-CFG-003)
     try:
         asyncio.run(
             run_local_chat(

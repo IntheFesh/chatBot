@@ -89,7 +89,11 @@ def test_two_processes_writing_jobs_and_settings_do_not_lose_updates(tmp_path: P
 
 
 def run_twin(
-    args: list[str], env: dict[str, str], *, timeout: float = 60
+    args: list[str],
+    env: dict[str, str],
+    *,
+    timeout: float = 60,
+    stdin_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "twin", *args],
@@ -98,6 +102,7 @@ def run_twin(
         text=True,
         timeout=timeout,
         check=False,
+        input=stdin_text,
     )
 
 
@@ -123,6 +128,13 @@ def test_running_application_notices_a_cli_change_within_two_seconds_and_stops_g
         "PYTHONUTF8": "1",
     }
     assert run_twin(["db", "upgrade"], env).returncode == 0
+    # the conversation engine needs the DeepSeek key to start (09-3); this one is only a test value
+    stored = run_twin(
+        ["secrets", "set", "deepseek_api_key", "--stdin"],
+        env,
+        stdin_text="sk-test-for-the-multiprocess-test\n",
+    )
+    assert stored.returncode == 0, stored.stderr
     log_path = home / "data" / "logs" / "twin.log"
 
     app = subprocess.Popen(
