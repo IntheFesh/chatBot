@@ -90,13 +90,28 @@ def expected_names() -> list[str]:
         "retrieval rebuild",
         "retrieval stats",
         "retrieval resplit",
+        "persona show",
+        "persona history",
+        "persona diff",
+        "persona rollback",
+        "persona edit",
+        "persona regenerate",
+        "persona status",
+        "persona templates",
+        "stickers list",
+        "stickers show",
+        "stickers tag",
+        "stickers untag",
+        "stickers disable",
+        "stickers enable",
+        "stickers tag-all",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 54 == len(expected_names())
+    assert len(names) == 69 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -151,6 +166,21 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "retrieval rebuild": CommandKind.HEAVY,
         "retrieval stats": CommandKind.READ,
         "retrieval resplit": CommandKind.HEAVY,
+        "persona show": CommandKind.READ,
+        "persona history": CommandKind.READ,
+        "persona diff": CommandKind.READ,
+        "persona rollback": CommandKind.LIGHT,
+        "persona edit": CommandKind.LIGHT,
+        "persona regenerate": CommandKind.HEAVY,
+        "persona status": CommandKind.READ,
+        "persona templates": CommandKind.READ,
+        "stickers list": CommandKind.READ,
+        "stickers show": CommandKind.READ,
+        "stickers tag": CommandKind.LIGHT,
+        "stickers untag": CommandKind.LIGHT,
+        "stickers disable": CommandKind.LIGHT,
+        "stickers enable": CommandKind.LIGHT,
+        "stickers tag-all": CommandKind.HEAVY,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

@@ -85,7 +85,11 @@ _listeners: dict[str, HoldoutListener] = {}
 
 # Modules that register a re-split listener on import; each round with data derived from the
 # pre-holdout part appends its module, so that a re-split started from anywhere reaches it.
-LISTENER_MODULES: tuple[str, ...] = ("twin.retrieval.resplit",)
+LISTENER_MODULES: tuple[str, ...] = (
+    "twin.retrieval.resplit",
+    "twin.profile.persona.hook",
+    "twin.stickers.hook",
+)
 
 
 def on_holdout_change(name: str) -> Callable[[HoldoutListener], HoldoutListener]:

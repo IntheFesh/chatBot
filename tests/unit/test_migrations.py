@@ -237,7 +237,7 @@ def test_round_05_migration_adds_the_example_windows_table(tmp_path: Path) -> No
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0004_profile_activity_tables")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0005_example_windows")
     assert table_names(path) - before == {"example_windows"}
     assert migrate.revision_history()[4] == "0005_example_windows"
     connection = sqlite3.connect(path)
@@ -268,3 +268,75 @@ def test_round_05_migration_adds_the_example_windows_table(tmp_path: Path) -> No
         connection.close()
     migrate.downgrade(path, "0004_profile_activity_tables")
     assert table_names(path) == before
+
+
+def test_round_06_migration_adds_the_persona_tables_and_the_sticker_columns(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0005_example_windows")
+    before = table_names(path)
+    connection = sqlite3.connect(path)
+    try:
+        old_columns = {row[1] for row in connection.execute("PRAGMA table_info(stickers)")}
+        connection.execute(
+            "INSERT INTO stickers (md5, status, attempts, her_uses, user_uses, created_at, "
+            "updated_at) VALUES ('aaaa', 'available', 0, 3, 1, '2026-01-01', '2026-01-01')"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    migrate.upgrade(path)
+    assert table_names(path) - before == {"persona_cards", "prompt_templates"}
+    assert migrate.revision_history()[5] == "0006_persona_sticker_tags"
+    assert migrate.head_revision() == "0006_persona_sticker_tags"
+    connection = sqlite3.connect(path)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(stickers)")}
+        assert columns - old_columns == {
+            "vision_tags", "context_tags", "manual_tags", "tags", "description", "use_cases",
+            "context_note", "tag_source", "origin", "disabled", "tagged_at", "context_tagged_at",
+            "context_cutoff_at", "context_uses", "desc_vector_id", "desc_encoding",
+        }  # fmt: skip
+        # a sticker of the earlier rounds keeps its data and gets the defaults of the new columns
+        row = connection.execute(
+            "SELECT her_uses, origin, disabled, context_uses, tags FROM stickers WHERE md5='aaaa'"
+        ).fetchone()
+        assert row == (3, "import", 0, 0, None)
+        assert {r[1] for r in connection.execute("PRAGMA table_info(persona_cards)")} >= {
+            "id", "scope", "number", "parent_id", "reason", "profile_version_id",
+            "template_version", "described_her_messages", "described_at", "content",
+            "provenance", "created_at", "updated_at",
+        }  # fmt: skip
+        card = (
+            "INSERT INTO persona_cards (id, scope, number, reason, content, created_at, updated_at)"
+            " VALUES ('{id}', '{scope}', {number}, 'generate', x'00', '2026-01-01', '2026-01-01')"
+        )
+        connection.execute(card.format(id="c1", scope="live", number=1))
+        with pytest.raises(sqlite3.IntegrityError):  # a scope of its own kind only
+            connection.execute(card.format(id="c2", scope="elsewhere", number=1))
+        with pytest.raises(sqlite3.IntegrityError):  # one number once per scope
+            connection.execute(card.format(id="c3", scope="live", number=1))
+        connection.execute(card.format(id="c4", scope="pre_holdout", number=1))
+        template = (
+            "INSERT INTO prompt_templates (id, name, version, content, content_sha256, source, "
+            "created_at, updated_at) VALUES ('{id}', 'n', {version}, x'00', 'h', '{source}', "
+            "'2026-01-01', '2026-01-01')"
+        )
+        connection.execute(template.format(id="t1", version=1, source="file"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(template.format(id="t2", version=1, source="file"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(template.format(id="t3", version=2, source="web"))
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0005_example_windows")
+    assert table_names(path) == before
+    connection = sqlite3.connect(path)
+    try:
+        assert {row[1] for row in connection.execute("PRAGMA table_info(stickers)")} == old_columns
+        assert connection.execute("SELECT her_uses FROM stickers WHERE md5='aaaa'").fetchone() == (
+            3,
+        )
+    finally:
+        connection.close()
+    migrate.upgrade(path)  # and up again
+    assert table_names(path) - before == {"persona_cards", "prompt_templates"}

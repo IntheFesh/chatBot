@@ -204,6 +204,8 @@ def test_hooks_run_after_the_import_and_are_listed_with_their_results(
         "sticker_download",
         "profile",
         "retrieval",
+        "persona",
+        "sticker_tag",
         "recorder",
     ]
     assert outcome.run.hooks["recorder"] == {

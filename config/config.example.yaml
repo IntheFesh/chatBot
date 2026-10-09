@@ -55,6 +55,12 @@ retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.1
              context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,
              slot_sigma_slots: 8, recency_weight: 0.04, recency_half_life_days: 180,
              dedup_similarity: 0.9, event_only_factor: 0.6, batch_size: 64 }   # 第 05 轮新增：除 model/device/holdout_ratio 外的 10 个键
+persona: { sample_segments: 60, batch_segments: 10, segment_max_messages: 40, regen_ratio: 0.10,
+           full_max_tokens: 1500, compact_max_tokens: 400 }   # 第 06 轮新增：persona 的 6 个键与 stickers 的 11 个键
+stickers: { tags_file: "config/lists/sticker_tags.txt", neighbors_file: "config/lists/sticker_tag_neighbors.yaml",
+            tag_job_size: 20, context_min_uses: 3, context_max_samples: 5, no_repeat_window: 10,
+            repeat_rate_threshold: 0.30, recency_half_life_days: 90, rate_window: 200,
+            rate_tolerance: 0.20, describe_timeout_s: 15 }
 memory: { daily_summary: true, fact_extraction: true }
 ops:
   backup_hour_local: 4

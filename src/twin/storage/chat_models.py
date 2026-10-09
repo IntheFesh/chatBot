@@ -26,6 +26,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    false,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -230,6 +231,44 @@ class Sticker(TimestampMixin, Base):
     user_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     first_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # round 06: how the sticker looks and what it is for (R-STK-002, R-STK-003).  The tags are
+    # words of the closed vocabulary; ``tags`` is what the selector uses: the manual tags if
+    # there are any, else the context tags merged with the visual ones.
+    vision_tags_ct: Mapped[SealedBlob | None] = encrypted_column(
+        "vision_tags", json=True, nullable=True
+    )
+    vision_tags = sealed_json(optional=True)
+    context_tags_ct: Mapped[SealedBlob | None] = encrypted_column(
+        "context_tags", json=True, nullable=True
+    )
+    context_tags = sealed_json(optional=True)
+    manual_tags_ct: Mapped[SealedBlob | None] = encrypted_column(
+        "manual_tags", json=True, nullable=True
+    )
+    manual_tags = sealed_json(optional=True)
+    tags_ct: Mapped[SealedBlob | None] = encrypted_column("tags", json=True, nullable=True)
+    tags = sealed_json(optional=True)
+    description_ct: Mapped[SealedBlob | None] = encrypted_column("description", nullable=True)
+    description = sealed_optional_text()
+    use_cases_ct: Mapped[SealedBlob | None] = encrypted_column("use_cases", nullable=True)
+    use_cases = sealed_optional_text()
+    context_note_ct: Mapped[SealedBlob | None] = encrypted_column("context_note", nullable=True)
+    context_note = sealed_optional_text()
+    tag_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="import", server_default="import"
+    )
+    disabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    tagged_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    context_tagged_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    context_cutoff_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    context_uses: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    desc_vector_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    desc_encoding: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_in_list("status", STICKER_STATUSES), name="status"),

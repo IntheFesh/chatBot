@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import datetime
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, select
 from sqlalchemy.orm import load_only
 
 from twin.ingest.events import REPRODUCIBLE_KINDS
@@ -95,4 +95,61 @@ def conversation_timeline(
     stmt = select(Message.create_time_utc, Message.is_sent, Message.kind)
     if conversation_id is not None:
         stmt = stmt.where(Message.conversation_id == conversation_id)
+    return stmt.order_by(Message.create_time_utc, Message.sort_seq, Message.id)
+
+
+def her_message_count(before: datetime | None = None) -> Select[int]:
+    """How many messages she wrote (``system`` notices excluded), optionally before a moment.
+
+    The persona card remembers this number when its description is written, and asks for a new
+    description when it has grown by ``persona.regen_ratio`` (R-IMP-011).
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Message)
+        .where(Message.is_sent.is_(False), Message.kind != "system")
+    )
+    if before is not None:
+        stmt = stmt.where(Message.create_time_utc < before)
+    return stmt
+
+
+def her_bubble_skeleton(before: datetime | None = None) -> Select[Message]:
+    """Her messages in time order with only id, time, kind and sticker MD5 (no text).
+
+    The sticker selector measures from it how often she repeats a sticker within a few bubbles
+    (R-STK-004); ``before`` limits the data to one scope (the hold-out cutoff for the
+    pre-holdout view).  ``system`` notices are not bubbles and are left out.
+    """
+    stmt = (
+        select(Message)
+        .options(
+            load_only(
+                Message.id,
+                Message.create_time_utc,
+                Message.kind,
+                Message.sticker_md5,
+            )
+        )
+        .where(Message.is_sent.is_(False), Message.kind != "system")
+    )
+    if before is not None:
+        stmt = stmt.where(Message.create_time_utc < before)
+    return stmt.order_by(Message.create_time_utc, Message.sort_seq, Message.id)
+
+
+def messages_between(
+    start: datetime, end: datetime, *, before: datetime | None = None
+) -> Select[Message]:
+    """Both sides of the conversation from ``start`` to ``end`` (both included), oldest first.
+
+    For a stretch of conversation that is shown to a model: a sampled segment of the persona
+    card (R-PERS-001) or the surroundings of a sticker use (R-STK-003).  ``before`` is a hard
+    upper bound (exclusive): nothing at or after it is returned, which is how the pre-holdout
+    scope keeps the held-out period out (R-TRN-013).  ``system`` notices are included; the
+    caller drops them.
+    """
+    stmt = select(Message).where(Message.create_time_utc >= start, Message.create_time_utc <= end)
+    if before is not None:
+        stmt = stmt.where(Message.create_time_utc < before)
     return stmt.order_by(Message.create_time_utc, Message.sort_seq, Message.id)

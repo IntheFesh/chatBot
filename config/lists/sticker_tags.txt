@@ -1,0 +1,25 @@
+# The closed emotion vocabulary of sticker tags (R-STK-003).  One tag per line; blank lines
+# and lines starting with # are ignored.  The tagging model may only answer with these words,
+# the manual command `twin stickers tag` only accepts them, and the selector asks for one of
+# them (the model writes `[表情包:<标签>]`).  "其他" is the tag for a sticker that fits none.
+开心
+大笑
+撒娇
+委屈
+难过
+生气
+无语
+震惊
+困
+晚安
+早安
+亲亲
+抱抱
+加油
+好的
+拒绝
+调皮
+害羞
+疑问
+饿
+其他

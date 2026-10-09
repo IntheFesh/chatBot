@@ -167,11 +167,25 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "import_runs": {"source_dir", "target_username", "stats", "hooks"},
         "media_assets": {"source_path", "caption"},
         "messages": {"text", "raw", "quote"},
-        "stickers": {"url", "source_path"},
+        "stickers": {
+            "url",
+            "source_path",
+            # round 06: tags, description and the notes that explain them
+            "vision_tags",
+            "context_tags",
+            "manual_tags",
+            "tags",
+            "description",
+            "use_cases",
+            "context_note",
+        },
         # round 04: the profile and routine tables join the rotation automatically
         "profile_versions": {"data_range", "metrics", "phrases", "summary_rules", "diff"},
         "activity_models": {"data_range", "model", "diff"},
         "routine_overrides": {"params", "note"},
+        # round 06: the persona card joins the rotation automatically
+        "persona_cards": {"content", "provenance"},
+        "prompt_templates": {"content"},
     }
 
 

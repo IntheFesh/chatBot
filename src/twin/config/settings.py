@@ -213,6 +213,31 @@ class RetrievalConfig(_Section):
     batch_size: int = Field(default=64, ge=1, le=4096)  # texts per encoding call
 
 
+class PersonaConfig(_Section):
+    sample_segments: int = Field(default=60, ge=1)  # conversation segments sampled (R-PERS-001)
+    batch_segments: int = Field(default=10, ge=1)  # segments per map call
+    segment_max_messages: int = Field(default=40, ge=4)  # longest stretch shown per segment
+    regen_ratio: float = Field(default=0.10, gt=0, le=1)  # new messages that re-queue the text
+    full_max_tokens: int = Field(default=1500, ge=100)  # render_full budget (R-PERS-004)
+    compact_max_tokens: int = Field(default=400, ge=50)  # render_compact budget (R-PERS-004)
+
+
+class StickersConfig(_Section):
+    tags_file: str = "config/lists/sticker_tags.txt"  # the closed emotion vocabulary (R-STK-003)
+    neighbors_file: str = "config/lists/sticker_tag_neighbors.yaml"  # nearby tags (R-STK-004)
+    tag_job_size: int = Field(default=20, ge=1)  # stickers per tagging job
+    context_min_uses: int = Field(default=3, ge=1)  # her uses before the cutoff that allow it
+    context_max_samples: int = Field(default=5, ge=1)  # uses whose surroundings are shown
+    no_repeat_window: int = Field(default=10, ge=0)  # bubbles in which a sticker is not repeated
+    repeat_rate_threshold: float = Field(
+        default=0.30, ge=0, le=1
+    )  # her repeat rate that relaxes it
+    recency_half_life_days: float = Field(default=90, gt=0)  # decay of the recency factor
+    rate_window: int = Field(default=200, ge=1)  # bubbles the sticker share is measured over
+    rate_tolerance: float = Field(default=0.20, ge=0, lt=1)  # allowed excess over her share
+    describe_timeout_s: float = Field(default=15, gt=0)  # describing a sticker the user sent
+
+
 class MemoryConfig(_Section):
     daily_summary: bool = True
     fact_extraction: bool = True
@@ -374,6 +399,8 @@ class Settings(BaseSettings):
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
     channel: ChannelConfig = Field(default_factory=ChannelConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+    persona: PersonaConfig = Field(default_factory=PersonaConfig)
+    stickers: StickersConfig = Field(default_factory=StickersConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     ops: OpsConfig = Field(default_factory=OpsConfig)
     style_model: StyleModelConfig = Field(default_factory=StyleModelConfig)

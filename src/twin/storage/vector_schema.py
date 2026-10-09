@@ -7,11 +7,13 @@ Every record written to a table must pass that table's :class:`VectorTableSchema
 rejects any column outside the schema, so a later change that tries to "cache the text next to
 the vector" fails loudly.
 
-Two schemas exist:
+Three schemas exist:
 
 ``GENERIC_SCHEMA``
-    ``id``, ``vector``, ``at``, ``kind`` - the layout of the memory (round 07) and sticker
-    description (round 06) tables;
+    ``id``, ``vector``, ``at``, ``kind`` - the layout of the memory table (round 07);
+``STICKER_SCHEMA``
+    the same four columns in a table of its own, ``sticker_descriptions`` (round 06): the vector
+    of the description of each sticker, the row id being the sticker's MD5;
 ``WINDOW_SCHEMA``
     ``window_id``, ``vector``, ``reply_at_utc``, ``local_slot``, ``day_type`` - the real-reply
     example windows of the retrieval library (R-RET, round 05).
@@ -122,6 +124,20 @@ GENERIC_SCHEMA = VectorTableSchema(
             "string",
             lambda value: value in {kind.value for kind in VectorKind},
             "a known record kind (unknown record kind refused)",
+        ),
+    ),
+)
+
+STICKER_SCHEMA = VectorTableSchema(
+    name="sticker_descriptions",
+    id_column="id",
+    time_column="at",
+    extras=(
+        ExtraColumn(
+            "kind",
+            "string",
+            lambda value: value == VectorKind.STICKER.value,
+            "the sticker record kind",
         ),
     ),
 )

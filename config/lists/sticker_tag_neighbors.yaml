@@ -1,0 +1,25 @@
+# Nearby tags (R-STK-004).  When no sticker of hers carries the tag the model asked for, the
+# selector tries these tags in the order given, nearest first, before it gives up and the line
+# is deleted.  Every key and every entry must be a tag of sticker_tags.txt (a test checks it).
+# The relation does not have to be symmetric.
+开心: [大笑, 调皮, 好的, 害羞]
+大笑: [开心, 调皮]
+撒娇: [委屈, 害羞, 亲亲, 抱抱]
+委屈: [难过, 撒娇]
+难过: [委屈, 无语]
+生气: [无语, 拒绝, 委屈]
+无语: [生气, 疑问, 震惊]
+震惊: [疑问, 无语]
+困: [晚安, 无语]
+晚安: [困, 亲亲]
+早安: [开心, 加油]
+亲亲: [抱抱, 撒娇, 害羞]
+抱抱: [亲亲, 撒娇, 委屈]
+加油: [好的, 开心]
+好的: [开心, 加油]
+拒绝: [无语, 生气]
+调皮: [开心, 大笑, 害羞]
+害羞: [撒娇, 开心, 亲亲]
+疑问: [震惊, 无语]
+饿: [撒娇, 委屈]
+其他: []

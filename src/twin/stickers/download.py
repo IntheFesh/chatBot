@@ -293,10 +293,24 @@ def queue_sticker_download(services: Services, *, retry_failed: bool = False) ->
     return QueuedDownload(job_id, pending, already_queued=False)
 
 
+def queue_tagging_of_new_files(services: Services) -> None:
+    """Plan the tagging of the stickers whose files have just arrived (R-IMP-011)."""
+    from twin.stickers.tag_jobs import plan_tagging
+
+    try:
+        plan = plan_tagging(services, batch=None)
+    except Exception as exc:  # planned again by the next import or `tag-all`
+        log.warning("sticker_tagging_not_planned", error=type(exc).__name__)
+        return
+    log.info("sticker_tagging_planned", mode=plan.mode, stickers=plan.stickers)
+
+
 @job_handler(STICKER_JOB)
 async def handle_sticker_download(ctx: JobContext) -> None:
     services = ctx.services
     if services is None:
         raise RuntimeError("sticker_download needs the services container")
     downloader = StickerDownloader(services)
-    await downloader.run(retry_failed=bool(ctx.job.payload.get("retry_failed", False)))
+    stats = await downloader.run(retry_failed=bool(ctx.job.payload.get("retry_failed", False)))
+    if stats.available:
+        await asyncio.to_thread(queue_tagging_of_new_files, services)

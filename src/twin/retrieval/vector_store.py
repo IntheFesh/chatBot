@@ -2,8 +2,9 @@
 
 Every table of the project that needs nearest-neighbour search uses this layer: the example
 windows of this round (:data:`~twin.storage.vector_schema.WINDOW_SCHEMA`), the memory of round 07
-and the sticker descriptions of round 06 (:data:`~twin.storage.vector_schema.GENERIC_SCHEMA`),
-each in its own table below ``data/vectors/``.
+(:data:`~twin.storage.vector_schema.GENERIC_SCHEMA`) and the sticker descriptions of round 06
+(:data:`~twin.storage.vector_schema.STICKER_SCHEMA`), each in its own table below
+``data/vectors/``.
 
 What a table holds is fixed by its :class:`~twin.storage.vector_schema.VectorTableSchema`: the
 id of the source row, the vector, a timestamp and a few non-sensitive columns.  Every record

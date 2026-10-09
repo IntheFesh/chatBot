@@ -48,6 +48,8 @@ HOOK_MODULES: tuple[str, ...] = (
     "twin.ingest.builtin_hooks",
     "twin.profile.hook",
     "twin.retrieval.hook",
+    "twin.profile.persona.hook",
+    "twin.stickers.hook",
 )
 
 

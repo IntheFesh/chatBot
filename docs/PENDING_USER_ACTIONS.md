@@ -225,3 +225,59 @@
 
 6. **（后续轮次）**
    - 第 09 轮把 `render_example()` 的输出放进提示词、用 `BudgetLimits.examples_k` 限制条数；第 06 轮给表情包例子接上标签（`sticker_label`）；第 07 轮的记忆向量用同一个 `EmbeddingService` 与 `VectorStore`（各自独立的表）。这些都不需要你做什么。
+
+## 第 06 轮 —— 人设卡与表情（表情代码、表情包库、打标签、选择与频率控制、识别）
+
+沙箱里没有 DeepSeek Key、真实记录和真实表情包，所以人设卡的 Map-Reduce、证据校验、表情包视觉打标签与上下文修正都只用合成数据和固定响应验证过（`respx`）；一次性批任务做到“估算费用 → 等 `twin jobs approve` → 执行”的完整逻辑。**这一轮没有向微信发任何消息。** 下面是只有你能在自己电脑上做的事。
+
+1. **前置：画像与第一版人设卡（只含统计规则，免费）**
+   - 做什么（应用没在运行时；在运行时去掉 `--foreground`，命令只入队）：
+     ```
+     uv run twin profile rebuild --foreground
+     uv run twin persona regenerate --stats-only --foreground
+     uv run twin persona show
+     ```
+   - 预期：`live` 与 `pre_holdout` 各得到一张只有 `[自动-统计规则]` 的卡（`[自动-描述]` 先是空的），末尾一行显示完整版和精简版各多少 token（上限 1500 / 400）。
+   - 导入之后这一步会自动排队（导入报告“导入后钩子”里的 `persona` 一行）；它要等同一次导入的画像重算完才会执行。
+
+2. **生成第一版人设卡的描述（要花钱，先批准）**
+   - 做什么：
+     ```
+     uv run twin persona regenerate                 # 先给费用估算（上限），live 与 pre_holdout 在同一个批次里
+     uv run twin jobs approve persona-<批次号>        # 你同意这个价格
+     uv run twin jobs run --until-idle              # 应用没在运行时；运行中的应用会自己执行
+     ```
+   - 作业只在 DeepSeek 非高峰时段执行（官方取消非高峰优惠时把 `pricing.offpeak_multiplier` 设为 1.0，就不再等待）。估算是上界（每段按最长算），实际一般更低；超出估算 20% 会暂停并告警。
+   - 请通读：`uv run twin persona show`（`--full` / `--compact` 看两种渲染，`--evidence` 看每条陈述对应的会话段编号，`--scope pre_holdout` 看训练与评估用的那张）。每一条都应当能在你们的真实对话里找到；有“编出来”的事实就记下来告诉我（程序已经丢弃了没有合法证据编号的陈述，但证据编号只能证明“这段话在样本里”，不能证明模型理解对了）。
+   - 请告诉我：两张卡的长度（token 数）、有没有明显不像她的描述。
+
+3. **手改 `[手动]` 分区**
+   - 做什么：`uv run twin persona edit`。Windows 上会用 `.md` 文件的默认程序打开解密后的临时文件（在 `data\tmp\` 里）；改好、**保存并关闭**，回到终端按回车。其他平台用 `$VISUAL` / `$EDITOR`。
+   - 只有 `[手动]` 分区的修改会被接受；改了别的分区会被拒绝并说出是哪个分区。结束后临时文件（和编辑器留下的备份、交换文件）会被覆盖再删除。如果 `.md` 的默认程序不是文本编辑器，先在 Windows 里把它改成记事本。
+   - `### 风格` 里写“称呼：宝宝”“口头禅：……”“开心时：……”这样带标签的行，裁剪时会按优先级保留；`### 事实` 是你们上线后才有的信息，只出现在 live 卡的完整版里。`### 风格` 的内容会自动复制到 pre_holdout 卡（训练与评估用）。
+   - Windows 上请再确认一次：`uv run pytest tests/unit/test_persona_edit.py -q`（含只在 Windows 上运行的 `os.startfile` 测试），以及改完后 `data\tmp\` 里没有 `persona-*` 文件。
+
+4. **给表情包打标签（要花钱，先批准）**
+   - 做什么（表情包文件要先下载完：`uv run twin stickers download --foreground` 或等应用自己下载）：
+     ```
+     uv run twin stickers tag-all                   # 估算费用；列出批次号
+     uv run twin jobs approve stickers-<批次号>
+     uv run twin jobs run --until-idle
+     uv run twin stickers list
+     ```
+   - 作业先看图（`detail: low`；是否真的发送 `detail` 取决于你跑过的 `twin llm probe` 结果，没跑过就按官方文档默认发送），给每张打 1–3 个标签（固定词表，见 `config/lists/sticker_tags.txt`）和一句描述，再对她在**留出切分点之前**用过 ≥ 3 次的表情包做上下文修正（上下文标签优先于纯视觉），最后用第 05 轮的向量服务给描述编码（第一次会下载嵌入模型，见第 05 轮第 1 条）。
+   - 请告诉我：`twin stickers list` 第一行的统计（总数、可用文件数、她用过的、已打标签的、有描述向量的）。
+   - 之后新增的表情包（导入、下载完成）会自动用日常账户打标签，不需要批准；只有“库里还没有任何标签”的第一次需要批准。
+
+5. **检查并修正标签**
+   - `uv run twin stickers list --limit 20` 看她最常用的 20 张；`uv run twin stickers show <md5 前缀>` 看画面描述、视觉标签、她的使用修正和最终标签。
+   - 不对的用 `uv run twin stickers tag <md5 前缀> 委屈 撒娇` 手改（手动标签优先于一切自动结果），`uv run twin stickers untag <md5>` 取消；不想让它被选中的用 `uv run twin stickers disable <md5>`。
+   - 请告诉我：前 20 张里错了几张（用来判断视觉打标签与上下文修正是否可靠）。
+
+6. **导入新记录或重切留出集之后**
+   - 导入：钩子会刷新统计规则；她的消息比上次生成描述时增加 ≥ 10% 时，会排一个新的描述生成批次（导入报告里有批次号和估算，等 `twin jobs approve`）。
+   - `twin retrieval resplit`：pre_holdout 的画像重算、统计规则刷新自动排队；pre_holdout 描述的重新生成要你批准（报告里有批次号）；按旧切分点做的表情包上下文修正会立刻清掉并重做（日常账户，不需批准）。
+   - `uv run twin persona status` 随时查看哪个范围的描述到期了。
+
+7. **（后续轮次）** 第 09 轮把 `render_full()` / `render_compact()`、`EmojiCodePolicy`、`StickerSelector`、`StickerRateController`、`describe_incoming_sticker` 接进回复引擎；第 11 轮通过 `write_corrections()` 写入 `[不要这样]`；第 12 轮的 `twin rollback` 会覆盖人设卡与提示词模板的回滚。这些都不需要你现在做什么。
+
