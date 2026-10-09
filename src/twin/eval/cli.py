@@ -55,6 +55,8 @@ from twin.eval.memory_test import (
     plan_memory,
     summarize,
 )
+from twin.eval.proactive_audit import audit_recent
+from twin.eval.proactive_report import print_audit
 from twin.eval.report import (
     print_blind_report,
     print_gate,
@@ -70,6 +72,8 @@ from twin.llm.runtime import build_llm_runtime
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.schedule.proactive.store import ProactiveLogStore, RatingStore
+from twin.schedule.service import time_service_for
 from twin.services import Services, get_cli_context
 from twin.stickers.catalog import StickerCatalog
 
@@ -367,13 +371,54 @@ def eval_gate(
     raise typer.Exit(outcome.exit_code)
 
 
+# --------------------------------------------------------------------- proactive
+
+
+@eval_app.command("proactive")
+@command(CommandKind.LIGHT)
+def eval_proactive(
+    days: Annotated[
+        int, typer.Option("--days", min=1, max=60, help="How many completed local days")
+    ] = 7,
+    today: Annotated[
+        bool, typer.Option("--today", help="Include today so far (a day that is not over)")
+    ] = False,
+) -> None:
+    """Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant."""
+    services = _services()
+    console = _interaction.console()
+    audit = audit_recent(
+        ProactiveLogStore(services.db, services.clock),
+        RatingStore(services.db, services.clock),
+        services.settings.proactive,
+        time_service_for(services),
+        services.clock,
+        days=days,
+        include_today=today,
+    )
+    good = audit.compliant and audit.complete
+    run = _store(services).create_run(
+        "proactive_audit",
+        status="done",
+        verdict="passed" if good else ("insufficient" if not audit.complete else "failed"),
+        params={"days": days, "first_day": str(audit.first_day), "last_day": str(audit.last_day)},
+        summary=audit.to_json(),
+    )
+    print_audit(console, audit)
+    console.print(Text(f"审计记录：{run.id}"))
+    if not good:
+        raise typer.Exit(1)
+
+
 # ------------------------------------------------------------------------- runs
 
 
 @eval_app.command("runs")
 @command(CommandKind.READ)
 def eval_runs(
-    kind: Annotated[str | None, typer.Option("--kind", help="blind, memory, style or gate")] = None,
+    kind: Annotated[
+        str | None, typer.Option("--kind", help="blind, memory, style, gate or proactive_audit")
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many to list")] = 20,
 ) -> None:
     """List the recent evaluation runs."""

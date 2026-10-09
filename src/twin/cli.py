@@ -12,6 +12,7 @@ from rich.table import Table
 
 from twin import __version__
 from twin.app import ComponentStartError, ShutdownSignals
+from twin.channel.base import Channel
 from twin.channel.chat import CHANNEL_COMPONENT_NAME, LocalChannelComponent
 from twin.channel.cli import channel_app, chat_command
 from twin.channel.component import register_channel
@@ -39,6 +40,8 @@ from twin.profile.persona.cli import persona_app
 from twin.retrieval.cli import retrieval_app
 from twin.schedule.cli import plan_app, timezone_app
 from twin.schedule.component import register_schedule
+from twin.schedule.proactive.cli import proactive_app
+from twin.schedule.proactive.component import proactive_status_for, register_proactive
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
@@ -69,6 +72,7 @@ app.add_typer(retrieval_app, name="retrieval")
 app.add_typer(memory_app, name="memory")
 app.add_typer(timezone_app, name="timezone")
 app.add_typer(plan_app, name="plan")
+app.add_typer(proactive_app, name="proactive")
 app.add_typer(train_app, name="train")
 app.add_typer(model_app, name="model")
 app.add_typer(eval_app, name="eval")
@@ -136,19 +140,21 @@ async def _serve(services: Services) -> None:
         reconnect=channel_component.reconnect if channel_component is not None else None,
     )
     if channel_component is not None:  # channel.kind "ilink": the user's WeChat conversation
-        register_engine(
+        channel: Channel = channel_component.channel
+        engine = register_engine(
             application,
             services,
-            channel_component.channel,
+            channel,
             watcher=watcher,
             after=(channel_component.name, "schedule"),
+            proactive=proactive_status_for(services, channel.session_state),
         )
     else:  # channel.kind "console": the terminal in place of WeChat
         console = LocalConsoleChannel.from_services(
             services, input=StreamInput(sys.stdin), output=StreamOutput(sys.stdout)
         )
         application.register(LocalChannelComponent(console))
-        register_engine(
+        engine = register_engine(
             application,
             services,
             console,
@@ -156,7 +162,9 @@ async def _serve(services: Services) -> None:
             after=(CHANNEL_COMPONENT_NAME, "schedule"),
             on_finished=stop.set,
             restart_dispatch=False,
+            proactive=proactive_status_for(services, console.session_state),
         )
+    register_proactive(application, services, engine)
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()
     power.start()

@@ -36,12 +36,14 @@ from twin.app import Application, ComponentHealth, TaskSupervisor
 from twin.channel.base import Channel
 from twin.commands import texts
 from twin.commands.router import CommandRouter
+from twin.commands.status import ProactiveStatus
 from twin.engine.command_port import CommandPort
 from twin.engine.dataview import LiveDataSource
 from twin.engine.fallback import ShortAnswers
 from twin.engine.feedback import FeedbackStore
 from twin.engine.history import HistoryLoader
 from twin.engine.inbound import InboundRenderer
+from twin.engine.kit import EngineKit
 from twin.engine.machine import ConversationEngine, DraftWriter
 from twin.engine.pipeline import ReplyPipeline
 from twin.engine.rounds import RoundStore
@@ -92,6 +94,7 @@ def command_port_for(
     style: StyleRuntime,
     channel: Channel,
     memory: Memory,
+    proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> CommandRouter:
     """The command router of the application (the one place that builds it).
 
@@ -106,6 +109,7 @@ def command_port_for(
         feedback=FeedbackStore(services.db, services.clock),
         memory=memory,
         session_state=channel.session_state,
+        proactive=proactive,
         extra_status=(quiet_window_line(engine),),
     )
 
@@ -120,6 +124,7 @@ def build_engine(
     commands: CommandPort | None = None,
     notifier: EmergencyNotifier | None = None,
     rng: random.Random | None = None,
+    proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> ConversationEngine:
     """The engine of this process on ``channel`` (see the module description).
 
@@ -152,9 +157,11 @@ def build_engine(
     def queue(turns: Sequence[BotMessage]) -> str | None:
         return queue_bot_extraction(services, turns)
 
+    turn_store = BotTurnStore(services.db, clock)
+    engine_stickers = StickerSender(channel, services.media)
     engine = ConversationEngine(
         channel=channel,
-        store=BotTurnStore(services.db, clock),
+        store=turn_store,
         rounds=RoundStore(services.db),
         state=state,
         history=HistoryLoader(reader, window, state),
@@ -166,7 +173,7 @@ def build_engine(
         crisis=CrisisHandler.from_services(
             services, llm.client, time_service=time, notifier=notifier
         ),
-        stickers=StickerSender(channel, services.media),
+        stickers=engine_stickers,
         lookup=catalog.get,
         short_answers=short_answers,
         runtime=services.runtime,
@@ -178,10 +185,27 @@ def build_engine(
         backends=styled.selector,
         queue_extraction=queue,
     )
+    engine.kit = EngineKit(
+        llm=llm,
+        style=styled,
+        data=source,
+        pipeline=writer,
+        channel=channel,
+        stickers=engine_stickers,
+        lookup=catalog.get,
+        store=turn_store,
+        rng=chance,
+    )
     if commands is None:
         engine.attach_commands(
             command_port_for(
-                services, engine, llm=llm, style=styled, channel=channel, memory=source.memory
+                services,
+                engine,
+                llm=llm,
+                style=styled,
+                channel=channel,
+                memory=source.memory,
+                proactive=proactive,
             )
         )
     return engine
@@ -265,6 +289,7 @@ def register_engine(
     on_finished: Callable[[], None] | None = None,
     drain_on_end: bool = False,
     restart_dispatch: bool = True,
+    proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> EngineComponent:
     """Build the engine, add it to ``application`` and subscribe it to what it must hear.
 
@@ -283,6 +308,7 @@ def register_engine(
         pipeline=pipeline,
         commands=commands,
         rng=rng,
+        proactive=proactive,
     )
     schedule_kit(services).events.subscribe(Resumed, engine.on_resumed)
     if watcher is not None:

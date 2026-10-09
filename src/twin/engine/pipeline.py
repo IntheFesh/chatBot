@@ -56,6 +56,7 @@ from twin.engine.types import (
     ReplyContext,
     ReplyDraft,
     ReplyMaterial,
+    SendLimits,
     UsageSummary,
     Violation,
 )
@@ -63,6 +64,7 @@ from twin.llm.budget import BudgetLimits
 from twin.llm.types import ChatMessage
 from twin.memory.asof import LocalMoment
 from twin.memory.blocks import MemoryBlock, MemoryQuery
+from twin.memory.recent import Turn
 from twin.memory.records import LifelineRecord
 from twin.ops.logging import get_logger
 from twin.profile.api import ProfileSnapshot
@@ -354,25 +356,86 @@ class ReplyPipeline:
         final: bool,
     ) -> PostResult:
         """Post-process one output (runs in a worker thread: it reads the sticker library)."""
-        selector = data.sticker_selector(rng)
         closing = material.closing
-        tail = [turn.text for turn in context.history[-STICKER_CONTEXT_TURNS:]]
+        return self._post(
+            raw,
+            data=data,
+            history=context.history,
+            limits=context.limits,
+            recent_stickers=context.recent_stickers,
+            style=style,
+            rng=rng,
+            final=final,
+            user_text=context.user_text,
+            allow_ai_admission=material.asks_if_ai,
+            no_reply_allowed=closing is not None and closing.no_reply_rate > 0,
+        )
+
+    def post_process(
+        self,
+        raw: str,
+        *,
+        data: ReplyDataView,
+        history: Sequence[Turn],
+        limits: SendLimits,
+        recent_stickers: Sequence[str | None] = (),
+        rng: random.Random | None = None,
+        final: bool = False,
+    ) -> PostResult:
+        """The post-processing of ``run`` for text that was not written in answer to a message.
+
+        A proactive message (round 10) is written without anything the user just said, but it goes
+        through the very same steps - AI phrases, event text, punctuation, length, stickers,
+        promises, the quota - with the same limits from her profile.  Runs in a worker thread
+        (it reads the sticker library).  ``final`` cuts a promise out instead of failing on it.
+        """
+        return self._post(
+            raw,
+            data=data,
+            history=history,
+            limits=limits,
+            recent_stickers=recent_stickers,
+            style=StyleLimits.from_profile(data.profile, bubble_cap=self._bubble_cap),
+            rng=rng or self._rng,
+            final=final,
+            user_text="",
+            allow_ai_admission=False,
+            no_reply_allowed=False,
+        )
+
+    def _post(
+        self,
+        raw: str,
+        *,
+        data: ReplyDataView,
+        history: Sequence[Turn],
+        limits: SendLimits,
+        recent_stickers: Sequence[str | None],
+        style: StyleLimits,
+        rng: random.Random,
+        final: bool,
+        user_text: str,
+        allow_ai_admission: bool,
+        no_reply_allowed: bool,
+    ) -> PostResult:
+        selector = data.sticker_selector(rng)
+        tail = [turn.text for turn in history[-STICKER_CONTEXT_TURNS:]]
         post_context = PostContext(
             style=style,
             emoji=data.emoji_codes,
             ai_phrases=self._ai_phrases,
             commitments=self._commitments,
             rng=rng,
-            allow_ai_admission=material.asks_if_ai,
-            user_text=context.user_text,
-            supports_quote=context.limits.supports_quote,
-            quota=context.limits.max_bubbles,
-            no_reply_allowed=closing is not None and closing.no_reply_rate > 0,
+            allow_ai_admission=allow_ai_admission,
+            user_text=user_text,
+            supports_quote=limits.supports_quote,
+            quota=limits.max_bubbles,
+            no_reply_allowed=no_reply_allowed,
             known_tags=self._vocabulary.tags if self._vocabulary is not None else (),
             chooser=selector.choose,
             rate=data.sticker_rate(),
-            sticker_context="\n".join([*tail, context.user_text]),
-            recent_stickers=context.recent_stickers,
+            sticker_context="\n".join([*tail, user_text]),
+            recent_stickers=recent_stickers,
             last_attempt=final,
         )
         return self._processor.process(raw, post_context)

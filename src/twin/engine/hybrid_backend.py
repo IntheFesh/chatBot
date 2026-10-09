@@ -155,6 +155,11 @@ class HybridBackend:
         self._thinking_allowed = thinking_allowed
         self._auto_rules = auto_rules
 
+    @property
+    def writer(self) -> StyleWriter:
+        """The style model's writer, for what writes from a plan of its own (round 10)."""
+        return self._writer
+
     async def generate(self, request: BackendRequest) -> BackendResult:
         context, material = request.context, request.material
         wanted = (

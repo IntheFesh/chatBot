@@ -19,7 +19,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
@@ -46,12 +46,21 @@ WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日"
 
 @dataclass(frozen=True)
 class ProactiveStatus:
-    """What the proactive scheduler (round 10) reports: today's range and how many went out."""
+    """What the proactive scheduler (round 10) reports: today's range, quota and what is next.
+
+    ``quota`` is the number of messages today's plan drew, ``next_at`` / ``next_kind`` the next
+    candidate that is fixed in advance (a greeting, a meal, goodnight, a follow-up; the random
+    ones have no time), ``blocked`` the reason the platform window would refuse a message now.
+    """
 
     low: int
     high: int
     enabled: bool
     sent_today: int
+    quota: int | None = None
+    next_at: datetime | None = None
+    next_kind: str | None = None
+    blocked: str | None = None
 
 
 @dataclass
@@ -182,14 +191,22 @@ class StatusReport:
         found = self._s.proactive() if self._s.proactive is not None else None
         if found is None:
             return [texts.STATUS_PROACTIVE_OFF]
-        return [
-            texts.STATUS_PROACTIVE.format(
-                low=found.low,
-                high=found.high,
-                on="开" if found.enabled else "关",
-                sent=found.sent_today,
+        line = texts.STATUS_PROACTIVE.format(
+            low=found.low,
+            high=found.high,
+            on="开" if found.enabled else "关",
+            sent=found.sent_today,
+        )
+        if found.quota is not None and found.enabled:
+            line += texts.STATUS_PROACTIVE_QUOTA.format(quota=found.quota)
+        if found.next_at is not None and found.next_kind:
+            zone = self._s.time.bot_timezone()
+            line += texts.STATUS_PROACTIVE_NEXT.format(
+                kind=found.next_kind, at=f"{found.next_at.astimezone(zone):%H:%M}"
             )
-        ]
+        if found.blocked:
+            line += texts.STATUS_PROACTIVE_BLOCKED.format(reason=found.blocked)
+        return [line]
 
     async def _window(self) -> list[str]:
         state = self._s.session_state() if self._s.session_state is not None else None

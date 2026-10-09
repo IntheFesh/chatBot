@@ -189,12 +189,29 @@ class ActivityConfig(_Section):
 
 
 class ProactiveConfig(_Section):
+    """Proactive messages (round 10; R-PRO-001 to R-PRO-008)."""
+
     daily_min: int = Field(default=1, ge=0)
     daily_max: int = Field(default=6, ge=0)
     min_spacing_min: int = Field(default=60, ge=0)
     max_chase: int = Field(default=1, ge=0)
     edge_of_sleep_weekly_max: int = Field(default=2, ge=0)
     tick_minutes: int = Field(default=5, ge=1)
+    user_active_min: int = Field(default=10, ge=0)  # no candidate this soon after an exchange
+    unanswered_after_min: int = Field(default=30, ge=1)  # silence that makes a message unanswered
+    meal_window_min: int = Field(
+        default=30, ge=0
+    )  # a meal message goes out +- this around her meal
+    bedtime_lead_min: list[int] = Field(default_factory=lambda: [15, 60])  # before she falls asleep
+
+    @field_validator("bedtime_lead_min")
+    @classmethod
+    def _two_increasing_leads(cls, value: list[int]) -> list[int]:
+        if len(value) != 2 or value[0] < 0 or value[0] >= value[1]:
+            raise ValueError(
+                "bedtime_lead_min needs [shortest, longest] minutes, shortest < longest"
+            )
+        return value
 
 
 class ScheduleConfig(_Section):

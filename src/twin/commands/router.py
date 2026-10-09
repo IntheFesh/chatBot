@@ -34,6 +34,7 @@ from twin.engine.backend_select import BackendSelector
 from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnStore
+from twin.memory.lifeline import LifelineStore
 from twin.memory.manage import MemoryManager
 from twin.memory.memory import Memory
 from twin.ops.logging import get_logger
@@ -130,18 +131,25 @@ class CommandRouter:
             extra=tuple(extra_status),
         )
         undo: Callable[[Sequence[str]], int] | None = None
+        unshare: Callable[[Sequence[str]], int] | None = None
         if memory is not None:
             manager = MemoryManager(memory)
+            lifeline = LifelineStore(memory)
 
             def forget(ids: Sequence[str]) -> int:
                 return len(manager.forget_derived_from(ids).deleted)
 
+            def forget_sharing(ids: Sequence[str]) -> int:
+                return lifeline.unshare(ids)
+
             undo = forget
+            unshare = forget_sharing
         deps = CommandDeps(
             sources,
             turns or BotTurnStore(services.db, services.clock),
             feedback or FeedbackStore(services.db, services.clock),
             undo,
+            unshare,
         )
         registry = CommandRegistry()
         register_builtin(registry, deps)

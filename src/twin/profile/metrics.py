@@ -35,6 +35,7 @@ Metric names (the same for both sides)::
                           asks nothing, :mod:`twin.profile.closing` - was not answered inside its
                           segment
     initiations_per_day / initiation_hour   conversations opened, and at which local hours
+    initiation_silence_s   how long the silence was that each opening broke (round 10)
     messages_per_day / message_hour   volume and its local time of day
 """
 
@@ -135,6 +136,7 @@ class PartyAccumulator:
     delayed_replies: int = 0
     initiations: int = 0
     initiation_hours: Counter[int] = field(default_factory=Counter)
+    initiation_silence: Counter[float] = field(default_factory=Counter)
     hours: Counter[int] = field(default_factory=Counter)
 
     def feed(self, rec: Rec, step: Step) -> None:
@@ -158,6 +160,8 @@ class PartyAccumulator:
         if step.initiation:
             self.initiations += 1
             self.initiation_hours[int(rec.stamp.minute // 60)] += 1
+            if step.silence_s is not None:
+                self.initiation_silence[float(round(step.silence_s))] += 1
         if step.latency_s is not None and step.answered is not None:
             seconds = float(round(step.latency_s))
             self.latency[seconds] += 1
@@ -263,6 +267,9 @@ class PartyAccumulator:
             "initiation_hour": Rates(
                 {str(h): _ratio(n, self.initiations) for h, n in self.initiation_hours.items()},
                 self.initiations,
+            ),
+            "initiation_silence_s": Dist(
+                EmpiricalDistribution.from_counter(self.initiation_silence, discrete=True)
             ),
             "messages_per_day": Scalar(_ratio(total, days), days, MIN_DAYS),
             "message_hour": Rates({str(h): _ratio(n, total) for h, n in self.hours.items()}, total),

@@ -195,6 +195,8 @@ class LifelineEvent(TimestampMixin, Base):
     invalidated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     invalidated_by: Mapped[str | None] = mapped_column(String(26), nullable=True)
     fact_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
+    shared_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    shared_reply_id: Mapped[str | None] = mapped_column(String(26), nullable=True)
 
     __table_args__ = (
         CheckConstraint(_in_list("source", LIFELINE_SOURCES), name="source"),

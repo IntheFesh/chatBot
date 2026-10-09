@@ -144,13 +144,15 @@ def expected_names() -> list[str]:
         "eval memory",
         "eval gate",
         "eval runs",
+        "eval proactive",
+        "proactive log",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 108 == len(expected_names())
+    assert len(names) == 110 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -260,6 +262,8 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "eval memory": CommandKind.LIGHT,
         "eval gate": CommandKind.LIGHT,
         "eval runs": CommandKind.READ,
+        "eval proactive": CommandKind.LIGHT,
+        "proactive log": CommandKind.READ,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

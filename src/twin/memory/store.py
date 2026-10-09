@@ -382,6 +382,40 @@ class MemoryStore:
                 removed += int(cast("CursorResult[Any]", result).rowcount or 0)
         return removed
 
+    def mark_events_shared(self, ids: Sequence[str], *, at: datetime, reply_id: str | None) -> int:
+        """Note that a proactive message told the user about these entries (round 10).
+
+        An entry that was told before keeps its first mark: throwing the later message away
+        (``/重来``) must not make her forget that an earlier one told it.
+        """
+        marked = 0
+        with self._db.transaction() as session:
+            for chunk in _chunks(list(ids)):
+                for row in session.scalars(
+                    select(LifelineEvent).where(
+                        LifelineEvent.id.in_(list(chunk)), LifelineEvent.shared_at.is_(None)
+                    )
+                ):
+                    row.shared_at = at
+                    row.shared_reply_id = reply_id
+                    marked += 1
+        return marked
+
+    def unshare_events(self, ids: Sequence[str]) -> int:
+        """Take the "already told" mark off these entries (``/重来`` threw the message away)."""
+        cleared = 0
+        with self._db.transaction() as session:
+            for chunk in _chunks(list(ids)):
+                for row in session.scalars(
+                    select(LifelineEvent).where(
+                        LifelineEvent.id.in_(list(chunk)), LifelineEvent.shared_at.is_not(None)
+                    )
+                ):
+                    row.shared_at = None
+                    row.shared_reply_id = None
+                    cleared += 1
+        return cleared
+
     def stamp_events_checked(self, ids: Sequence[str], at: datetime) -> None:
         with self._db.transaction() as session:
             for chunk in _chunks(list(ids)):

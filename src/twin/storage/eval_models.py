@@ -2,7 +2,8 @@
 
 ``eval_runs``
     one row per evaluation: a blind test (``blind``), a memory test (``memory``), a style
-    report that was kept (``style``) or the verdict of a milestone gate (``gate``).  Plain
+    report that was kept (``style``), the audit of the proactive messages
+    (``proactive_audit``, round 10) or the verdict of a milestone gate (``gate``).  Plain
     columns only - names, counts, numbers and ids, never message text: the backends compared,
     the batch ids of the one-time batches that generate the replies (R-LLM-014), the parameters
     the run was drawn with (seed, size, hold-out cut-off) and the summary numbers.  A gate row
@@ -44,7 +45,7 @@ from twin.storage.crypto import SealedBlob
 from twin.storage.models import Base, TimestampMixin
 from twin.storage.types import UTCDateTime, encrypted_column, sealed_json
 
-RUN_KINDS = ("blind", "style", "memory", "gate")
+RUN_KINDS = ("blind", "style", "memory", "gate", "proactive_audit")
 RUN_STATUSES = ("planned", "running", "done", "cancelled", "failed")
 RUN_MODES = ("holdout", "live")
 VERDICTS = ("passed", "failed", "insufficient")
@@ -62,7 +63,7 @@ class EvalRun(TimestampMixin, Base):
     __tablename__ = "eval_runs"
 
     id: Mapped[str] = mapped_column(String(26), primary_key=True)
-    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="planned")
     mode: Mapped[str | None] = mapped_column(String(8), nullable=True)
     milestone: Mapped[str | None] = mapped_column(String(2), nullable=True)

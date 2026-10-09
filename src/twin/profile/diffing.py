@@ -53,6 +53,7 @@ METRIC_LABELS: Mapping[str, str] = {
     "closing_no_reply_rate": "对方说完结束性短句后她不回的比例",
     "initiations_per_day": "每天先开口次数",
     "initiation_hour": "先开口时段分布",
+    "initiation_silence_s": "先开口前的沉默时长（秒）",
     "messages_per_day": "每天消息数",
     "message_hour": "发消息时段分布",
 }

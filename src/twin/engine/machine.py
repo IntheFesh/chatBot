@@ -92,6 +92,7 @@ from twin.engine.dataview import ReplyDataView
 from twin.engine.decision import MAX_RETRIES, Decider, Decision, Situation
 from twin.engine.fallback import ShortAnswers
 from twin.engine.history import HistoryLoader
+from twin.engine.kit import EngineKit
 from twin.engine.pacing import PacingModel
 from twin.engine.rounds import RoundStore
 from twin.engine.roundstate import Outgoing, RoundData
@@ -252,6 +253,7 @@ class ConversationEngine:
         self._progress = asyncio.Event()
         self._activity = asyncio.Event()
         self._arrival_seq = 0
+        self._arrival_signal = asyncio.Event()
         self._inflight = 0
         self._resume_pending = False
         self._pacing: PacingModel | None = None
@@ -264,6 +266,8 @@ class ConversationEngine:
         self._waiting_until: datetime | None = None
         self._driver: asyncio.Task[None] | None = None
         self._extractor: asyncio.Task[None] | None = None
+        self.kit: EngineKit | None = None
+        """The parts the engine was built from, for the proactive scheduler (``build_engine``)."""
 
     # ====================================================================== lifecycle
 
@@ -304,6 +308,38 @@ class ConversationEngine:
     def snapshot(self) -> ConversationSnapshot:
         """The stored state (a blocking read)."""
         return self._state.load()
+
+    @property
+    def arrivals(self) -> int:
+        """How many messages of the user (commands excluded) have been queued so far.
+
+        The proactive scheduler (round 10) reads it before it writes to the user and again before
+        it sends: a message that arrived in between means the user is talking, not waiting.
+        """
+        return self._arrival_seq
+
+    async def wait_for_arrival(self, since: int, seconds: float) -> bool:
+        """Sleep up to ``seconds``; ``True`` as soon as :attr:`arrivals` is no longer ``since``."""
+        end = self._clock.monotonic() + max(0.0, seconds)
+        while True:
+            if self._arrival_seq != since:
+                return True
+            remaining = end - self._clock.monotonic()
+            if remaining <= 0:
+                return False
+            self._arrival_signal.clear()
+            if self._arrival_seq != since:
+                return True
+            waker = asyncio.ensure_future(self._arrival_signal.wait())
+            sleeper = asyncio.ensure_future(self._clock.sleep(remaining))
+            tasks: set[asyncio.Future[Any]] = {waker, sleeper}
+            try:
+                await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     @property
     def pending_wake(self) -> bool:
@@ -416,6 +452,7 @@ class ConversationEngine:
 
         await self._apply(build)
         self._arrival_seq += 1
+        self._arrival_signal.set()
         self._wake.set()
         self._activity.set()
 

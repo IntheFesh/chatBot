@@ -37,6 +37,7 @@ from twin.engine.backend_select import STYLE_BACKENDS, SwitchCheck
 from twin.engine.command_port import CommandOutcome
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnStore
+from twin.memory.lifeline import shared_ids_of
 from twin.ops.logging import get_logger
 
 log = get_logger("twin.commands.builtin")
@@ -53,6 +54,8 @@ class CommandDeps:
     feedback: FeedbackStore
     undo: Callable[[Sequence[str]], int] | None = None
     """Deletes what the bot made up in the given rows of its conversation; returns how many."""
+    unshare: Callable[[Sequence[str]], int] | None = None
+    """Takes the "already told" mark off the given life line entries; returns how many."""
 
 
 def render_help(registry: CommandRegistry) -> str:
@@ -157,9 +160,15 @@ class BuiltinCommands:
         undone = 0
         if deps.undo is not None:
             undone = await asyncio.to_thread(deps.undo, [row.id for row in reply])
+        shared = shared_ids_of(reply[0].actions)
+        unshared = 0
+        if shared and deps.unshare is not None:  # a proactive message told her day (round 10)
+            unshared = await asyncio.to_thread(deps.unshare, shared)
         text = texts.REDO_DONE
         if undone:
             text += texts.REDO_UNDONE.format(count=undone)
+        if unshared:
+            text += texts.REDO_UNSHARED.format(count=unshared)
         return CommandOutcome(text, redo=True)
 
 

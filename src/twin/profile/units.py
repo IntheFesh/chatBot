@@ -75,6 +75,7 @@ class Step:
     closed: Block | None = None  # the burst this message ended, if any
     intra_gap_s: float | None = None  # gap to the previous message inside a burst
     initiation: bool = False
+    silence_s: float | None = None  # the silence an initiation broke (any side's last message)
     new_segment: bool = False
     latency_s: float | None = None  # reply latency of the burst this message starts
     answered: Rec | None = None  # the message that latency is measured from
@@ -90,6 +91,7 @@ class Boundary:
     intra_gap_s: float | None = None  # the same gap, when the message joins the open burst
     new_segment: bool = False
     initiation: bool = False
+    silence_s: float | None = None  # how long the silence was that this initiation broke
     reply_to_ts: float | None = None  # end of the burst this one answers, same segment
     delayed_reply: bool = False  # the burst answers across a segment boundary
 
@@ -127,6 +129,8 @@ class BurstSegmenter:
         if out.new_segment:
             self.segments += 1
         out.initiation = gap >= self._segment_gap
+        if out.initiation:
+            out.silence_s = gap
         if same_sender and gap <= self._burst_gap and self._open is not None:
             self._open.size += 1
             self._open.end_ts = ts
@@ -169,6 +173,7 @@ class UnitTracker:
             closed=boundary.closed,
             intra_gap_s=boundary.intra_gap_s,
             initiation=boundary.initiation,
+            silence_s=boundary.silence_s,
             new_segment=boundary.new_segment,
             delayed_reply=boundary.delayed_reply,
         )

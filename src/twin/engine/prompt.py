@@ -31,6 +31,7 @@ from twin.engine.types import ReplyContext, ReplyMaterial
 from twin.llm.layout import PromptLayout
 from twin.llm.types import ChatMessage, Role
 from twin.memory.asof import LocalMoment
+from twin.memory.recent import Turn
 from twin.profile.prompt_templates import PromptText, TemplateStore
 
 if TYPE_CHECKING:
@@ -147,10 +148,10 @@ def render_context(context: ReplyContext, material: ReplyMaterial, notes: Sequen
     return CONTEXT_OPEN + "\n" + "\n\n".join(sections) + "\n" + CONTEXT_CLOSE
 
 
-def history_messages(context: ReplyContext) -> list[ChatMessage]:
-    """The recent turns as chat messages: one per run of one side, the user first."""
+def history_messages_of(turns: Sequence[Turn]) -> list[ChatMessage]:
+    """Turns as chat messages: one per run of one side, the user first."""
     messages: list[ChatMessage] = []
-    for turn in context.history:
+    for turn in turns:
         role: Role = "user" if turn.role == "user" else "assistant"
         if messages and messages[-1]["role"] == role:
             messages[-1] = {"role": role, "content": f"{messages[-1]['content']}\n{turn.text}"}
@@ -161,13 +162,18 @@ def history_messages(context: ReplyContext) -> list[ChatMessage]:
     return messages
 
 
-def lay_out(rendered: Sequence[ChatMessage], context: ReplyContext) -> PromptLayout:
-    """A rendered template (system, last user message) and the history as a cache-friendly layout.
+def history_messages(context: ReplyContext) -> list[ChatMessage]:
+    """The recent turns of a round as chat messages: one per run of one side, the user first."""
+    return history_messages_of(context.history)
+
+
+def lay_out_turns(rendered: Sequence[ChatMessage], turns: Sequence[Turn]) -> PromptLayout:
+    """A rendered template (system, last user message) and ``turns`` as a cache-friendly layout.
 
     The history goes between the two; when it ends with a user message that message is carried
     into the last one, so that the request still alternates and ends with one user message.
     """
-    history = history_messages(context)
+    history = history_messages_of(turns)
     carried = ""
     if history and history[-1]["role"] == "user":
         carried = str(history.pop()["content"])
@@ -175,6 +181,11 @@ def lay_out(rendered: Sequence[ChatMessage], context: ReplyContext) -> PromptLay
     if carried:
         last = {"role": "user", "content": f"{carried}\n\n{last['content']}"}
     return PromptLayout.of([system, *history], [last])
+
+
+def lay_out(rendered: Sequence[ChatMessage], context: ReplyContext) -> PromptLayout:
+    """:func:`lay_out_turns` for the history of a round."""
+    return lay_out_turns(rendered, context.history)
 
 
 class PromptBuilder:

@@ -40,6 +40,9 @@ STATUS_BACKEND_FALLBACK = "后端：{requested}（风格模型不可用，眼下
 STATUS_BACKEND_BUDGET = "后端：deepseek（预算已到最后一级，眼下由风格模型回复）"
 STATUS_THINKING = "思考模式：{mode}；显示思考：{show}"
 STATUS_PROACTIVE_OFF = "主动消息：未启用（主动消息还没有上线）"
+STATUS_PROACTIVE_QUOTA = "；今天计划 {quota} 条"
+STATUS_PROACTIVE_NEXT = "；下一个已排的是{kind}，约 {at}"
+STATUS_PROACTIVE_BLOCKED = "；现在发不出去：{reason}"
 STATUS_PROACTIVE = "主动消息：每天 {low}-{high} 条（{on}），今天已发 {sent} 条"
 STATUS_WINDOW = "平台窗口：剩余 {left}，还能发 {quota} 条；可主动 {proactive} 条"
 STATUS_WINDOW_EXPIRED = "平台窗口：已过期（等你下一条消息就会重新开始）"
@@ -101,6 +104,7 @@ BACKEND_REASONS = {
 # ------------------------------------------------------------------------------ /重来
 REDO_DONE = "好的，上一轮回复已撤销，重新来一次。"
 REDO_UNDONE = "撤销了她那轮回复里编出来的 {count} 条小细节。"
+REDO_UNSHARED = "她那条消息里说过的 {count} 个生活片段恢复成还没说过。"
 REDO_SAFETY = "这一条不能重来：那是你提到难受的事时，跳出角色的关心回复，不会撤销。"
 REDO_NOTHING = "现在没有可以重来的回复（还没有回复过，或者上一轮已经撤销、正在重来）。"
 
@@ -129,3 +133,14 @@ EXAMPLES = {
     "后端": "/后端 deepseek",
     "重来": "/重来",
 }
+
+# ------------------------------------------------------------------------------ /评分
+RATING_SUMMARY = "给她最近一周的主动消息和整体体验打分（1 到 5），可以附一句备注"
+RATING_SYNTAX = "/评分 <1-5> [备注]"
+RATING_EXAMPLE = "/评分 4 晚安发得很自然"
+RATING_DONE = "记下了：{score}/5。"
+RATING_NOTE_KEPT = "备注也存好了。"
+RATING_WEEK = "最近 7 天一共评过 {count} 次，平均 {mean} 分。"
+RATING_NO_NUMBER = "没有看到分数"
+RATING_NOT_WHOLE = "分数要是整数"
+RATING_RANGE = "分数要在 1 到 5 之间"

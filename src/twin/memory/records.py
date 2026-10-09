@@ -150,10 +150,17 @@ class LifelineRecord:
     fact_id: str | None
     created_at: datetime
     updated_at: datetime
+    shared_at: datetime | None = None
+    shared_reply_id: str | None = None
 
     @property
     def active(self) -> bool:
         return self.status == "active"
+
+    @property
+    def shared(self) -> bool:
+        """Whether a proactive message already told the user about this (round 10)."""
+        return self.shared_at is not None
 
     def line(self) -> str:
         """One line for the prompt: the time span, what she does, where, in which mood."""
@@ -189,6 +196,8 @@ class LifelineRecord:
             fact_id=row.fact_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            shared_at=row.shared_at,
+            shared_reply_id=row.shared_reply_id,
         )
 
 

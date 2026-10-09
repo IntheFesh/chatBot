@@ -18,10 +18,11 @@ that name that day, her usual sleep.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from itertools import pairwise
+from typing import Any
 
 from twin.memory.localdate import MemoryClock
 from twin.memory.memory import Memory
@@ -36,6 +37,8 @@ from twin.schedule.time_service import PlanUnavailableError, TimeService
 
 log = get_logger("twin.memory.lifeline")
 
+SHARED_STEP = "lifeline_shared"
+"""The step name of the reply action that notes which entries a message told the user about."""
 SLEEP_WORDS = ("睡", "休息", "起床", "午觉", "补觉", "小憩", "打盹", "赖床")
 MAX_RECENT_DAYS = 14
 
@@ -79,6 +82,22 @@ class LifelineContext:
     facts_for_the_day: tuple[FactRecord, ...] = ()
     sleep: tuple[str, str] | None = None  # usual (fall asleep, wake) clock times of that day type
     notes: tuple[str, ...] = field(default_factory=tuple)
+
+
+def shared_ids_of(actions: Iterable[Mapping[str, Any]]) -> list[str]:
+    """The life line entries a reply told the user about, from the actions stored with it.
+
+    A proactive message writes ``{"step": "lifeline_shared", "ids": [...]}`` among the actions of
+    its reply in ``bot_turns``; ``/重来`` reads them back here to take the marks off again.
+    """
+    found: list[str] = []
+    for action in actions:
+        if action.get("step") != SHARED_STEP:
+            continue
+        ids = action.get("ids")
+        if isinstance(ids, list):
+            found.extend(str(item) for item in ids if item)
+    return list(dict.fromkeys(found))
 
 
 def minutes_of(clock: str | None) -> int | None:
@@ -156,6 +175,33 @@ class LifelineStore:
         self._store.mark_bot_online(self._memory.services.clock.now_utc())
         self._memory.refresh()
         return stored
+
+    def mark_shared(
+        self, event_ids: Sequence[str], *, at: datetime | None = None, reply_id: str | None = None
+    ) -> int:
+        """Note that a proactive message told the user about these entries (round 10).
+
+        ``reply_id`` is the reply of the bot's conversation that did it, so ``/重来`` can take the
+        mark off again (:meth:`unshare`).  Returns how many entries were marked.
+        """
+        if not event_ids:
+            return 0
+        moment = at or self._memory.services.clock.now_utc()
+        marked = self._store.mark_events_shared(event_ids, at=moment, reply_id=reply_id)
+        self._memory.refresh()
+        return marked
+
+    def unshare(self, event_ids: Sequence[str]) -> int:
+        """Take the "already told" mark off these entries; returns how many had one."""
+        if not event_ids:
+            return 0
+        cleared = self._store.unshare_events(event_ids)
+        self._memory.refresh()
+        return cleared
+
+    def unshared(self, day: date) -> list[LifelineRecord]:
+        """The entries of ``day`` that still count and that no proactive message has told yet."""
+        return [event for event in self.day(day) if not event.shared]
 
     def invalidate(self, event_id: str, *, by_fact: str | None = None) -> bool:
         """Mark an entry as contradicted by something real (it is no longer shown)."""

@@ -96,3 +96,20 @@ def test_the_segmenter_uses_bare_times_and_senders() -> None:
 def test_burst_gap_is_configurable_and_inclusive(gap: float, expected: bool) -> None:
     steps, _ = run([(0, True), (gap, True)])
     assert steps[1].new_block is expected
+
+
+def test_an_initiation_knows_how_long_the_silence_was_that_it_broke() -> None:
+    steps, _ = run([(0, False), (10, True), (10 + 5400, True), (10 + 5400 + 30, False)])
+    assert steps[0].silence_s is None and steps[1].silence_s is None  # inside one segment
+    assert steps[2].initiation and steps[2].silence_s == 5400  # her first message, 90 minutes on
+    assert steps[3].silence_s is None and not steps[3].initiation
+
+
+def test_the_silence_is_measured_from_the_last_message_of_either_side() -> None:
+    steps, _ = run([(0, True), (100, False), (100 + 7200, False)])
+    assert steps[2].initiation and steps[2].silence_s == 7200  # his message after two hours
+
+
+def test_the_silence_of_a_message_at_the_exact_segment_gap_counts() -> None:
+    steps, _ = run([(0, False), (3600, True)])
+    assert steps[1].initiation and steps[1].silence_s == 3600

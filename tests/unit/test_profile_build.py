@@ -104,6 +104,16 @@ def test_two_windows_are_kept_and_blended_by_the_recency_weight(services: Servic
     assert profile.metrics.window_info("full")["days"] >= 42
 
 
+def test_the_silences_her_openings_broke_are_a_distribution_of_hours(services: Services) -> None:
+    truth, _ = built(services)
+    profile = load_profile(services, "live")
+    assert profile is not None
+    silence = profile.metrics.distribution("her", "initiation_silence_s")
+    assert silence is not None and silence.n > 0
+    assert silence.median() >= services.settings.profile.segment_gap_min * 60
+    assert silence.n <= truth.her_initiations
+
+
 def test_a_thin_recent_window_is_ignored(services: Services) -> None:
     built(services)
     services.settings.profile.recent_days = 1

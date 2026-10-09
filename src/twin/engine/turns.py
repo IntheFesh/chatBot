@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import Select, case, func, select, update
 from sqlalchemy.orm import Session
 
 from twin.clock import Clock, ensure_aware
@@ -395,6 +395,23 @@ class BotTurnStore:
         with self._db.session() as session:
             found = session.scalar(stmt)
         return ensure_aware(found) if found is not None else None
+
+    def last_message_times(self) -> tuple[datetime | None, datetime | None]:
+        """The newest message of the user and the newest of either side, in one read."""
+        stmt = select(
+            func.max(case((BotTurn.direction == "in", BotTurn.at), else_=None)),
+            func.max(BotTurn.at),
+        ).where(
+            BotTurn.is_command.is_(False),
+            BotTurn.rejected_at.is_(None),
+            BotTurn.kind.in_(CONVERSATION_KINDS),
+        )
+        with self._db.session() as session:
+            inbound, newest = session.execute(stmt).one()
+        return (
+            ensure_aware(inbound) if inbound is not None else None,
+            ensure_aware(newest) if newest is not None else None,
+        )
 
     def count(self, *, direction: str | None = None) -> int:
         stmt = select(func.count()).select_from(BotTurn)

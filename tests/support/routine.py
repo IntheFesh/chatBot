@@ -28,7 +28,9 @@ from twin.profile.distribution import BucketedDistribution, EmpiricalDistributio
 from twin.schedule.plan_builder import QuotaRange
 from twin.schedule.planner import DailyPlanner
 from twin.schedule.service import ScheduleKit, build_kit
+from twin.schedule.store import SALT_KEY
 from twin.services import Services
+from twin.storage.settings_store import put_setting
 
 SPREAD = {-30.0: 1, -15.0: 3, 0.0: 8, 15.0: 3, 30.0: 1}  # minutes around the median
 
@@ -151,7 +153,11 @@ class Rig:
         *,
         zone: str | None = None,
         quota: QuotaRange | None = None,
+        salt: str | None = None,
     ) -> Rig:
+        if salt is not None:  # the same plan seeds on every run
+            with services.db.transaction(bump_state=False) as session:
+                put_setting(session, SALT_KEY, salt, clock=clock, by="test", record_history=False)
         holder: dict[str, ActivityModel | None] = {"model": model}
         range_holder = {"quota": quota or QuotaRange(1, 6)}
         if zone is not None:
