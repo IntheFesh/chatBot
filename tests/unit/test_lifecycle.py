@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from tests.support.clock import ManualClock
-from tests.support.credentials import MemoryCredentials  # noqa: F401  (keeps support import graph honest)
 from tests.support.waiting import wait_until
 from tests.support.win32 import FakeWin32
 from twin.app import (
@@ -262,8 +261,9 @@ async def test_restart_on_exit_and_normal_completion(clock: ManualClock) -> None
     await clock.advance(10)
     assert once == ["ran"]
     supervisor.spawn("once", one_shot)  # finished tasks may be spawned again
+    await clock.settle()
+    assert once == ["ran", "ran"]
     await supervisor.stop()
-    assert once == ["ran", "ran"] or once == ["ran"]
 
 
 async def test_spawning_a_running_task_twice_is_an_error(clock: ManualClock) -> None:
