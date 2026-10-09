@@ -78,6 +78,7 @@ from twin.llm.reliability import (
     classify,
     safe_message,
 )
+from twin.llm.scope import current_call_scope
 from twin.llm.tokens import TokenEstimator
 from twin.llm.types import (
     DAILY,
@@ -444,7 +445,13 @@ class DeepSeekClient:
         are recorded separately and never degrade the daily budget.  ``capabilities`` overrides
         what the M0 probe stored (used by the probe itself).
         """
-        purpose = Purpose(purpose)
+        requested = Purpose(purpose)
+        purpose = requested
+        scope = current_call_scope()
+        if (
+            scope is not None
+        ):  # booked as evaluation / a one-time batch; the model stays the caller's
+            purpose, tag = scope.purpose, scope.tag
         caps = capabilities or self._capabilities()
         layout = messages if isinstance(messages, PromptLayout) else None
         raw_messages: Sequence[ChatMessage] = (
@@ -467,7 +474,7 @@ class DeepSeekClient:
         if estimate_encoded_bytes(prepared) > MAX_TOTAL_IMAGE_BYTES:
             raise LlmConfigError("the images of one request may total at most 64 MiB")
 
-        chosen = model or self.model_for(purpose, has_images=total_images > 0)
+        chosen = model or self.model_for(requested, has_images=total_images > 0)
         self._pricing.price_for(chosen)  # refuse early if the cost could not be computed
         if total_images and self._pricing.resolve(chosen) not in VISION_MODELS:
             raise LlmConfigError(f"model {chosen!r} cannot read images")

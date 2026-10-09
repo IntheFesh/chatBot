@@ -60,6 +60,7 @@ from twin.engine.types import (
     Violation,
 )
 from twin.llm.budget import BudgetLimits
+from twin.llm.types import ChatMessage
 from twin.memory.asof import LocalMoment
 from twin.memory.blocks import MemoryBlock, MemoryQuery
 from twin.memory.records import LifelineRecord
@@ -258,6 +259,17 @@ class ReplyPipeline:
             notes = self._notes(post.violations)
             log.info("reply_violations", attempt=position, kinds=state.attempt_kinds[-1])
         return self._failed(context, state, last, reason, started, gathered)
+
+    async def preview(self, context: ReplyContext, data: ReplyDataView) -> list[ChatMessage]:
+        """The prompt the DeepSeek backend would send for this round (no call is made).
+
+        The evaluation prices a one-time batch from it (R-LLM-014): the very prompt the run uses.
+        """
+        material, _ = await self._gather(context, data)
+        deepseek = self._backends[FALLBACK_BACKEND]
+        if not isinstance(deepseek, DeepSeekBackend):
+            raise TypeError("the fallback backend of the pipeline is not the DeepSeek backend")
+        return deepseek.preview(BackendRequest(context, data, material))
 
     # --------------------------------------------------------------------- material
 

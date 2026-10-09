@@ -517,6 +517,8 @@ HANDLER_MODULES: tuple[str, ...] = (
     "twin.engine.turns",  # registers the reader of the bot's conversation (R-MEM-001)
     "twin.training.export_job",  # the training-set export (round 13b)
     "twin.training.plans",  # the plans of the hybrid share of the training set (round 13b)
+    "twin.eval.blind",  # the generation of a blind test's replies (round 09b)
+    "twin.eval.memory_test",  # the questions of the memory test (round 09b)
 )
 
 
