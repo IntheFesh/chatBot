@@ -21,7 +21,7 @@ Later rounds add commands with :meth:`CommandRouter.register`.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
 from twin.channel.base import SessionState
@@ -106,14 +106,14 @@ class CommandRouter:
         session_state: Callable[[], SessionState | None] | None = None,
         proactive: Callable[[], ProactiveStatus | None] | None = None,
         retrain: Callable[[], str | None] | None = None,
-        extra_status: Sequence[Callable[[], str | None]] = (),
+        extra_status: Sequence[Callable[[], str | Awaitable[str | None] | None]] = (),
     ) -> CommandRouter:
         """The router of the running application with the commands of round 09 registered.
 
         ``memory`` lets ``/重来`` delete what the thrown-away reply made up; ``session_state`` is
         the channel's (``channel.session_state``) for the platform window of ``/状态``;
         ``proactive`` and ``retrain`` are the sources of later rounds (without them ``/状态``
-        says so).
+        says so); ``extra_status`` are further lines of ``/状态`` (plain or coroutine functions).
         """
         sources = StatusSources(
             runtime=services.runtime,

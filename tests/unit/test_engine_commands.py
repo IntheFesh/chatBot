@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from datetime import timedelta
 from typing import Any
@@ -14,6 +15,7 @@ from tests.support.clock import ManualClock
 from tests.support.engine_extras import ScriptedCommands
 from tests.support.engine_harness import (
     Harness,
+    bubbles_written,
     build_harness,
     make_draft,
     run_to_idle,
@@ -242,5 +244,124 @@ async def test_redo_while_a_round_is_under_way_is_not_stacked_on_it(
         before: ConversationSnapshot = harness.engine.snapshot()
         await harness.message("/重来")
         assert harness.engine.snapshot().pending == before.pending  # nothing was added to it
+    finally:
+        await harness.engine.stop()
+
+
+async def test_redo_while_she_is_still_sending_drops_the_unsent_bubbles_and_writes_again(
+    services: Services, clock: ManualClock
+) -> None:
+    commands = ScriptedCommands(重来=CommandOutcome("⚙️ 重来", redo=True))
+    harness = build_harness(services, clock, commands=commands)
+    commands.before = reject_latest(harness)
+    await harness.engine.start()
+    try:
+        harness.writer.add(make_draft("第一条", "第二条", "第三条"), make_draft("新的"))
+        await harness.message("给我讲个故事")
+        await run_to_idle(harness.engine, clock, until=bubbles_written(harness.engine, 1))
+        assert harness.engine.snapshot().state == "SENDING"
+        await harness.message("/重来")  # she is about to type the second bubble
+        await run_to_idle(harness.engine, clock)
+        assert harness.channel.texts == ["第一条", "⚙️ 重来", "新的"]  # the other two never go out
+        stored = rows(harness)
+        first = next(row for row in stored if row.text == "第一条")
+        assert first.rejected_at is not None
+        assert {"step": "send_stopped_by_redo", "count": 2} in (first.actions or [])
+        assert next(row for row in stored if row.text == "新的").rejected_at is None
+        assert harness.writer.contexts[1].user_text == "给我讲个故事"
+        assert harness.writer.contexts[1].already_said == ()  # a new reply, not a continuation
+        assert harness.engine.snapshot().state == "IDLE"
+    finally:
+        await harness.engine.stop()
+
+
+async def test_a_bubble_that_was_on_its_way_when_the_redo_came_is_thrown_away_with_the_reply(
+    services: Services, clock: ManualClock
+) -> None:
+    commands = ScriptedCommands(重来=CommandOutcome("⚙️ 重来", redo=True))
+    harness = build_harness(services, clock, commands=commands)
+    commands.before = reject_latest(harness)
+    await harness.engine.start()
+    try:
+        harness.writer.add(make_draft("甲", "乙", "丙"), make_draft("新的"))
+        await harness.message("数数")
+        await run_to_idle(harness.engine, clock, until=bubbles_written(harness.engine, 1))
+        sent: list[str] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        def second_bubble_leaves(out: Any) -> None:
+            if out.kind == "text" and out.text == "乙" and not sent:
+                sent.append(out.text)
+                tasks.append(asyncio.get_running_loop().create_task(harness.message("/重来")))
+
+        harness.channel.on_send = second_bubble_leaves  # the redo lands while "乙" is being sent
+        await run_to_idle(harness.engine, clock, until=lambda: bool(sent))
+        await asyncio.gather(*tasks)
+        await run_to_idle(harness.engine, clock)
+        assert "丙" not in harness.channel.texts and "新的" in harness.channel.texts
+        replies = [row for row in rows(harness) if row.direction == "out" and not row.is_command]
+        assert [(row.text, row.rejected_at is not None) for row in replies] == [
+            ("甲", True),
+            ("乙", True),
+            ("新的", False),
+        ]
+    finally:
+        await harness.engine.stop()
+
+
+async def test_a_redo_with_a_new_message_already_queued_leaves_it_to_the_interruption(
+    services: Services, clock: ManualClock
+) -> None:
+    commands = ScriptedCommands(重来=CommandOutcome("⚙️ 重来", redo=True))
+    harness = build_harness(services, clock, commands=commands)
+    commands.before = reject_latest(harness)
+    await harness.engine.start()
+    try:
+        harness.writer.add(make_draft("第一条", "第二条"), make_draft("接着说"))
+        await harness.message("讲个故事")
+        await run_to_idle(harness.engine, clock, until=bubbles_written(harness.engine, 1))
+        await harness.message("等等")  # queued: the sending is interrupted by it ...
+        await harness.message("/重来")  # ... so the redo has no round of its own to start
+        await run_to_idle(harness.engine, clock)
+        assert harness.channel.texts[-1] == "接着说"
+        assert [c.user_text for c in harness.writer.contexts] == ["讲个故事", "等等"]
+    finally:
+        await harness.engine.stop()
+
+
+async def test_a_redo_between_a_bubble_going_out_and_being_noted_still_stops_the_reply(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first bubble is out and its row is written, the state does not know the reply yet."""
+    commands = ScriptedCommands(重来=CommandOutcome("⚙️ 重来", redo=True))
+    harness = build_harness(services, clock, commands=commands)
+    commands.before = reject_latest(harness)
+    await harness.engine.start()
+    try:
+        entered, release = threading.Event(), threading.Event()
+        real = harness.state.update
+
+        def held(**fields: Any) -> Any:
+            if "sent" in fields and not entered.is_set():  # the note of the first bubble
+                entered.set()
+                assert release.wait(10), "the test never let the write go on"
+            return real(**fields)
+
+        monkeypatch.setattr(harness.state, "update", held)
+        harness.writer.add(make_draft("甲", "乙", "丙"), make_draft("新的"))
+        await harness.message("数数")
+        await run_to_idle(harness.engine, clock, until=entered.is_set)
+        assert harness.channel.texts == ["甲"] and harness.engine.snapshot().sent == ()
+        redo = asyncio.create_task(harness.message("/重来"))
+        await wait_until(lambda: harness.engine._thrown_away is not None)  # type: ignore[attr-defined]
+        release.set()
+        await redo
+        await run_to_idle(harness.engine, clock)
+        assert harness.channel.texts == ["甲", "⚙️ 重来", "新的"]  # "乙" and "丙" never go out
+        replies = [row for row in rows(harness) if row.direction == "out" and not row.is_command]
+        assert [(row.text, row.rejected_at is not None) for row in replies] == [
+            ("甲", True),
+            ("新的", False),
+        ]
     finally:
         await harness.engine.stop()

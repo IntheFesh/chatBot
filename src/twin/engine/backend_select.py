@@ -36,7 +36,7 @@ healthy model.  A model that was activated with ``--force`` does not count there
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -348,7 +348,7 @@ class BackendMonitorComponent:
     """
 
     name = "backend_monitor"
-    depends_on: tuple[str, ...] = ()
+    depends_on: Sequence[str] = ()
 
     def __init__(
         self,

@@ -16,18 +16,17 @@ from tests.support.engine_harness import (
     make_draft,
     run_to_idle,
 )
+from tests.support.style_models import ScriptedStyleClient
 from tests.support.waiting import wait_until
 from twin.app import Application, HealthStatus
+from twin.commands.router import CommandRouter
 from twin.config.runtime import SHOW_THINKING
 from twin.config.secrets import SecretStoreError
+from twin.engine.backend_select import BackendMonitorComponent, BackendSelector
 from twin.engine.command_port import CommandOutcome
-from twin.engine.component import (
-    EngineComponent,
-    build_engine,
-    command_port_for,
-    register_engine,
-)
-from twin.llm.runtime import DEEPSEEK_SECRET
+from twin.engine.component import EngineComponent, build_engine, register_engine
+from twin.engine.style_runtime import StyleRuntime
+from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
 from twin.ops.state_watch import StateWatcher
 from twin.schedule.events import Resumed
 from twin.schedule.service import schedule_kit
@@ -191,14 +190,16 @@ async def test_the_engine_listens_to_the_schedule_and_to_the_state_watcher(
     assert engine._pacing is None  # type: ignore[attr-defined]  # a changed setting: read again
 
 
-async def test_a_command_router_can_be_attached_after_the_engine_is_built(
+async def test_the_real_command_router_is_attached_and_can_be_replaced_after_the_build(
     keyed: Services, clock: ManualClock
 ) -> None:
     channel = ScriptedChannel(clock)
     application = Application()
     component = register_engine(application, keyed, channel, pipeline=ScriptedWriter())
-    assert command_port_for(keyed, component.engine) is None  # no router is attached by default
+    assert isinstance(component.router, CommandRouter)  # attached by default (round 09-4)
+    assert component.engine.commands is component.router
     component.engine.attach_commands(ScriptedCommands(帮助=CommandOutcome("⚙️ 帮助")))
+    assert component.router is None  # another port is in use now
     await component.start()
     try:
         channel.push("/帮助")
@@ -223,3 +224,31 @@ async def test_a_router_given_at_registration_is_used_as_it_is(
         assert asyncio.get_running_loop() is not None
     finally:
         await component.stop()
+
+
+async def test_the_application_gets_the_style_models_monitor_and_the_budget_hears_the_selector(
+    keyed: Services, clock: ManualClock
+) -> None:
+    channel = ScriptedChannel(clock)
+    application = Application()
+    llm = build_llm_runtime(keyed)
+    style = StyleRuntime.from_services(keyed, llm, client=ScriptedStyleClient())
+    try:
+        component = register_engine(
+            application, keyed, channel, runtime=llm, style=style, pipeline=ScriptedWriter()
+        )
+        assert isinstance(application.components["backend_monitor"], BackendMonitorComponent)
+        assert llm.budget._style is style.selector  # type: ignore[attr-defined]
+        assert component.engine._backends is style.selector  # type: ignore[attr-defined]
+    finally:
+        await llm.client.aclose()
+
+
+async def test_an_engine_built_without_a_style_runtime_makes_one_from_the_settings(
+    keyed: Services, clock: ManualClock
+) -> None:
+    engine = build_engine(keyed, ScriptedChannel(clock), pipeline=ScriptedWriter())
+    selector = engine._backends  # type: ignore[attr-defined]
+    assert isinstance(selector, BackendSelector)
+    assert (await selector.choose()).name == "deepseek"  # nothing is registered: no style model
+    assert isinstance(engine.commands, CommandRouter)

@@ -297,6 +297,7 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
     monkeypatch.setattr(Application, "run", record)
     await _serve(services)
     assert seen == [
+        "backend_monitor",  # the style model's health, looked at while nobody talks (round 09)
         "channel",
         "channel_probe",
         "engine",

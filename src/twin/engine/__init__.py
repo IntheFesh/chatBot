@@ -45,7 +45,8 @@ Step 3 (the running bot):
 :mod:`.fallback`            the short answer of hers for a reply that could not be made
 :mod:`.command_port`        what the engine asks of the command router (step 2)
 :mod:`.component`           ``build_engine`` and ``register_engine``: the wiring of ``twin run``
-                            and ``twin chat --local``
+                            and ``twin chat --local`` - the engine, the style model's backends and
+                            selector, the command router (round 09 step 4)
 ==========================  =========================================================
 
 :mod:`twin.engine.api` lists what other rounds import.
