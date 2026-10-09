@@ -73,9 +73,7 @@ def test_locks_held_elsewhere_lists_the_busy_ones(tmp_path: Path) -> None:
     assert locks_held_elsewhere(tmp_path, (LOCK_RUN,)) == []
     run = InstanceLock(LOCK_RUN, locks_dir=tmp_path)
     assert run.acquire()
-    assert locks_held_elsewhere(tmp_path) == list(ALL_LOCKS)[:2] or set(
-        locks_held_elsewhere(tmp_path)
-    ) == {LOCK_RUN, LOCK_SUPERVISOR}
+    assert set(locks_held_elsewhere(tmp_path)) == {LOCK_RUN, LOCK_SUPERVISOR} == set(ALL_LOCKS)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX file lock in a child process")
@@ -113,8 +111,9 @@ def test_lock_is_held_across_processes_and_freed_when_the_holder_dies(tmp_path: 
 
 def test_windows_backend_uses_named_mutexes_and_detects_existing_ones(tmp_path: Path) -> None:
     registry: dict[str, int] = {}
-    one = InstanceLock(LOCK_RUN, locks_dir=tmp_path, platform="win32", win32=FakeWin32(registry))
-    two = InstanceLock(LOCK_RUN, locks_dir=tmp_path, platform="win32", win32=FakeWin32(registry))
+    locks = tmp_path / "locks"
+    one = InstanceLock(LOCK_RUN, locks_dir=locks, platform="win32", win32=FakeWin32(registry))
+    two = InstanceLock(LOCK_RUN, locks_dir=locks, platform="win32", win32=FakeWin32(registry))
     assert one.acquire() is True
     assert two.acquire() is False  # CreateMutexW reported ERROR_ALREADY_EXISTS
     assert registry == {"Local\\wechat-twin-run": 1}  # the probing handle was closed again
@@ -123,7 +122,7 @@ def test_windows_backend_uses_named_mutexes_and_detects_existing_ones(tmp_path: 
     assert registry == {"Local\\wechat-twin-run": 0}
     assert two.acquire() is True
     two.release()
-    assert not list(tmp_path.iterdir())  # no lock file on Windows
+    assert not locks.exists()  # no lock file on Windows
 
 
 def test_windows_mutex_names_differ_per_lock(tmp_path: Path) -> None:
