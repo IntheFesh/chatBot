@@ -370,3 +370,37 @@
    - 请告诉我：windows-latest CI 上 `tests/unit/test_power_events.py::test_a_real_hidden_window_receives_a_broadcast_message` 第一次真跑的结果；失败请把输出发给我。
 
 9. **（后续轮次）** 第 09 轮的引擎读 `her_state()` 决定回复延迟（忙碌段用计划里的延迟分布引用）、睡着时不回，并处理中断期间到达的消息；第 10 轮订阅 `CandidatesExpired`（作废早于现在的候选）、按 `plan.quota.for_plan` 发主动消息、发起床问候前问 `planner.greeting_decision()`、发出后调 `record_wake_greeting`；第 11 轮的 `/时区`、`/主动` 调 `ScheduleComponent.switch_timezone` 和 `proactive.enabled`。这些都不需要你现在做什么。
+
+
+## 第 13 轮（13a）—— 训练基础设施（档位模板、加密训练包、AutoDL 脚本、asyncssh 编排、训练表与模型登记）
+
+> 13a 只做基础设施，数据集导出（`twin train export`）、防泄露导出测试、规划合成、重训提醒和 token 级模板一致性测试在 13b（第 09 轮之后）。下面是你自己环境里要做的事；沙箱没有 GPU、没有 AutoDL 实例，所以脚本里依赖真实硬件的部分（真的训练、合并、量化、vLLM）还没有跑过。
+
+1. **租一台实例并扩容数据盘**
+   - 在 AutoDL 租 RTX 5090（32GB）或 RTX PRO 6000（96GB）。镜像选 Python 3.11 或更新（建议 3.12）、PyTorch 带 CUDA 12.8 的（脚本会检查：Blackwell 上 `torch >= 2.7` 且为 CUDA 12.8 构建、`torch.cuda.get_arch_list()` 含 `sm_120`，不满足就从 cu128 索引重装；绝不接受 CUDA 13.x）。
+   - **数据盘按档位扩容**（默认 50GB 不够）：`5090-8b` 至少 70GB（脚本要求 68）、`5090-14b` 与 `pro6000-14b` 至少 110GB、`pro6000-32b` 至少 230GB（脚本要求 225）。内存：`5090-14b` 要 43GB 以上（QLoRA 适配器在 CPU 上合并 bf16 基座），`5090-8b` 17GB，`pro6000-14b` 23GB，`pro6000-32b` 41GB。不够时 `setup.sh` 会停下并打印“请到 AutoDL 控制台扩容数据盘/换实例”。
+   - 实例连续关机 15 天会被释放且数据全部清空（AutoDL 文档）；训练前后的产物先下载到本地。
+
+2. **填配置和密码**
+   - 在 `config/config.yaml` 里写 `autodl:`（主机、端口来自控制台的 SSH 登录命令；用户一般是 `root`；`auth: password` 或 `auth: key` 加 `key_path`；`workdir` 保持 `/root/autodl-tmp/twin`）。
+   - `uv run twin secrets set autodl_password`（实例密码存进凭据管理器，不写任何文件）。
+   - 第一次 `uv run twin train remote connect` 会显示主机密钥指纹并询问是否信任，对照控制台后输入 `y`；实例重建后指纹会变，按提示删除 `data/training/known_hosts` 里那一行再连。
+
+3. **准备数据集（13b 提供导出命令）**
+   - 13b 的 `twin train export` 会写出数据集目录（`dataset_meta.json`、`sft_train.jsonl` 等，格式见 `training/README.md` 与 DECISIONS D-249）。在它完成之前 `twin train bundle` 只能用测试里的合成数据目录验证流程，不要拿真实数据手工拼。
+
+4. **打包与运行**（13b 完成后）
+   - `uv run twin train bundle --profile 5090-8b --dataset <数据集目录>`：输入两次口令（至少 12 个字符，**不会保存**，丢了就只能重新打包）。输出在 `data/training/bundles/`，同目录有独立解密脚本。
+   - `uv run twin train remote all --profile 5090-8b --dataset <数据集目录>`，或逐步：`upload`、`setup`（要再输一次口令）、`train`、`dpo`、`eval`、`export`、`download`、`cleanup`；`uv run twin train remote status` 列出所有运行，并提醒还有数据留在实例上的运行。断网后重新运行同一条命令即可：长步骤在实例上继续跑，日志从上次的位置接着拉；上传和下载都会续传并校验 sha256。
+   - 下载完成后：`uv run twin model register data/models/<run_id>`；清理后到 AutoDL 控制台**释放实例**（脚本会提醒）。
+
+5. **第一次真实运行时请留意（这些在沙箱里验证不了，请把输出贴给我）**
+   - `setup.sh` 打印的 GPU 型号、驱动、计算能力、PyTorch 与 CUDA 版本和架构列表，以及它是否重装了 PyTorch。
+   - bitsandbytes 4-bit（`5090-14b`）在 sm_120 上是否能训练；`setup.sh <档位> verify` 的 1 step 试跑最终用的批大小。
+   - `setup.sh <档位> verify` 在 13b 提供 `twin.training.parity_check` 之前会**明确报错并停下**（这是设计：模板一致性检查不能跳过）。
+   - `export.sh`：llama.cpp（标签 b11177）能否在实例上编译 `llama-quantize`、转换 Qwen3 是否成功、三个量化文件的大小，以及每一步前的剩余空间。
+   - `serve_vllm.sh`（第 14 轮才用到）：vLLM 0.26.0 的 cu128 轮子在 5090 / PRO 6000 上能否启动；沙箱没法下载 GitHub 发布页，所以脚本有 PyPI 回退，两条路径都没在真卡上试过（DECISIONS D-243）。
+
+6. **费用与安全**
+   - 按小时计费：训练、评估、导出连起来可能是几小时；做完立刻 `twin train remote cleanup` 并释放实例。
+   - 不要把口令、实例密码写进任何文件或聊天；训练包本身经 AES-256-GCM 加密，实例上的明文数据只在解密后存在，`cleanup.sh` 会覆盖后删除，并清掉日志与数据集缓存。

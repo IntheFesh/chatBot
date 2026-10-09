@@ -1,0 +1,18 @@
+### LLaMA-Factory 0.9.5 - merge the LoRA adapter into the bf16 base (5090-8b)
+### rendered by twin.training.yaml_render; do not edit by hand
+### The base is always loaded unquantised: an adapter trained on a 4-bit base can only be merged
+### into the bf16 weights, and LLaMA-Factory refuses to merge into a quantised model.
+### export.sh points adapter_name_or_path at the best adapter (output/dpo when it exists).
+
+### model (no quantization_bit here)
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen3-8B
+adapter_name_or_path: /root/autodl-tmp/twin/output/sft
+template: qwen3_nothink
+trust_remote_code: false
+finetuning_type: lora
+
+### export
+export_dir: /root/autodl-tmp/twin/output/merged
+export_size: 5
+export_device: auto
+export_legacy_format: false
