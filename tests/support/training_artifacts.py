@@ -46,6 +46,7 @@ def build_artifact_dir(
     run_id: str | None = "r-test-1",
     dataset_version: str = "ds-test-01",
     sizes: int = 64,
+    versions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Write model files and ``manifest.json`` (made by the very tool the export script runs)."""
     for quant in QUANTS:
@@ -71,7 +72,7 @@ def build_artifact_dir(
     )
     manifest = _tool().build(
         directory,
-        bundle_manifest(profile, dataset_version),
+        {**bundle_manifest(profile, dataset_version), **(versions or {})},
         list(QUANTS),
         "sft",
         run_id or "",

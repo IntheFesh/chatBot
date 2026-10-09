@@ -1,7 +1,7 @@
 """``/状态``: one message that says how the bot is doing (R-CMD-002, R-SRV-003, R-ENG-002).
 
 The report is a list of sections, each read from its own source.  A source that does not exist
-yet - the proactive scheduler of round 10, the retraining reminder of round 14 - is not invented:
+yet - the proactive scheduler of round 10 - is not invented:
 its line says it is not enabled or that there is nothing (``暂无``).  A source that raises costs
 its own line only (``暂无``); the rest of the report is still sent, and the failure is logged by
 type.
@@ -34,6 +34,7 @@ from twin.ops.logging import get_logger
 from twin.schedule.time_service import PlanUnavailableError, TimeService
 from twin.storage.db import Database
 from twin.storage.models import Alert
+from twin.training.retrain import retrain_status_text
 from twin.training.runs import uncleaned_runs
 
 log = get_logger("twin.commands.status")
@@ -74,6 +75,9 @@ class StatusSources:
         if self.uncleaned is None:
             db = self.db
             self.uncleaned = lambda: len(uncleaned_runs(db))
+        if self.retrain is None:
+            db, threshold = self.db, self.settings.training.retrain_new_ratio
+            self.retrain = lambda: retrain_status_text(db, threshold)
 
 
 def format_span(span: timedelta) -> str:

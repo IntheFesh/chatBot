@@ -8,6 +8,9 @@
     <dataset>/sft_val.jsonl
     <dataset>/sft_test.jsonl
     <dataset>/dpo_train.jsonl     optional: preference pairs (ShareGPT with chosen / rejected)
+    <dataset>/parity_cases.jsonl  optional: samples for the template check on the instance
+                                  (R-TRN-011): a sample plus ``prompt``, the inference prompt the
+                                  style backend would send for it
 
 A sample line is ``{"id": ..., "system": ..., "conversations": [{"from": "human", "value": ...},
 {"from": "gpt", "value": ...}, ...]}``: the system message first (the training prompt without the
@@ -37,6 +40,7 @@ from twin.training import lf_template
 from twin.training.layout import (
     FILE_DATASET_META,
     FILE_DPO,
+    FILE_PARITY,
     FILE_TEST,
     FILE_TRAIN,
     FILE_VAL,
@@ -57,6 +61,7 @@ class DatasetCounts(BaseModel):
     val: int = Field(ge=0)
     test: int = Field(ge=0)
     dpo: int = Field(default=0, ge=0)
+    parity: int = Field(default=0, ge=0)
 
 
 class DatasetMeta(BaseModel):
@@ -99,6 +104,31 @@ class SftSample:
 
 
 @dataclass(frozen=True)
+class ParityCase:
+    """A sample for the template check: ``prompt`` is what inference would send for its context.
+
+    The check (``twin.training.parity_check``) tokenises ``prompt`` and compares it with what
+    LLaMA-Factory makes of the ShareGPT form of the same sample.
+    """
+
+    id: str
+    system: str
+    turns: tuple[lf_template.Turn, ...]
+    reply: str
+    prompt: str
+    tags: tuple[str, ...] = ()
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "system": self.system,
+            "conversations": lf_template.sharegpt_conversations(self.turns, self.reply),
+            "prompt": self.prompt,
+            "tags": list(self.tags),
+        }
+
+
+@dataclass(frozen=True)
 class DpoSample:
     """One preference pair: the context and the preferred and rejected replies."""
 
@@ -137,6 +167,10 @@ class DatasetDir:
     def has_dpo(self) -> bool:
         return self.meta.counts.dpo > 0
 
+    @property
+    def has_parity(self) -> bool:
+        return self.meta.counts.parity > 0
+
     def file_path(self, name: str) -> Path:
         return self.path / name
 
@@ -144,6 +178,8 @@ class DatasetDir:
         names = [FILE_TRAIN, FILE_VAL, FILE_TEST]
         if self.has_dpo:
             names.append(FILE_DPO)
+        if self.has_parity:
+            names.append(FILE_PARITY)
         return names
 
 
@@ -177,6 +213,7 @@ def write_dataset_dir(
     val: Iterable[SftSample],
     test: Iterable[SftSample],
     dpo: Iterable[DpoSample] = (),
+    parity: Iterable[ParityCase] = (),
     redacted: bool,
     plan_ratio: float = 0.0,
     range_from: str | None = None,
@@ -196,9 +233,21 @@ def write_dataset_dir(
     counts["dpo"] = _write_lines(directory / FILE_DPO, (s.to_json() for s in pairs)) if pairs else 0
     if not pairs:
         (directory / FILE_DPO).unlink(missing_ok=True)
+    cases = list(parity)
+    counts["parity"] = (
+        _write_lines(directory / FILE_PARITY, (c.to_json() for c in cases)) if cases else 0
+    )
+    if not cases:
+        (directory / FILE_PARITY).unlink(missing_ok=True)
     files = {
         name: file_sha256(directory / name)
-        for name in (FILE_TRAIN, FILE_VAL, FILE_TEST, *([FILE_DPO] if pairs else []))
+        for name in (
+            FILE_TRAIN,
+            FILE_VAL,
+            FILE_TEST,
+            *([FILE_DPO] if pairs else []),
+            *([FILE_PARITY] if cases else []),
+        )
     }
     meta = DatasetMeta.model_validate(
         {
@@ -270,7 +319,26 @@ def _check_conversation(name: str, number: int, row: Mapping[str, Any], *, pairw
             raise DatasetError(f"{where}: {exc}") from None
 
 
-def _check_file(path: Path, *, pairwise: bool) -> int:
+def _check_parity_row(name: str, number: int, row: Mapping[str, Any]) -> None:
+    """A parity case must carry the inference prompt that matches its own conversation."""
+    where = f"{name} line {number}"
+    prompt = row.get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise DatasetError(f"{where}: a template check case needs its inference prompt")
+    conversations = row["conversations"]
+    turns = [
+        lf_template.Turn("user" if index % 2 == 0 else "assistant", str(message["value"]))
+        for index, message in enumerate(conversations[:-1])
+    ]
+    try:
+        expected = lf_template.render_prompt(str(row.get("system", "")), turns)
+    except lf_template.TemplateError as exc:
+        raise DatasetError(f"{where}: {exc}") from None
+    if prompt != expected:
+        raise DatasetError(f"{where}: the inference prompt differs from the sample it belongs to")
+
+
+def _check_file(path: Path, *, pairwise: bool, parity: bool = False) -> int:
     seen: set[str] = set()
     count = 0
     with path.open("r", encoding="utf-8") as stream:
@@ -284,6 +352,8 @@ def _check_file(path: Path, *, pairwise: bool) -> int:
             if not isinstance(row, dict):
                 raise DatasetError(f"{path.name} line {number}: not a JSON object")
             _check_conversation(path.name, number, row, pairwise=pairwise)
+            if parity:
+                _check_parity_row(path.name, number, row)
             if row["id"] in seen:
                 raise DatasetError(f"{path.name} line {number}: duplicate sample id")
             seen.add(row["id"])
@@ -319,6 +389,7 @@ def load_dataset_dir(directory: Path) -> DatasetDir:
         FILE_VAL: meta.counts.val,
         FILE_TEST: meta.counts.test,
         FILE_DPO: meta.counts.dpo,
+        FILE_PARITY: meta.counts.parity,
     }
     for name in sorted(expected_files):
         path = directory / name
@@ -326,7 +397,7 @@ def load_dataset_dir(directory: Path) -> DatasetDir:
             raise DatasetError(f"{name} is missing")
         if file_sha256(path) != meta.files[name]:
             raise DatasetError(f"{name} does not match its recorded sha256")
-        actual = _check_file(path, pairwise=name == FILE_DPO)
+        actual = _check_file(path, pairwise=name == FILE_DPO, parity=name == FILE_PARITY)
         if actual != counts[name]:
             raise DatasetError(f"{name} has {actual} samples but the metadata says {counts[name]}")
     return result

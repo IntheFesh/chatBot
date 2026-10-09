@@ -377,6 +377,8 @@ def test_the_verify_step_stops_with_an_error_when_the_template_check_is_missing(
 ) -> None:
     workdir = prepared_workdir(tmp_path)
     shutil.rmtree(workdir / "pylib" / "twin" / "training" / "__pycache__", ignore_errors=True)
+    # a package from before round 13b: the template check is not among its modules
+    (workdir / "pylib" / "twin" / "training" / "parity_check.py").unlink()
     log = install_fake_cli(tmp_path)
     done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
     assert done.returncode == 1

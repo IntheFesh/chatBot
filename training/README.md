@@ -128,13 +128,30 @@ selects the adapter with its `model` field; `/v1/completions` and `/tokenize` ex
 ## Contracts used by round 13b and later rounds
 
 * **Dataset directory** (`twin.training.dataset_dir`): `dataset_meta.json`, `sft_train.jsonl`,
-  `sft_val.jsonl`, `sft_test.jsonl`, optional `dpo_train.jsonl`; written with `write_dataset_dir`.
-  The exporter must set `redacted=True` only after the residual PII scan.
-* **Template check** (`setup.sh <profile> verify`): needs `python -m twin.training.parity_check
-  --model-dir <base model dir> --cases <workdir>/data/parity_cases.jsonl` in the package (exit code 0 =
-  token-identical).  The package carries `pylib/twin/training/<module>.py` for the modules listed in
-  `twin.training.bundle.PYLIB_MODULES` (`lf_template` now; round 13b adds `parity_check`) and expects the
-  cases file in `data/`.  If the module is missing, `verify` stops with an error; it does not skip.
+  `sft_val.jsonl`, `sft_test.jsonl`, optional `dpo_train.jsonl` and `parity_cases.jsonl`; written with
+  `write_dataset_dir` by `twin train export` (round 13b), which sets `redacted=True` only after the
+  residual-PII scan of every sample and scans the written files once more.  `dataset_meta.json` carries
+  the versions (template, pre-holdout persona card `v<n>`, pre-holdout profile id), the cut-off, the
+  counts and `stats` (counts, drops, target lengths, sticker and emoji-code shares next to her profile,
+  plan share, tokens, planning figures for the training hours of each profile, the sha256 of the
+  tokenizer, `her_messages_covered` for the retraining reminder).
+* **Token counting** (`twin.training.tokenizer`): the export counts tokens with the Qwen3
+  `tokenizer.json` (identical for 8B, 14B and 32B; sha256 pinned in `twin.training.versions`, 11,422,654
+  bytes, checked 2026-10-09 on Hugging Face at commit `b968826d` and on ModelScope).  Every sample is at
+  most 2,048 tokens *including* the target: the oldest context turns are dropped until it fits, so
+  LLaMA-Factory never cuts the end of a prompt.  `twin train export --tokenizer <file or folder>` uses a
+  local copy; otherwise the file is downloaded once into `data/training/tokenizer/qwen3/`.
+* **Template check** (`setup.sh <profile> verify`): runs `python -m twin.training.parity_check
+  --model-dir <base model dir> --cases <workdir>/data/parity_cases.jsonl` (exit code 0 = token-identical;
+  it is in `twin.training.bundle.PYLIB_MODULES` next to `lf_template`, and the cases file is part of the
+  package whenever the dataset has one).  Per case it asserts what R-TRN-011 lists: the inference
+  prompt tokenised as one string equals the earlier turns plus the last turn's prompt as
+  LLaMA-Factory's `encode_multiturn` makes them; the last response decodes to the reply plus
+  `<|im_end|>` and the newline; with `mask_history` only the last response has labels (the output of the
+  supervised processor); nothing is longer than `cutoff_len`.  `--engine slots` re-implements the
+  encoding rules for environments without LLaMA-Factory (it checks the construction, not the release).
+  `tests/integration/test_template_parity.py` runs the real check against LLaMA-Factory 0.9.5 and the
+  real tokenizer files in an environment of its own (see its docstring).
 * **Artifact manifest** (`artifacts/manifest.json`, schema 1): `run_id`, `profile`, `base_model`,
   `template`, `template_version`, `persona_version`, `profile_version`, `dataset_version`,
   `llamafactory_version`, `llama_cpp_tag`, `models[]` (`quant`, `kind`, `path`), `files[]` (`path`,
