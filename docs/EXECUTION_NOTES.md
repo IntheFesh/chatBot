@@ -24,3 +24,14 @@
 - 不得伪造任何 live 探针结果、盲测结果、门槛通过记录;`docs/LLM_REPORT.md`、`docs/CHANNEL_REPORT.md` 在没有真实探针数据前只能是"待实测"模板,不得出现编造的数字。
 - 测试里的 mock/fake 只放 `tests/`(见铁律 2)。
 - SPEC 与现实冲突时,不静默降级:选最接近原意的做法,写入 `docs/DECISIONS.md` 的"SPEC 偏差"一节,附证据,并在汇报里标出。
+
+## 测试编写约定(来自第 00 轮 Windows CI 与并发抖动的教训)
+
+CI 同时在 `ubuntu-latest` 与 `windows-latest` 上跑,沙箱里只有 Linux,所以下面这些要在写测试时就避免:
+
+1. **不依赖睡眠时长或固定的让出次数**。用 `asyncio.Event`/屏障或 `tests/support/waiting.wait_until` 等条件;对 `ManualClock`,启动组件后先 `await wait_until(lambda: clock.pending_sleepers >= n)` 再 `advance()`。
+2. **句柄与锁要显式释放**。Windows 的命名互斥体、文件句柄不会随对象丢弃而关闭,会污染同一 pytest 进程里后面的测试;打开的文件在 Windows 上也不能被删除。用 `try/finally` 或上下文管理器。
+3. **平台与后端别靠宿主机默认值**。例如 Windows 上存在真实的 `WinVaultKeyring`,测试要显式注入/monkeypatch 所需后端,而不是假定默认是 fail 后端。
+4. **POSIX 专属语义**(信号、文件权限、`flock`、`fork`)的测试必须带平台跳过原因,并在 Windows 上有表达同一需求的对应测试。
+5. **路径与编码**:一律 `pathlib`;读写文本显式 `encoding="utf-8"`;不要假设 `/` 或 `\n`;临时目录用 `tmp_path`。
+6. 并发/时序类测试在本机用 `(for i in 1 2 3; do uv run pytest -q & done; wait)` 三路并发跑一遍,通过才算稳。
