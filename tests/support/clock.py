@@ -48,6 +48,10 @@ class ManualClock:
         if delta > 0:
             self._mono += delta
 
+    def jump_wall(self, seconds: float) -> None:
+        """Move the wall clock alone, like a machine that slept: the monotonic clock stays."""
+        self._now += timedelta(seconds=seconds)
+
     def tick(self, seconds: float) -> None:
         """Advance time without waking sleepers (for synchronous tests)."""
         self._now += timedelta(seconds=seconds)

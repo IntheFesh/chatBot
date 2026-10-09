@@ -114,13 +114,20 @@ def expected_names() -> list[str]:
         "memory forget",
         "memory summarize",
         "memory reindex",
+        "timezone show",
+        "timezone set",
+        "timezone history",
+        "plan show",
+        "plan rebuild",
+        "plan lifeline",
+        "plan lifeline-generate",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 78 == len(expected_names())
+    assert len(names) == 85 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -199,6 +206,13 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "memory forget": CommandKind.LIGHT,
         "memory summarize": CommandKind.HEAVY,
         "memory reindex": CommandKind.LIGHT,
+        "timezone show": CommandKind.READ,
+        "timezone set": CommandKind.LIGHT,
+        "timezone history": CommandKind.READ,
+        "plan show": CommandKind.READ,
+        "plan rebuild": CommandKind.LIGHT,
+        "plan lifeline": CommandKind.READ,
+        "plan lifeline-generate": CommandKind.HEAVY,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

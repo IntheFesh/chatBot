@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from twin.ops.winapi import ERROR_ALREADY_EXISTS, CtrlHandler
+import threading
+
+from twin.ops.winapi import ERROR_ALREADY_EXISTS, WM_CLOSE, CtrlHandler, WindowHandler
 
 
 class FakeWin32:
@@ -17,6 +19,11 @@ class FakeWin32:
         self.code_pages: list[int] = []
         self.ctrl_handlers: list[tuple[CtrlHandler, bool]] = []
         self.mutex_fails = False
+        self.window_fails = False
+        self.windows: dict[int, WindowHandler] = {}
+        self.closed: list[int] = []
+        self._loop_ends = threading.Event()
+        self._window_ready = threading.Event()
 
     def create_mutex(self, name: str) -> tuple[int | None, int]:
         if self.mutex_fails:
@@ -42,3 +49,33 @@ class FakeWin32:
     def set_console_ctrl_handler(self, handler: CtrlHandler, add: bool) -> bool:
         self.ctrl_handlers.append((handler, add))
         return True
+
+    # -- the hidden message window -------------------------------------------------
+
+    def create_message_window(self, on_message: WindowHandler) -> int | None:
+        if self.window_fails:
+            return None
+        hwnd = 5000 + len(self.windows)
+        self.windows[hwnd] = on_message
+        self._window_ready.set()
+        return hwnd
+
+    def run_message_loop(self) -> None:
+        """Blocks like the real loop: until ``post_close`` (or a WM_CLOSE message) ends it."""
+        self._loop_ends.wait(timeout=30)
+
+    def post_close(self, hwnd: int) -> None:
+        self.closed.append(hwnd)
+        self.windows.pop(hwnd, None)
+        self._loop_ends.set()
+
+    def send_message(self, hwnd: int, message: int, wparam: int, lparam: int) -> int:
+        """Delivers to the window's handler like ``SendMessageW`` does (1 when it handled it)."""
+        if message == WM_CLOSE:
+            self.post_close(hwnd)
+            return 0
+        handler = self.windows.get(hwnd)
+        return 1 if handler is not None and handler(message, wparam, lparam) else 0
+
+    def wait_for_window(self, timeout: float = 5.0) -> bool:
+        return self._window_ready.wait(timeout)

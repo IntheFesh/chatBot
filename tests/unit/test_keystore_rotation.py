@@ -191,6 +191,8 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "daily_summaries": {"text"},
         "lifeline_events": {"activity", "place", "mood", "detail"},
         "followups": {"text", "evidence"},
+        # round 08: the day plans (the sleep schedule) join the rotation automatically
+        "daily_plans": {"plan"},
     }
 
 

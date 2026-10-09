@@ -19,7 +19,7 @@ from twin.llm.budget import (
 )
 from twin.llm.ledger import LedgerRecord, LedgerStore
 from twin.llm.types import CostBreakdown, LedgerTag, Purpose, Usage
-from twin.schedule.time_service import ConfiguredTimeService
+from twin.schedule.time_service import BotTimeService
 from twin.storage.db import Database
 
 NOON_CHICAGO = datetime(2026, 10, 9, 17, 0, tzinfo=UTC)  # 12:00 CDT on a Friday
@@ -49,7 +49,7 @@ class Rig:
         self.db = db
         self.clock = clock
         clock.set_time(NOON_CHICAGO)
-        self.time = ConfiguredTimeService(clock, lambda: "America/Chicago")
+        self.time = BotTimeService(clock, lambda: "America/Chicago")
         self.ledger = LedgerStore(db, clock, self.time)
         self.alerts = RecordingAlerts()
         self.config = budget or BudgetConfig()
@@ -163,7 +163,7 @@ def test_the_day_boundary_is_the_local_midnight_of_the_bot_time_zone(
 ) -> None:
     zone = ["America/Chicago"]
     rig = Rig(db, clock)
-    rig.time = ConfiguredTimeService(clock, lambda: zone[0])
+    rig.time = BotTimeService(clock, lambda: zone[0])
     rig.ledger = LedgerStore(db, clock, rig.time)
     rig.manager = rig.build()
     clock.set_time(datetime(2026, 10, 9, 4, 30, tzinfo=UTC))  # 23:30 on the 8th in Chicago

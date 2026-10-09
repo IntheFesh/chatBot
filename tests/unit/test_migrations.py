@@ -345,7 +345,7 @@ def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_pat
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0006_persona_sticker_tags")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0007_memory_tables")
     assert table_names(path) - before == {
         "facts",
         "daily_summaries",
@@ -354,7 +354,6 @@ def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_pat
         "memory_replay_days",
     }
     assert migrate.revision_history()[6] == "0007_memory_tables"
-    assert migrate.head_revision() == "0007_memory_tables"
     connection = sqlite3.connect(path)
     try:
         fact = (
@@ -399,4 +398,68 @@ def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_pat
     finally:
         connection.close()
     migrate.downgrade(path, "0006_persona_sticker_tags")
+    assert table_names(path) == before
+
+
+def test_round_08_migration_adds_the_plan_and_time_zone_tables(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0007_memory_tables")
+    before = table_names(path)
+    migrate.upgrade(path)
+    assert table_names(path) - before == {"daily_plans", "timezone_history"}
+    assert migrate.revision_history()[7] == "0008_daily_plans_timezone"
+    assert migrate.head_revision() == "0008_daily_plans_timezone"
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+    try:
+        plan = (
+            "INSERT INTO daily_plans (id, local_date, timezone, day_type, plan, seed, "
+            "effective_from, ends_at, reason, inputs_hash, created_at, updated_at) VALUES "
+            "('{id}', '2026-03-08', 'America/Chicago', '{day_type}', x'00', 7, '{start}', "
+            "'{end}', 'daily', 'abc', '2026-03-08', '2026-03-08')"
+        )
+        connection.execute(
+            plan.format(
+                id="p1", day_type="weekend", start="2026-03-08 06:00", end="2026-03-09 13:00"
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError):  # the closed vocabulary of day types
+            connection.execute(
+                plan.format(id="p2", day_type="feast", start="2026-03-08", end="2026-03-09")
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # a plan decides a stretch of time
+            connection.execute(
+                plan.format(id="p3", day_type="weekend", start="2026-03-09", end="2026-03-08")
+            )
+        change = (
+            "INSERT INTO timezone_history (id, changed_at, from_timezone, to_timezone, source, "
+            "plan_id, created_at, updated_at) VALUES ('{id}', '2026-03-08', '{old}', '{new}', "
+            "'{source}', {plan}, '2026-03-08', '2026-03-08')"
+        )
+        connection.execute(
+            change.format(
+                id="t1", old="America/Chicago", new="Asia/Shanghai", source="cli", plan="'p1'"
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError):  # a switch changes the zone
+            connection.execute(
+                change.format(
+                    id="t2", old="Asia/Shanghai", new="Asia/Shanghai", source="cli", plan="NULL"
+                )
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # the routes of R-SCH-002
+            connection.execute(
+                change.format(
+                    id="t3", old="Asia/Shanghai", new="Europe/Paris", source="web", plan="NULL"
+                )
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # the plan must exist
+            connection.execute(
+                change.format(
+                    id="t4", old="Asia/Shanghai", new="Europe/Paris", source="app", plan="'nope'"
+                )
+            )
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0007_memory_tables")
     assert table_names(path) == before

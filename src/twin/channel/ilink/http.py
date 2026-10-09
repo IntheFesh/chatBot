@@ -141,6 +141,19 @@ class IlinkHttp:
         if self._owns_client:
             await self._client.aclose()
 
+    async def reset_connections(self) -> bool:
+        """Drop the pooled connections (after the machine slept they are dead).
+
+        Only a client this object made is replaced; one that was handed in belongs to the caller
+        and is left as it is.  Returns whether the connections were dropped.
+        """
+        if not self._owns_client:
+            return False
+        stale = self._client
+        self._client = httpx.AsyncClient(follow_redirects=False)
+        await stale.aclose()
+        return True
+
     @property
     def client(self) -> httpx.AsyncClient:
         return self._client

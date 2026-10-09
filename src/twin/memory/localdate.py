@@ -3,9 +3,9 @@
 A summary belongs to a *local day* (R-MEM-002).  The real records are dated on the clock of the
 place she was in (``time.source_timezone`` and its date ranges, R-ACT-001: :class:`SourceTime`);
 the bot's own conversation is dated in the bot's time zone, asked of the
-:class:`~twin.schedule.time_service.TimeService` (round 08 completes it; only the protocol is
-used here).  :class:`MemoryClock` is the one place that converts between instants and these days,
-so the summarizer, the replay, the as-of view and the assembler cut days the same way.
+:class:`~twin.schedule.time_service.TimeService` (the container's one service, round 08).
+:class:`MemoryClock` is the one place that converts between instants and these days, so the
+summarizer, the replay, the as-of view and the assembler cut days the same way.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from twin.config.runtime import BOT_TIMEZONE
 from twin.ingest.times import SourceTime
-from twin.schedule.time_service import ConfiguredTimeService, TimeService
+from twin.schedule.service import time_service_for
+from twin.schedule.time_service import TimeService
 
 if TYPE_CHECKING:
     from twin.services import Services
@@ -36,9 +36,7 @@ class MemoryClock:
     def from_services(
         cls, services: Services, time_service: TimeService | None = None
     ) -> MemoryClock:
-        service = time_service or ConfiguredTimeService(
-            services.clock, lambda: services.runtime.get(BOT_TIMEZONE)
-        )
+        service = time_service or time_service_for(services)
         return cls(SourceTime.from_config(services.settings.time), service)
 
     @property

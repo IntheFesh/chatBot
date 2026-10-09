@@ -57,7 +57,7 @@ from twin.llm.reliability import BreakerState, CircuitBreaker, RetryPolicy
 from twin.llm.synth_images import draw_gif, draw_jpeg, draw_png
 from twin.llm.tokens import TokenEstimator
 from twin.llm.types import ChatMessage, CostBreakdown, LedgerTag, Purpose, Usage
-from twin.schedule.time_service import ConfiguredTimeService
+from twin.schedule.time_service import BotTimeService
 from twin.storage.db import Database
 from twin.storage.models import CostLedger
 
@@ -91,7 +91,7 @@ class Rig:
         self.db = db
         self.clock = clock
         self.settings: Settings = load_settings(None, overrides or {})
-        self.time = ConfiguredTimeService(clock, lambda: "America/Chicago")
+        self.time = BotTimeService(clock, lambda: "America/Chicago")
         self.ledger = LedgerStore(db, clock, self.time)
         self.alerts = RecordingAlerts()
         self.pricing = Pricing.from_settings(self.settings)

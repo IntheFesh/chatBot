@@ -26,7 +26,7 @@ from twin.memory.memory import Memory
 from twin.memory.records import FactRecord, FollowupRecord, LifelineRecord, SummaryRecord
 from twin.memory.store import NewEvent, NewFact, NewFollowup
 from twin.retrieval.embedder import EmbeddingService
-from twin.schedule.time_service import ConfiguredTimeService
+from twin.schedule.time_service import BotTimeService
 from twin.services import Services
 from twin.storage.memory_models import BOT_CONVERSATION_SOURCES
 
@@ -178,7 +178,7 @@ def days_after(moment: datetime, days: float) -> datetime:
 
 def memory_clock(clock: Clock, zone: str = CHICAGO) -> MemoryClock:
     """A memory calendar with her zone and the bot's zone both set to ``zone``."""
-    return MemoryClock(SourceTime(zone), ConfiguredTimeService(clock, lambda: zone))
+    return MemoryClock(SourceTime(zone), BotTimeService(clock, lambda: zone))
 
 
 def fact_record(**fields: object) -> FactRecord:

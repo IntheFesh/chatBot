@@ -10,7 +10,7 @@ from sqlalchemy import select
 from tests.support.clock import ManualClock
 from twin.llm.ledger import LedgerRecord, LedgerStore
 from twin.llm.types import CostBreakdown, LedgerTag, Usage
-from twin.schedule.time_service import ConfiguredTimeService
+from twin.schedule.time_service import BotTimeService
 from twin.storage.db import Database, ReadOnlyViolationError, WritePolicy, use_write_policy
 from twin.storage.models import CostLedger
 
@@ -19,8 +19,8 @@ def utc(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> date
     return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
-def make_service(clock: ManualClock, zone: str = "America/Chicago") -> ConfiguredTimeService:
-    return ConfiguredTimeService(clock, lambda: zone)
+def make_service(clock: ManualClock, zone: str = "America/Chicago") -> BotTimeService:
+    return BotTimeService(clock, lambda: zone)
 
 
 def entry(
@@ -65,7 +65,7 @@ def store(db: Database, clock: ManualClock) -> LedgerStore:
 
 def test_local_dates_follow_the_current_bot_time_zone(clock: ManualClock) -> None:
     zone = ["America/Chicago"]
-    service = ConfiguredTimeService(clock, lambda: zone[0])
+    service = BotTimeService(clock, lambda: zone[0])
     moment = utc(2026, 10, 9, 3, 30)  # 22:30 on the 8th in Chicago, 11:30 on the 9th in Shanghai
     assert service.local_date(moment) == date(2026, 10, 8)
     zone[0] = "Asia/Shanghai"

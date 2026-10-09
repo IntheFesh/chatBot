@@ -32,6 +32,8 @@ from twin.ops.process_model import CliError, CommandKind, command
 from twin.profile.cli import profile_app, routine_app
 from twin.profile.persona.cli import persona_app
 from twin.retrieval.cli import retrieval_app
+from twin.schedule.cli import plan_app, timezone_app
+from twin.schedule.component import register_schedule
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
@@ -58,6 +60,8 @@ app.add_typer(routine_app, name="routine")
 app.add_typer(persona_app, name="persona")
 app.add_typer(retrieval_app, name="retrieval")
 app.add_typer(memory_app, name="memory")
+app.add_typer(timezone_app, name="timezone")
+app.add_typer(plan_app, name="plan")
 
 log = get_logger("twin.cli")
 
@@ -110,9 +114,15 @@ def main(
 
 
 async def _serve(services: Services) -> None:
-    application, _watcher = build_application(services)
-    register_channel(application, services)
+    application, watcher = build_application(services)
+    channel = register_channel(application, services)
     register_probe(application, services)
+    register_schedule(
+        application,
+        services,
+        watcher,
+        reconnect=channel.reconnect if channel is not None else None,
+    )
     stop = asyncio.Event()
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()

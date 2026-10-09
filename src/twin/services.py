@@ -43,6 +43,8 @@ class Services:
     runtime: RuntimeSettings
     media: MediaStore
     alerts: AlertSink
+    # objects built on first use that belong to one container (the schedule kit, ...)
+    extras: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def close(self) -> None:
         self.db.dispose()

@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from twin.config.runtime import BOT_TIMEZONE
 from twin.llm.budget import BudgetManager, StyleBackendStatus
 from twin.llm.capabilities import CapabilityStore, LlmCapabilities
 from twin.llm.deepseek import DeepSeekClient
@@ -24,7 +23,8 @@ from twin.llm.reliability import CircuitBreaker
 from twin.llm.tokens import TokenEstimator
 from twin.ops.jobs import JobQueue
 from twin.ops.logging import get_logger
-from twin.schedule.time_service import ConfiguredTimeService, TimeService
+from twin.schedule.service import peak_calendar_for, time_service_for
+from twin.schedule.time_service import TimeService
 
 if TYPE_CHECKING:
     from twin.services import Services
@@ -50,16 +50,13 @@ class LlmRuntime:
 
 
 def _pricing(services: Services) -> Pricing:
-    def calendar_fallback(year: int) -> None:
-        services.alerts.raise_alert(
-            "calendar_out_of_range",
-            f"the holiday calendar does not cover {year}; peak hours assume Monday to Friday",
-            severity="warning",
-            detail={"year": year},
-            dedup_key=f"calendar_out_of_range:{year}",
-        )
-
-    return Pricing.from_settings(services.settings, on_fallback=calendar_fallback)
+    """The price table on the container's one holiday calendar (the day types use it too)."""
+    settings = services.settings
+    return Pricing(
+        settings.pricing_usd_per_mtok,
+        offpeak_multiplier=settings.pricing.offpeak_multiplier,
+        calendar=peak_calendar_for(services),
+    )
 
 
 def activate_offpeak_policy(services: Services) -> Pricing:
@@ -74,7 +71,7 @@ def build_llm_runtime(services: Services, *, style: StyleBackendStatus | None = 
     settings = services.settings
     clock = services.clock
     pricing = activate_offpeak_policy(services)
-    time_service = ConfiguredTimeService(clock, lambda: services.runtime.get(BOT_TIMEZONE))
+    time_service = time_service_for(services)
     ledger = LedgerStore(services.db, clock, time_service)
     capabilities = CapabilityStore(services.db, clock)
     estimator = TokenEstimator(image_tokens=capabilities.get().image_table())

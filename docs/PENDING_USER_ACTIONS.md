@@ -326,3 +326,47 @@
 
 8. **（后续轮次）** 第 08 轮生成每日生活线并按日排每日摘要；第 09 轮把 `MemoryAssembler.build` 接进回复提示词、创建 `bot_turns` 并注册读取器（`register_bot_turn_reader`）、会话静默后调用 `queue_bot_extraction`；第 10 轮读写待跟进；第 11 轮的 `/记住`、`/忘掉`、`/记忆` 调用 `MemoryManager`；第 13 轮的训练集导出只经 `AsOfView(t)` 读记忆。这些都不需要你现在做什么。
 
+## 第 08 轮 —— 时间服务、时区切换、每日计划与生活线生成
+
+沙箱里没有 DeepSeek Key，生活线的生成和检查只用固定响应（`respx`）验证；Windows 的“隐藏窗口收 `WM_POWERBROADCAST`”在 Linux 上用记录型替身测逻辑，真实窗口的测试带 `windows` 标记，只会在 windows-latest 的 CI 上第一次真跑。**这一轮不会向微信发任何消息**（主动消息在第 10 轮）。下面是只有你能在自己电脑上做的事。
+
+1. **前置**
+   - 已导入聊天记录并重算画像（第 03、04 轮：`uv run twin profile rebuild`），已设置 Key（`uv run twin secrets set deepseek_api_key`，生活线要用）。
+   - 升级数据库：`uv run twin db upgrade`（迁移 `0008_daily_plans_timezone`，新增 `daily_plans`、`timezone_history`）。
+   - `uv run twin profile show` 的“作息概览”里，睡眠和忙碌时段必须是对的（计划从它抽样）；不对用 `uv run twin routine add sleep 01:00 08:30` 等修正。手动修正优先于推断。
+
+2. **看时区和时间（只读）**
+   - 做什么：`uv run twin timezone show`。
+   - 预期：`bot time zone: America/Chicago (UTC-5, CDT)`、当地时间（和你手表上的芝加哥时间一致）、日类型（工作日/周末/节假日）、“routine learnt in: America/Chicago”、下一次拨钟（2026-11-01 07:00 UTC，CDT -> CST）、她此刻的状态（没有计划时写 `no plan yet`）。
+   - 请告诉我：日类型对不对（美国联邦假日按 `holidays.US`）。
+
+3. **看今天的计划（只读，先预览）**
+   - 做什么：`uv run twin plan show`（或 `uv run twin plan show 2026-10-12`）。
+   - 预期：当地时间的起床/入睡、忙碌段（带回复延迟中位）、饭点（标明“来自她的活跃峰”还是“常见饭点”）、主动配额（均值目标应接近 `uv run twin profile show` 里的“每天先开口 N 次”）、起床问候窗口、状态时间线。没有保存过时标“预览”，盐生成后种子才固定。
+   - 请告诉我：起床/入睡时间、饭点、忙碌段像不像她；不像的用 `twin routine add …` 修正，然后 `uv run twin plan rebuild --force` 重做今天。
+
+4. **启动应用，看每日作业**
+   - 做什么：`uv run twin run`（保持运行）。在另一个终端：`uv run twin plan show`（这次是真正保存的计划，无“预览”）、`uv run twin jobs list`。
+   - 预期：启动时今天的计划已经生成；到她起床的时刻出现 `lifeline_generate` 作业并很快完成；起床前一小时（高峰价格时顺延到非高峰，最晚起床后两小时）有 `memory_summary` 作业（前一天有真实记录行时 `real`，第 09 轮之后 `bot`）。
+   - 想马上试：`uv run twin plan lifeline-generate`（排队今天的生活线，应用在运行时由它执行），再 `uv run twin plan lifeline` 看结果。大约两次模型调用，花费很少，走日常账户、不需要批准。
+
+5. **看生活线**
+   - 做什么：`uv run twin plan lifeline`。
+   - 预期：5–10 段当天的安排（时间、做什么、在哪、心情）；睡觉时段没有活动；忙碌时段里是上课/上班之类的事；学校、工作、住处与事实库里的真实事实一致；昨天的事能接上。
+   - 请告诉我：像不像她的一天、有没有和你知道的事实矛盾、日志里 `lifeline_generated` 那一行的 `drafts`（2 说明第一版被退回过）和 `corrected`（true 说明两次都没过、采用了规则修正的版本，同时会有 `lifeline_corrected` 告警）。
+
+6. **切换时区（回国后）**
+   - 做什么：`uv run twin timezone set Asia/Shanghai`，再 `uv run twin timezone show`、`uv run twin timezone history`。要切回：`uv run twin timezone set America/Chicago`。
+   - 预期：输出新时区下“今天剩余部分”的计划；若上海此刻是夜里，她立即进入睡眠状态（`睡眠·早晨` 一行会写“时区切换时正处于夜里，立即去睡”），直到上海的起床时间；起床问候不会在距上一次不足 18 小时时重复；运行中的应用两秒内发现（日志有 `state_changed`），并发出 `TimezoneSwitched` 与 `CandidatesExpired` 事件（第 09、10 轮订阅）。切换前已排队的延迟回复保持原来的绝对时刻，主动候选作废并重抽（理由见 D-233）。
+   - 注意：这会立刻改变她的状态（可能马上“睡着”），第 09 轮之前没有别的影响。
+
+7. **夏令时**
+   - 2026-11-01（芝加哥 02:00 回拨到 01:00，这一天 25 小时）前后：`uv run twin plan show 2026-11-01`。
+   - 预期：起床/入睡的钟点不变（07:30 就是 07:30），那一夜实际睡 9 小时；若有钟点落在 01:00–02:00，会有一行“夏令时：…取第一次”。2027-03-14 春季那天同理（23 小时，落在 02:00–03:00 的钟点晚一小时发生）。
+
+8. **睡眠唤醒（Windows）**
+   - 做什么：应用运行时手动让电脑睡眠几分钟，再唤醒。
+   - 预期：日志出现 `machine_resumed source=wm_powerbroadcast gap_s=…`，随后 `schedule_resumed kind=wake` 和 `channel_reconnected`；计划仍是当天的（跨过零点则生成新一天的）；没有补发任何东西。合盖/睡眠的检测在所有平台都有时钟跳变兜底。
+   - 请告诉我：windows-latest CI 上 `tests/unit/test_power_events.py::test_a_real_hidden_window_receives_a_broadcast_message` 第一次真跑的结果；失败请把输出发给我。
+
+9. **（后续轮次）** 第 09 轮的引擎读 `her_state()` 决定回复延迟（忙碌段用计划里的延迟分布引用）、睡着时不回，并处理中断期间到达的消息；第 10 轮订阅 `CandidatesExpired`（作废早于现在的候选）、按 `plan.quota.for_plan` 发主动消息、发起床问候前问 `planner.greeting_decision()`、发出后调 `record_wake_greeting`；第 11 轮的 `/时区`、`/主动` 调 `ScheduleComponent.switch_timezone` 和 `proactive.enabled`。这些都不需要你现在做什么。

@@ -35,6 +35,10 @@ class ChannelComponent:
     async def stop(self) -> None:
         await self.channel.stop()
 
+    async def reconnect(self) -> None:
+        """Connect again after the machine woke up (the schedule calls this)."""
+        await self.channel.reconnect()
+
     def health(self) -> ComponentHealth:
         return self.channel.health()
 

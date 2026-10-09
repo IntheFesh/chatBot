@@ -294,4 +294,12 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
 
     monkeypatch.setattr(Application, "run", record)
     await _serve(services)
-    assert seen == ["channel", "channel_probe", "heartbeat", "job_worker", "state_watcher"]
+    assert seen == [
+        "channel",
+        "channel_probe",
+        "heartbeat",
+        "job_worker",
+        "power_events",
+        "schedule",
+        "state_watcher",
+    ]

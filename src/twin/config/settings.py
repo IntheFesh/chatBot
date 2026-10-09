@@ -190,6 +190,30 @@ class ProactiveConfig(_Section):
     tick_minutes: int = Field(default=5, ge=1)
 
 
+class ScheduleConfig(_Section):
+    """Time service, day plan and wake-up handling (round 08; R-SCH-001 to R-SCH-005)."""
+
+    plan_minute: int = Field(default=5, ge=0, le=59)  # the day plan is made at local 00:MM
+    tick_s: float = Field(default=30, gt=0)  # how often the scheduler looks for due work
+    greeting_min_gap_h: float = Field(default=18, ge=0)  # hours between two wake-up greetings
+    greeting_window_min: list[int] = Field(default_factory=lambda: [5, 40])  # after waking
+    min_awake_h: float = Field(default=6, gt=0)  # awake time between a wake-up and the next bed
+    meal_jitter_min: float = Field(default=15, ge=0)  # spread of a meal around her usual time
+    summary_lead_min: int = Field(default=60, ge=0)  # the daily summary is queued this long
+    summary_latest_after_wake_h: float = Field(default=2, ge=0)  # ... but not later than this
+    power_tick_s: float = Field(default=5, gt=0)  # interval of the wake-from-sleep detector
+    power_jump_ticks: int = Field(default=2, ge=1)  # a clock jump of more than this many ticks
+
+    @field_validator("greeting_window_min")
+    @classmethod
+    def _two_increasing_minutes(cls, value: list[int]) -> list[int]:
+        if len(value) != 2 or value[0] < 0 or value[0] >= value[1]:
+            raise ValueError(
+                "greeting_window_min needs [earliest, latest] minutes, earliest < latest"
+            )
+        return value
+
+
 class ChannelConfig(_Section):
     kind: Literal["ilink", "console"] = "ilink"
     proactive_window_safe_h: float = Field(default=22, gt=0)
@@ -423,6 +447,7 @@ class Settings(BaseSettings):
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     activity: ActivityConfig = Field(default_factory=ActivityConfig)
     proactive: ProactiveConfig = Field(default_factory=ProactiveConfig)
+    schedule: ScheduleConfig = Field(default_factory=ScheduleConfig)
     channel: ChannelConfig = Field(default_factory=ChannelConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     persona: PersonaConfig = Field(default_factory=PersonaConfig)

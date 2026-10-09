@@ -29,7 +29,7 @@ from twin.ops.jobs import (
     JobQueue,
     Worker,
 )
-from twin.schedule.time_service import ConfiguredTimeService
+from twin.schedule.time_service import BotTimeService
 from twin.storage.db import Database
 
 NOW = datetime(2026, 10, 9, 17, 0, tzinfo=UTC)
@@ -40,7 +40,7 @@ class Rig:
         clock.set_time(NOW)
         self.db = db
         self.clock = clock
-        self.time = ConfiguredTimeService(clock, lambda: "America/Chicago")
+        self.time = BotTimeService(clock, lambda: "America/Chicago")
         self.ledger = LedgerStore(db, clock, self.time)
         self.queue = JobQueue(db, clock)
         self.alerts = RecordingAlerts()

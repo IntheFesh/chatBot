@@ -209,6 +209,26 @@ class IlinkChannel(Channel):
             await self._notify("msg/notifystop")
         await self._http.aclose()
 
+    async def reconnect(self) -> None:
+        """Connect afresh after the machine woke up from sleep (R-SCH-005).
+
+        The connections made before the sleep are dead and the long poll that was waiting on
+        one would only notice after its timeout: stop the poll, drop the pooled connections,
+        tell the server the bot is online again and poll anew.  Nothing is lost - the cursor
+        only moves when a batch has been taken in - and messages the user sent meanwhile come
+        with the first poll.
+        """
+        if not self._started or not self._poll:
+            return
+        await self._supervisor.stop()
+        await self._http.reset_connections()
+        self._supervisor = TaskSupervisor(self.name, self._clock, self._alerts)
+        await self._notify("msg/notifystart")
+        self._supervisor.spawn(
+            "poll", lambda: self._poller.run(self._stop_event), restart_on_exit=True
+        )
+        log.info("channel_reconnected")
+
     async def _notify(self, endpoint: str) -> None:
         """Tell the server the bot is online/offline; failures are only logged."""
         credentials = await asyncio.to_thread(self.store.credentials)

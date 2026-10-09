@@ -18,7 +18,7 @@ that name that day, her usual sleep.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from itertools import pairwise
@@ -32,6 +32,7 @@ from twin.ops.logging import get_logger
 from twin.profile.api import load_activity_model
 from twin.profile.localtime import format_minute
 from twin.schedule.daytype import DayTypeCalendar
+from twin.schedule.time_service import PlanUnavailableError, TimeService
 
 log = get_logger("twin.memory.lifeline")
 
@@ -94,10 +95,11 @@ def minutes_of(clock: str | None) -> int | None:
 class LifelineStore:
     """Writing and reading the life line (see the module description)."""
 
-    def __init__(self, memory: Memory) -> None:
+    def __init__(self, memory: Memory, *, time_service: TimeService | None = None) -> None:
         self._memory = memory
         self._store = memory.store
         self._clock: MemoryClock = memory.clock
+        self._time = time_service
 
     # ------------------------------------------------------------------ writing
 
@@ -229,27 +231,52 @@ class LifelineStore:
     def _sleep_issues(
         self, day: date, spans: Sequence[tuple[int, int, LifelineRecord]]
     ) -> list[ConsistencyIssue]:
-        model = load_activity_model(self._memory.services, "live")
-        if model is None:
-            return []
-        calendar = self._calendar()
-        zone = self._clock.bot_zone()
-        kind = calendar.day_type(day, zone.key)
-        following = calendar.day_type(day + timedelta(days=1), zone.key)
+        typical: Callable[[int], str] | None = None
         issues: list[ConsistencyIssue] = []
         for start, end, event in spans:
             if any(word in event.activity for word in SLEEP_WORDS):
                 continue
             middle = (start + end) // 2
-            state = model.typical_state(
-                time(middle // 60, middle % 60),
+            state = self._planned_state(day, middle)
+            if state is None:
+                typical = typical or self._typical_state(day)
+                state = typical(middle)
+            if state == "deep_sleep":
+                issues.append(ConsistencyIssue("during_sleep", event.id))
+        return issues
+
+    def _planned_state(self, day: date, minute: int) -> str | None:
+        """Her state at that clock time by the day plan; ``None`` when no plan decides it."""
+        if self._time is None:
+            return None
+        try:
+            return self._time.her_state(self._time.local_to_utc(day, minute)).kind
+        except PlanUnavailableError:
+            return None
+
+    def _typical_state(self, day: date) -> Callable[[int], str]:
+        """Her usual state by the routine model, for a day that has no plan (R-ACT-006)."""
+        model = load_activity_model(self._memory.services, "live")
+        if model is None:
+            return lambda minute: "free"
+        kind, following = self._day_types(day)
+
+        def state(minute: int) -> str:
+            return model.typical_state(
+                time(minute // 60, minute % 60),
                 kind,
                 next_day_type=following,
                 weekday=day.weekday(),
             )
-            if state == "deep_sleep":
-                issues.append(ConsistencyIssue("during_sleep", event.id))
-        return issues
+
+        return state
+
+    def _day_types(self, day: date) -> tuple[str, str]:
+        if self._time is not None:
+            return self._time.day_type(day), self._time.day_type(day + timedelta(days=1))
+        calendar = self._calendar()
+        key = self._clock.bot_zone().key
+        return calendar.day_type(day, key), calendar.day_type(day + timedelta(days=1), key)
 
     def _calendar(self) -> DayTypeCalendar:
         return DayTypeCalendar(
@@ -274,8 +301,7 @@ class LifelineStore:
         sleep: tuple[str, str] | None = None
         model = load_activity_model(self._memory.services, "live")
         if model is not None:
-            kind = self._calendar().day_type(day, self._clock.bot_zone().key)
-            window = model.sleep.window_for(kind)
+            window = model.sleep.window_for(self._day_types(day)[0])
             if window is not None:
                 sleep = (format_minute(window.onset_min), format_minute(window.wake_min))
         return LifelineContext(day, previous, facts, sleep)

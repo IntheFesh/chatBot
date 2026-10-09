@@ -513,6 +513,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "twin.profile.persona.jobs",
     "twin.stickers.tag_jobs",
     "twin.memory.jobs",
+    "twin.schedule.jobs",
 )
 
 

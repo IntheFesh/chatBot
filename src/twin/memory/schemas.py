@@ -99,3 +99,29 @@ class ConflictOut(_Lenient):
 
 class SummaryOut(_Lenient):
     summary: str = Field(min_length=1, max_length=SUMMARY_MAX_CHARS)
+
+
+class DrawnEvent(_Lenient):
+    """One stretch of her day as the generator draws it (R-MEM-005)."""
+
+    start: str = Field(min_length=1, max_length=8)
+    end: str = Field(min_length=1, max_length=8)
+    activity: str = Field(min_length=1, max_length=120)
+    place: str | None = Field(default=None, max_length=60)
+    mood: str | None = Field(default=None, max_length=40)
+    detail: str | None = Field(default=None, max_length=200)
+    busy: bool = False  # the activity keeps her from chatting (class, work, an exam ...)
+
+
+class DrawnDay(_Lenient):
+    events: list[DrawnEvent] = Field(min_length=1, max_length=14)
+
+
+class Contradiction(_Lenient):
+    event: int = Field(ge=1)  # the number of the drawn event, as listed to the checker
+    against: Literal["fact", "recent_day"]
+    reason: str = Field(min_length=1, max_length=200)
+
+
+class DayCheckOut(_Lenient):
+    contradictions: list[Contradiction] = Field(default_factory=list)

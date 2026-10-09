@@ -128,6 +128,14 @@ PROACTIVE_DAILY_MAX = register_setting(
         "Maximum proactive messages per day (/主动)",
     )
 )
+PROACTIVE_ENABLED = register_setting(
+    SettingSpec(
+        "proactive.enabled",
+        TypeAdapter(bool),
+        lambda s: True,
+        "Proactive messages on (/主动 开|关); off means a quota of zero (R-PRO-002)",
+    )
+)
 TARGET_USERNAME = register_setting(
     SettingSpec(
         "target.username",

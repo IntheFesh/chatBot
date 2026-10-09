@@ -50,6 +50,9 @@ activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, mi
             sleep_rate_ratio: 0.25, busy_rate_ratio: 0.5, busy_latency_ratio: 3.0 }
 proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
              edge_of_sleep_weekly_max: 2, tick_minutes: 5 }
+schedule: { plan_minute: 5, tick_s: 30, greeting_min_gap_h: 18, greeting_window_min: [5, 40],
+            min_awake_h: 6, meal_jitter_min: 15, summary_lead_min: 60,
+            summary_latest_after_wake_h: 2, power_tick_s: 5, power_jump_ticks: 2 }   # 第 08 轮新增：schedule 的 10 个键
 channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
 retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10,
              context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,

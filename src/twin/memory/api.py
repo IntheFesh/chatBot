@@ -26,7 +26,9 @@ from twin.memory.blocks import BlockItem, MemoryBlock, MemoryQuery
 from twin.memory.followups import FollowupStore
 from twin.memory.lifeline import LifelineStore, PlannedEvent
 from twin.memory.memory import Memory
+from twin.memory.records import LifelineRecord
 from twin.memory.view import MemoryView
+from twin.schedule.service import time_service_for
 
 if TYPE_CHECKING:
     from twin.services import Services
@@ -44,6 +46,7 @@ __all__ = [
     "MemoryQuery",
     "MemoryView",
     "PlannedEvent",
+    "lifeline_at",
     "memory_view",
 ]
 
@@ -57,3 +60,16 @@ def memory_view(services: Services, as_of: datetime, *, memory: Memory | None = 
     ``view.render(query)`` builds the memory block of that moment.
     """
     return MemoryAssembler(memory or Memory(services)).view(as_of)
+
+
+def lifeline_at(
+    services: Services, moment: datetime | None = None, *, memory: Memory | None = None
+) -> LifelineRecord | None:
+    """What her life line says she is doing at ``moment`` (now if omitted), or ``None``.
+
+    The entry of the bot's local day whose time span contains the moment (R-MEM-005); replies and
+    proactive messages use it so that what she says about her day agrees with the day that was
+    drawn when she woke.  Pass one long-lived ``Memory`` when asking often.
+    """
+    store = LifelineStore(memory or Memory(services), time_service=time_service_for(services))
+    return store.at(moment if moment is not None else services.clock.now_utc())

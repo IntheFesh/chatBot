@@ -10,7 +10,6 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.config.runtime import BOT_TIMEZONE
 from twin.llm.capabilities import load_capabilities
 from twin.llm.probe import (
     GATE_CHECKS,
@@ -23,7 +22,6 @@ from twin.llm.probe import (
 from twin.llm.probe_report import render_report, write_report
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
 from twin.ops.process_model import CliError, CommandKind, command
-from twin.schedule.time_service import ConfiguredTimeService
 from twin.services import get_cli_context
 
 llm_app = typer.Typer(help="DeepSeek: M0 probe and status.", no_args_is_help=True)
@@ -139,8 +137,8 @@ def llm_status() -> None:
             f"M0 {'passed' if last.m0_passed else 'NOT passed'}"
         )
 
-    time_service = ConfiguredTimeService(services.clock, lambda: services.runtime.get(BOT_TIMEZONE))
     runtime = build_llm_runtime(services)
+    time_service = runtime.time_service
     status = runtime.budget.compute()  # read only: no alerts, no events
     table = Table("period", "spent USD", "budget USD", "ratio", "level")
     table.add_row(

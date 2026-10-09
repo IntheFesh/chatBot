@@ -323,3 +323,74 @@ async def test_the_channel_component_is_not_added_for_the_console_channel(
     application = Application()
     assert register_channel(application, replace(services, settings=settings)) is None
     assert application.components == {}
+
+
+# ------------------------------------------------ connecting again after sleep (R-SCH-005)
+
+
+async def test_after_the_machine_slept_the_channel_connects_and_polls_afresh(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    started = api.post(START).respond(200, json={"ret": 0, "errmsg": ""})
+    stopped = api.post(STOP).respond(200, json={"ret": 0, "errmsg": ""})
+    polls = api.post(GET_UPDATES).respond(200, json=updates())
+    await h.channel.start()
+    await advance_until(h.clock, lambda: polls.call_count >= 1)
+    old_client = h.channel._http.client
+    seen = polls.call_count
+    await h.channel.reconnect()
+    assert started.call_count == 2  # the server is told that the bot is online again
+    assert h.channel._http.client is not old_client
+    assert old_client.is_closed
+    await advance_until(h.clock, lambda: polls.call_count > seen)  # and polling goes on
+    assert h.channel.health().status is HealthStatus.OK
+    await h.channel.stop()
+    assert stopped.call_count == 1 and started.call_count == 2
+
+
+async def test_a_channel_that_is_not_running_has_nothing_to_connect(
+    api: respx.MockRouter, h: Harness, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    started = api.post(START).respond(200, json={})
+    await h.channel.reconnect()  # never started
+    send_only = make_harness(db, clock, tmp_path, RecordingAlerts(), poll=False)
+    send_only.login()
+    await send_only.channel.start()
+    await send_only.channel.reconnect()  # a send-only channel does not poll
+    await send_only.channel.stop()
+    assert started.call_count == 0
+
+
+async def test_the_http_wrapper_replaces_only_a_client_it_made() -> None:
+    from twin.channel.ilink.http import IlinkHttp
+
+    own = IlinkHttp()
+    first = own.client
+    assert await own.reset_connections() is True
+    assert own.client is not first and first.is_closed and not own.client.is_closed
+    await own.aclose()
+    handed_in = httpx.AsyncClient()
+    borrowed = IlinkHttp(handed_in)
+    assert await borrowed.reset_connections() is False  # it belongs to the caller
+    assert borrowed.client is handed_in and not handed_in.is_closed
+    await handed_in.aclose()
+
+
+async def test_the_component_reconnects_the_channel_it_runs(
+    api: respx.MockRouter, services: Services
+) -> None:
+    started = api.post(START).respond(200, json={})
+    api.post(STOP).respond(200, json={})
+    api.post(GET_UPDATES).respond(200, json=updates())
+    application = Application()
+    component = register_channel(application, services)
+    assert component is not None
+    component.channel.store.save_credentials(
+        Credentials(TOKEN, BOT, USER, API, services.clock.now_utc().isoformat())
+    )
+    await application.start()
+    try:
+        await component.reconnect()
+        assert started.call_count == 2
+    finally:
+        await application.stop()

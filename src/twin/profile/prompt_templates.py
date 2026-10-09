@@ -44,6 +44,8 @@ MEMORY_EXTRACT_BOT = "memory_extract_bot"
 MEMORY_CONFLICT = "memory_conflict"
 MEMORY_SUMMARY = "memory_summary"
 MEMORY_SUMMARY_MERGE = "memory_summary_merge"
+LIFELINE_GENERATE = "lifeline_generate"
+LIFELINE_CHECK = "lifeline_check"
 
 
 class TemplateError(RuntimeError):
