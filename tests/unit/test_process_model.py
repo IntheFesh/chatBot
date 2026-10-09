@@ -34,10 +34,19 @@ from twin.storage.state import read_state_version
 runner = CliRunner()
 
 
+def expected_names() -> list[str]:
+    return [
+        "run", "doctor", "config show", "settings list", "settings set", "settings history",
+        "secrets set", "secrets delete", "secrets list", "secrets check", "secrets rotate-db-key",
+        "db upgrade", "db status", "jobs list", "jobs show", "jobs retry", "jobs cancel",
+        "jobs run", "jobs approve",
+    ]
+
+
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) >= 20
+    assert len(names) == 19 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -239,7 +248,7 @@ def test_light_commands_bump_state_version_with_their_writes(
     assert runner.invoke(sample, ["light-no-write"]).exit_code == 0
     assert version(services) == 1  # no write, no bump
     assert runner.invoke(sample, ["heavy"]).exit_code == 0
-    assert version(services) == 2 - 1 + 0 == 1  # HEAVY writes do not bump
+    assert version(services) == 1  # HEAVY writes do not bump
     assert runner.invoke(sample, ["explicit", "--flag"]).exit_code == 0
     assert version(services) == 2
     assert runner.invoke(sample, ["explicit"]).exit_code == 0
