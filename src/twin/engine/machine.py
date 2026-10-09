@@ -53,6 +53,12 @@ window, no first delay, her pace), and while that reply is still being sent the 
 dropped first.  A command that comes while a *new* round is under way finds no reply to redo (the
 router refuses it) and does nothing to the round.
 
+A correction in plain words ("她不会这么说") is no command.  The engine hands the answered
+messages to the :class:`~twin.engine.correction_port.CorrectionPort` once the reply to them is out
+(round 11) and sends the question it returns as one more system message; a message of the user
+that is the "yes" to an open question is taken by the same port, answered at once like a command
+and marked ``is_command`` (it is not conversation, memory or learning).
+
 Backends: with a :class:`BackendChooser` (``BackendSelector`` of the style model) every reply asks
 it which backend to use and tells it how the reply went, which is what makes the fallback to
 DeepSeek and the way back work (R-SRV-004); without one the setting ``backend.active`` is used
@@ -88,6 +94,7 @@ from twin.config.runtime import (
 from twin.config.settings import Settings
 from twin.engine.backend_select import BackendChoice
 from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
+from twin.engine.correction_port import CorrectionPort
 from twin.engine.dataview import ReplyDataView
 from twin.engine.decision import MAX_RETRIES, Decider, Decision, Situation
 from twin.engine.fallback import ShortAnswers
@@ -122,7 +129,9 @@ log = get_logger("twin.engine.machine")
 MERGE_SHARE = 0.8  # past this share of the wait, a message that joins adds a short pause
 STEP_FAILURE_PAUSE_S = 5.0
 STEP_FAILURES_BEFORE_RESET = 5
+SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
+CORRECTION_TIMEOUT_S = 30.0  # the question after a correction in plain words may not hold her up
 THINKING_PREFIX = "⚙️ 思考："
 THINKING_MAX_CHARS = 500
 SLASH_PREFIXES = ("/", "／")
@@ -223,6 +232,7 @@ class ConversationEngine:
         backends: BackendChooser | None = None,
         pacing: PacingSource = PacingModel.from_view,
         queue_extraction: ExtractionQueue | None = None,
+        corrections: CorrectionPort | None = None,
     ) -> None:
         self._channel = channel
         self._store = store
@@ -242,6 +252,7 @@ class ConversationEngine:
         self._settings = settings
         self._rng = rng
         self._commands = commands
+        self._corrections = corrections
         self._backends = backends
         self._pacing_source = pacing
         self._queue_extraction = queue_extraction
@@ -287,6 +298,19 @@ class ConversationEngine:
     def commands(self) -> CommandPort | None:
         """The command port in use (the router of ``twin.commands`` in the running application)."""
         return self._commands
+
+    def attach_corrections(self, port: CorrectionPort) -> None:
+        """Hand the engine the service for corrections in plain words (round 11)."""
+        self._corrections = port
+
+    @property
+    def corrections(self) -> CorrectionPort | None:
+        """The correction service in use (``None``: such corrections are not noticed)."""
+        return self._corrections
+
+    async def notify(self, text: str) -> None:
+        """Say ``text`` as a system message now (the report of work done in the background)."""
+        await self._say_system(text if text.startswith(SYSTEM_PREFIX) else SYSTEM_PREFIX + text)
 
     async def stop(self) -> None:
         """Stop the driver; whatever state is stored stays and is resumed by the next start."""
@@ -396,6 +420,12 @@ class ConversationEngine:
             and message.kind is MessageKind.TEXT
             and item.text.lstrip()[:1] in SLASH_PREFIXES
         )
+        confirming = (
+            not slash
+            and self._corrections is not None
+            and message.kind is MessageKind.TEXT
+            and await self._corrections.is_confirmation(item.text, message.at)
+        )
         added = await asyncio.to_thread(
             self._store.add_inbound,
             at=message.at,
@@ -403,12 +433,18 @@ class ConversationEngine:
             text=item.text,
             external_id=message.id,
             media=dict(item.media) if item.media is not None else None,
-            is_command=slash,
+            is_command=slash or confirming,
         )
         record = added.record
         if not added.created and not await self._lost(record.id, record.is_command):
             return  # delivered again after a restart: it is queued or answered already
-        if slash and self._commands is not None:
+        if confirming and self._corrections is not None:
+            outcome = await self._confirmation(item.text, message.at, record.id)
+            if outcome is not None:
+                await self._answer_command(outcome)
+                return
+            await asyncio.to_thread(self._rounds.set_command, record.id, False)
+        elif slash and self._commands is not None:
             try:
                 outcome = await self._commands.handle(
                     item.text, CommandContext(at=message.at, inbound_id=record.id)
@@ -421,6 +457,30 @@ class ConversationEngine:
                 return
             await asyncio.to_thread(self._rounds.set_command, record.id, False)
         await self._register((record.id,))
+
+    async def _confirmation(self, text: str, at: datetime, turn_id: str) -> CommandOutcome | None:
+        """The "yes" to an open question about a correction (``None``: no answer after all)."""
+        port = self._corrections
+        if port is None:
+            return None
+        try:
+            return await port.confirm(CommandContext(at=at, inbound_id=turn_id))
+        except Exception as exc:  # a failing service must never swallow a message of the user
+            log.warning("correction_confirm_failed", error=type(exc).__name__)
+            return None
+
+    async def _propose_correction(self, answered: Sequence[str]) -> None:
+        """After a reply: ask whether the user's remark was a correction to record (round 11)."""
+        port = self._corrections
+        if port is None or not answered:
+            return
+        try:
+            question = await asyncio.wait_for(port.propose(answered), CORRECTION_TIMEOUT_S)
+        except Exception as exc:  # the question is optional: the conversation goes on without it
+            log.warning("correction_proposal_failed", error=type(exc).__name__)
+            return
+        if question:
+            await self._say_system(question)
 
     async def _lost(self, turn_id: str, is_command: bool) -> bool:
         """Is a message that was stored before neither queued nor answered (a crash in between)?"""
@@ -1296,6 +1356,8 @@ class ConversationEngine:
         if not aborted and self._reasoning:
             await self._show_thinking(self._reasoning)
         self._reasoning = None
+        if not aborted:
+            await self._propose_correction(data.answering)
         await asyncio.to_thread(self._history.load)  # the window of the recent turns moves on
         await self._complete(data.answering)
 

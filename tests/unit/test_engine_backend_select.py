@@ -439,8 +439,11 @@ async def test_the_monitor_looks_at_the_model_while_nobody_is_talking(
         assert alerts(services) == [("style_fallback", "warning")]
         assert monitor.health().status is HealthStatus.DEGRADED
         client.healthy = True
-        await clock.advance(31)
-        await clock.advance(11 * 60)
+        # eleven minutes in the monitor's own steps: after each, the monitor has looked at the
+        # model (a read and a write on a slow disk take their time) and is asleep again
+        for _ in range(23):
+            await wait_until(lambda: clock.pending_sleepers >= 1)
+            await clock.advance(30)
         await wait_until(lambda: services.runtime.get(BACKEND_FALLBACK) is None)
         assert monitor.health().status is HealthStatus.OK
     finally:

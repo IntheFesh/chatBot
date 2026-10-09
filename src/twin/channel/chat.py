@@ -157,6 +157,7 @@ async def run_local_chat(
             on_finished=stop.set,
             drain_on_end=drain,
             restart_dispatch=False,
+            learning=False,
         )
         counted = lambda: engine.handled  # noqa: E731
     output.write_line("type /help for the commands; /quit leaves")

@@ -133,7 +133,7 @@ async def _serve(services: Services) -> None:
     stop = asyncio.Event()
     channel_component = register_channel(application, services)
     register_probe(application, services)
-    register_schedule(
+    schedule_component, _power = register_schedule(
         application,
         services,
         watcher,
@@ -147,6 +147,7 @@ async def _serve(services: Services) -> None:
             channel,
             watcher=watcher,
             after=(channel_component.name, "schedule"),
+            schedule=schedule_component,
             proactive=proactive_status_for(services, channel.session_state),
         )
     else:  # channel.kind "console": the terminal in place of WeChat
@@ -162,6 +163,7 @@ async def _serve(services: Services) -> None:
             after=(CHANNEL_COMPONENT_NAME, "schedule"),
             on_finished=stop.set,
             restart_dispatch=False,
+            schedule=schedule_component,
             proactive=proactive_status_for(services, console.session_state),
         )
     register_proactive(application, services, engine)

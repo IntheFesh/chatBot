@@ -553,6 +553,18 @@ async def run_to_idle(
     raise AssertionError("the engine did not settle")
 
 
+async def waiting_for(engine: ConversationEngine, moment: datetime, limit_s: float = 10.0) -> None:
+    """Wait until the engine is actually *waiting* for ``moment`` (``engine.waiting_until``).
+
+    Move the manual clock only after this.  The engine sleeps for a number of seconds worked out a
+    thread-hop earlier; a clock that jumps in between makes the sleep start from the new time and
+    end that much later (a pause of an hour "ends" after an hour and a half).  Nothing of the sort
+    happens with a real clock, and on a fast disk the gap is too small to hit - on a slow one
+    (Windows) it is hit every time.
+    """
+    await wait_until(lambda: engine.waiting_until == moment, limit_s=limit_s, interval=0.002)
+
+
 def bubbles_written(engine: ConversationEngine, count: int) -> Callable[[], bool]:
     """``run_to_idle(until=...)``: ``count`` bubbles of a reply are out *and noted by the engine*.
 

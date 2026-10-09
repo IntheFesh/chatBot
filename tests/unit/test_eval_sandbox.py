@@ -90,7 +90,9 @@ async def test_the_prompt_of_a_past_moment_holds_only_what_was_known_then(
     assert before in last and after not in last and LATE_FACT not in last
     assert PAST_MARKER in system and LIVE_STYLE not in system  # the pre-holdout card
     assert sample.real.lines[0].text not in last  # nor does the reply it is tested against leak
-    assert sample.at.astimezone(ZoneInfo("America/Chicago")).strftime("%Y年%-m月%-d日") in last
+    local = sample.at.astimezone(ZoneInfo("America/Chicago"))
+    # no strftime("%-m"): the flag that drops the leading zero is a glibc extension
+    assert f"{local.year}年{local.month}月{local.day}日" in last
 
 
 async def test_every_backend_is_given_the_same_eight_merged_turns(

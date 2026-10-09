@@ -5,8 +5,8 @@ CHECK constraint cannot be changed in SQLite, so the table is made again; its ch
 (``eval_items``, which reference it with ``ON DELETE CASCADE``) would be deleted with the old
 table while foreign keys are on, so their rows are kept aside and put back.
 
-Revision ID: 0013_proactive_tables
-Revises: 0012_eval_tables
+Revision ID: 0014_proactive_tables
+Revises: 0013_preference_pairs
 Create Date: 2026-10-09
 """
 
@@ -16,8 +16,8 @@ from datetime import datetime
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013_proactive_tables"
-down_revision: str | None = "0012_eval_tables"
+revision: str = "0014_proactive_tables"
+down_revision: str | None = "0013_preference_pairs"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

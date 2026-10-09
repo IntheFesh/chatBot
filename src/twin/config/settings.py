@@ -368,6 +368,25 @@ class EvalConfig(_Section):
     memory_questions: int = Field(default=20, ge=1)
 
 
+class CommandsConfig(_Section):
+    """The in-chat commands (round 11): confirmation window, pause limit, import report."""
+
+    confirm_window_min: int = Field(default=60, ge=1)
+    pause_max_h: int = Field(default=168, ge=1)
+    morning_hour: int = Field(default=8, ge=0, le=23)
+    import_poll_s: float = Field(default=5.0, gt=0)
+
+
+class LearningConfig(_Section):
+    """Learning from the conversation with the bot (round 11): rules of ``[不要这样]``."""
+
+    rules_max: int = Field(default=30, ge=1)
+    rules_interval_days: int = Field(default=7, ge=1)
+    rule_max_chars: int = Field(default=40, ge=8)
+    detect_corrections: bool = True
+    check_interval_s: float = Field(default=3600.0, gt=0)
+
+
 class EmergencyContactConfig(_Section):
     enabled: bool = False
     email: str | None = None
@@ -486,6 +505,8 @@ class Settings(BaseSettings):
     autodl: AutoDlConfig = Field(default_factory=AutoDlConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
     eval: EvalConfig = Field(default_factory=EvalConfig)
+    commands: CommandsConfig = Field(default_factory=CommandsConfig)
+    learning: LearningConfig = Field(default_factory=LearningConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
 
     @classmethod

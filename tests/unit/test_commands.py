@@ -40,7 +40,25 @@ from twin.services import Services
 from twin.storage.training_models import ModelRegistryEntry
 
 PREFIX = "⚙️ "
-COMMANDS = ("帮助", "状态", "思考", "显示思考", "后端", "重来")
+COMMANDS = (
+    "帮助",
+    "状态",
+    "思考",
+    "显示思考",
+    "后端",
+    "重来",
+    "时区",
+    "暂停",
+    "恢复",
+    "主动",
+    "作息",
+    "记住",
+    "忘掉",
+    "记忆",
+    "不像",
+    "费用",
+    "导入",
+)
 
 
 # ---------------------------------------------------------------------------- parsing
@@ -220,40 +238,41 @@ async def test_chat_goes_through_and_every_command_answers_in_the_voice_of_the_s
     assert texts.PREFIX == PREFIX == "⚙️ "
 
 
-async def test_a_command_of_a_later_round_is_unknown_until_it_registers_and_then_it_is_listed(
+async def test_a_command_of_another_round_is_unknown_until_it_registers_and_then_it_is_listed(
     world: World,
 ) -> None:
-    before = await world.say("/暂停 2小时")
-    assert "没有这个指令：/暂停" in before.reply and "/暂停" not in before.reply.split("\n")[1]
+    before = await world.say("/评分 5")  # round 10 registers this one; this table does not know it
+    assert "没有这个指令：/评分" in before.reply and "/评分" not in before.reply.split("\n")[1]
     called: list[str] = []
 
-    async def pause(call: CommandCall) -> str:
+    async def rate(call: CommandCall) -> str:
         called.append(call.args)
-        return f"暂停到{call.args}"
+        return f"收到评分{call.args}"
 
     world.router.register(
         CommandSpec(
-            name="暂停",
-            group="作息与主动",
-            summary="暂停回复与主动",
-            syntax="/暂停 <时长>",
-            example="/暂停 2小时",
-            handler=pause,
-            aliases=("pause",),
+            name="评分",
+            group="学习与评分",
+            summary="对最近一周主动消息与整体体验打分",
+            syntax="/评分 <1-5> [备注]",
+            example="/评分 4 挺像的",
+            handler=rate,
+            aliases=("rate",),
         )
     )
-    outcome = await world.say("／暂停：2小时")
-    assert outcome.reply == PREFIX + "暂停到2小时" and called == ["2小时"]
-    assert (await world.say("/PAUSE 1小时")).reply == PREFIX + "暂停到1小时"
+    outcome = await world.say("／评分：5")
+    assert outcome.reply == PREFIX + "收到评分5" and called == ["5"]
+    assert (await world.say("/RATE 3")).reply == PREFIX + "收到评分3"
     help_text = (await world.say("/帮助")).reply
-    assert "【作息与主动】\n/暂停 <时长> — 暂停回复与主动" in help_text
+    assert "/评分 <1-5> [备注] — 对最近一周主动消息与整体体验打分" in help_text
 
 
 async def test_an_unknown_command_gets_the_help_summary_and_is_not_chat(world: World) -> None:
-    for text in ("/不像 她不会这么说", "/记住 她喜欢猫", "/zzz", "/思考开"):
+    for text in ("/评分 5", "/zzz", "/思考开", "/随叫随到"):
         outcome = await world.say(text)
         assert outcome.reply.startswith(PREFIX + "没有这个指令：/")
-        assert "可用的指令：/帮助 /状态 /思考 /显示思考 /后端 /重来" in outcome.reply
+        assert "可用的指令：/帮助 /状态 /思考 /显示思考 /后端 /重来 /时区" in outcome.reply
+        assert "/不像 /费用 /导入" in outcome.reply
         assert "发 /帮助 看每个指令的用法和例子。" in outcome.reply and not outcome.redo
 
 
@@ -261,12 +280,14 @@ async def test_help_lists_the_commands_that_exist_by_group_and_only_those(world:
     reply = (await world.say("/帮助")).reply
     lines = reply.split("\n")
     assert lines[0] == PREFIX + texts.HELP_HEADER
-    assert "【基本】" in lines and "【对话与生成】" in lines
-    assert lines.index("【基本】") < lines.index("【对话与生成】")
+    for group in ("基本", "对话与生成", "作息与主动", "记忆", "学习与评分", "费用与导入"):
+        assert f"【{group}】" in lines
+    order = [lines.index(f"【{g}】") for g in ("基本", "对话与生成", "作息与主动", "记忆")]
+    assert order == sorted(order)
     for name in COMMANDS:
         assert f"/{name}" in reply
-    for later in ("/不像", "/记住", "/忘掉", "/记忆", "/评分", "/时区", "/暂停", "/主动", "/作息"):
-        assert later not in reply  # not implemented yet, so not offered
+    assert "/评分" not in reply  # round 10's command is not in this table
+    assert "/随叫随到" not in reply  # no such command is offered
     assert "/思考 开|关|自动 — " in reply and "/后端 deepseek|style|hybrid — " in reply
 
 

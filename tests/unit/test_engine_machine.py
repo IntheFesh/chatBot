@@ -227,6 +227,7 @@ async def test_a_message_while_she_waits_joins_the_round_without_a_new_draw(rig:
     )
     planned = rig.engine.snapshot().planned_send_at
     assert planned == at(20.7)  # the message is 0.7 s worth of reading
+    await waits_until(rig, at(20.7))
     await rig.clock.advance(1)  # t = 16 s: 78 % of the 20.7 s wait
     await rig.message("还有一件事")
     await wait_until(lambda: len(rig.engine.snapshot().pending) == 2)
@@ -243,6 +244,7 @@ async def test_after_eighty_percent_of_the_wait_a_short_pause_is_added(rig: Harn
     await run_to_idle(
         rig.engine, rig.clock, until=lambda: rig.engine.snapshot().state == "DECIDING"
     )
+    await waits_until(rig, at(20.7))
     await rig.clock.advance(3)  # t = 18 s: past 80 % of 20.7 s
     await rig.message("等一下")
     await wait_until(lambda: RoundData.of(rig.engine.snapshot()).decided_for == 2)

@@ -231,7 +231,7 @@ def test_ratings_are_scores_of_one_to_five_with_a_sealed_note(
 
 def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_path: Path) -> None:
     path = tmp_path / "m.db"
-    migrate.upgrade(path, "0012_eval_tables")
+    migrate.upgrade(path, "0013_preference_pairs")
     connection = sqlite3.connect(path)
     try:
         before = {
@@ -239,8 +239,8 @@ def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_p
         }
     finally:
         connection.close()
-    migrate.upgrade(path, "0013_proactive_tables")
-    assert "0013_proactive_tables" in migrate.revision_history()
+    migrate.upgrade(path, "0014_proactive_tables")
+    assert "0014_proactive_tables" in migrate.revision_history()
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -274,7 +274,7 @@ def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_p
 def test_the_migration_keeps_the_evaluation_items_of_the_runs_it_rebuilds(tmp_path: Path) -> None:
     """The ``eval_runs`` table is made again; its children must not go with the old one."""
     path = tmp_path / "m.db"
-    migrate.upgrade(path, "0012_eval_tables")
+    migrate.upgrade(path, "0013_preference_pairs")
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -306,7 +306,7 @@ def test_the_migration_keeps_the_evaluation_items_of_the_runs_it_rebuilds(tmp_pa
         assert "REFERENCES eval_runs" in sql  # the children still point at the new table
     finally:
         connection.close()
-    migrate.downgrade(path, "0012_eval_tables")
+    migrate.downgrade(path, "0013_preference_pairs")
     connection = sqlite3.connect(path)
     try:
         assert connection.execute("SELECT id FROM eval_items").fetchall() == [("i1",)]

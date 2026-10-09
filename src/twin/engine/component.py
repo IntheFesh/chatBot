@@ -23,7 +23,17 @@ Two more things are wired here, and only here:
 * the command router of round 09-2 (:class:`~twin.commands.router.CommandRouter`) in
   :func:`command_port_for` - the one place that names it.  Its ``/状态`` carries the suggested
   quiet window of the engine (R-ENG-002); later rounds add their commands with
-  ``router.register`` (``engine.commands`` is the router in use).
+  ``router.register`` (``engine.commands`` is the router in use).  Round 11 puts its commands in
+  the same router (``/时区 /暂停 /主动 /作息 /记住 /忘掉 /记忆 /不像 /费用 /导入``) and gives the
+  engine the service for corrections in plain words
+  (:class:`~twin.learning.corrections.CorrectionService`, ``engine.corrections``).
+
+:func:`register_engine` also adds the two small components of round 11: the one that reports how
+an import started from the chat ended (:class:`~twin.commands.import_report.ImportReportComponent`)
+and the one that queues the weekly consolidation of the correction rules
+(:class:`~twin.learning.component.LearningComponent`; ``learning=False`` leaves it out - the
+interactive terminal chat is a short session, the weekly look belongs to ``twin run``, and an hour
+long sleep would also make a virtual test clock jump an hour at a time).
 """
 
 from __future__ import annotations
@@ -35,7 +45,9 @@ from typing import TYPE_CHECKING
 from twin.app import Application, ComponentHealth, TaskSupervisor
 from twin.channel.base import Channel
 from twin.commands import texts
+from twin.commands.import_report import ImportReportComponent
 from twin.commands.router import CommandRouter
+from twin.commands.routine_commands import ComponentSchedule, ScheduleControl
 from twin.commands.status import ProactiveStatus
 from twin.engine.command_port import CommandPort
 from twin.engine.dataview import LiveDataSource
@@ -53,6 +65,11 @@ from twin.engine.state_store import ConversationStateStore
 from twin.engine.sticker_sender import StickerSender
 from twin.engine.style_runtime import StyleRuntime
 from twin.engine.turns import BotTurnMessages, BotTurnStore
+from twin.learning.component import LearningComponent
+from twin.learning.corrections import CorrectionService
+from twin.learning.dislike import NotLikeRecorder
+from twin.learning.pairs import PreferencePairStore
+from twin.learning.sample import SampleBuilder
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
 from twin.memory.jobs import queue_bot_extraction
 from twin.memory.memory import Memory
@@ -60,6 +77,7 @@ from twin.memory.recent import BotMessage, HistoryWindow
 from twin.ops.logging import get_logger
 from twin.ops.state_watch import StateWatcher
 from twin.profile.api import load_profile
+from twin.schedule.component import ScheduleComponent
 from twin.schedule.events import Resumed
 from twin.schedule.service import schedule_kit, time_service_for
 from twin.stickers.catalog import StickerCatalog
@@ -94,12 +112,17 @@ def command_port_for(
     style: StyleRuntime,
     channel: Channel,
     memory: Memory,
+    data: LiveDataSource | None = None,
+    schedule: ScheduleControl | None = None,
+    recorder: NotLikeRecorder | None = None,
     proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> CommandRouter:
     """The command router of the application (the one place that builds it).
 
     ``/状态`` reads the channel's session for the platform window and the engine for the
     suggested quiet window; ``/重来`` deletes what the thrown-away reply made up from ``memory``.
+    ``schedule`` is how ``/时区`` and ``/作息`` reach the running schedule component (without
+    it they use the schedule kit directly), ``data`` and ``recorder`` serve ``/不像``.
     """
     return CommandRouter.from_services(
         services,
@@ -111,6 +134,9 @@ def command_port_for(
         session_state=channel.session_state,
         proactive=proactive,
         extra_status=(quiet_window_line(engine),),
+        schedule=schedule,
+        data=data,
+        recorder=recorder,
     )
 
 
@@ -124,6 +150,7 @@ def build_engine(
     commands: CommandPort | None = None,
     notifier: EmergencyNotifier | None = None,
     rng: random.Random | None = None,
+    schedule: ScheduleComponent | None = None,
     proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> ConversationEngine:
     """The engine of this process on ``channel`` (see the module description).
@@ -131,7 +158,8 @@ def build_engine(
     Needs the DeepSeek key: without it the engine could never answer, so the missing key is
     reported here, with the command that sets it, instead of at the first message.  ``style``
     is the style model's runtime (made from the settings when not given); ``commands`` replaces
-    the command router (tests).
+    the command router (tests); ``schedule`` is the running schedule component (``/时区`` and
+    ``/作息`` go through it).
     """
     services.secrets.require(DEEPSEEK_SECRET)
     settings = services.settings
@@ -196,7 +224,14 @@ def build_engine(
         store=turn_store,
         rng=chance,
     )
+    recorder = NotLikeRecorder(
+        turn_store,
+        FeedbackStore(services.db, clock),
+        PreferencePairStore(services.db, clock),
+        SampleBuilder(services, reader, source),
+    )
     if commands is None:
+        control = ComponentSchedule(schedule, schedule_kit(services)) if schedule else None
         engine.attach_commands(
             command_port_for(
                 services,
@@ -205,9 +240,15 @@ def build_engine(
                 style=styled,
                 channel=channel,
                 memory=source.memory,
+                data=source,
+                schedule=control,
+                recorder=recorder,
                 proactive=proactive,
             )
         )
+    engine.attach_corrections(
+        CorrectionService(services, llm.client, recorder, turn_store, RoundStore(services.db))
+    )
     return engine
 
 
@@ -289,6 +330,8 @@ def register_engine(
     on_finished: Callable[[], None] | None = None,
     drain_on_end: bool = False,
     restart_dispatch: bool = True,
+    schedule: ScheduleComponent | None = None,
+    learning: bool = True,
     proactive: Callable[[], ProactiveStatus | None] | None = None,
 ) -> EngineComponent:
     """Build the engine, add it to ``application`` and subscribe it to what it must hear.
@@ -308,12 +351,16 @@ def register_engine(
         pipeline=pipeline,
         commands=commands,
         rng=rng,
+        schedule=schedule,
         proactive=proactive,
     )
     schedule_kit(services).events.subscribe(Resumed, engine.on_resumed)
     if watcher is not None:
         watcher.subscribe(engine.on_state_change)
     application.register(styled.monitor(services))
+    application.register(ImportReportComponent(services, engine.notify))
+    if learning:
+        application.register(LearningComponent(services))
     component = EngineComponent(
         engine,
         channel,

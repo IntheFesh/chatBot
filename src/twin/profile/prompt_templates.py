@@ -47,6 +47,9 @@ MEMORY_SUMMARY_MERGE = "memory_summary_merge"
 LIFELINE_GENERATE = "lifeline_generate"
 LIFELINE_CHECK = "lifeline_check"
 TRAIN_PLAN = "train_plan"
+CORRECTION_CHECK = "correction_check"
+CORRECTION_RULES = "correction_rules"
+CORRECTION_RULE_CHECK = "correction_rule_check"
 PROACTIVE_PLAN = "proactive_plan"
 
 

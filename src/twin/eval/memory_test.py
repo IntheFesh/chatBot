@@ -2,8 +2,10 @@
 
 ``twin eval memory`` asks the bot twenty questions whose answers are facts it should remember:
 **ten from the real records** (``real_record``) and **ten from the conversation with the bot**
-(``user_said`` or ``bot_invented``).  A test needs both: a bot that recalls the old chat but not
-what it said last week, or the other way round, has not passed.  When the conversation with the
+(``user_said``, ``bot_invented`` or ``user_command``, the last being what the user asked her to
+remember with ``/记住``; a fact the user took back with ``/忘掉`` is no longer current and is never
+asked).  A test needs both: a bot that recalls the old chat but not what it said last week, or the
+other way round, has not passed.  When the conversation with the
 bot holds fewer than ten facts to ask about, the test says so ("chat a few more days first") and is
 recorded as **not passed - not enough samples**; real records are never used to make up the number.
 
@@ -81,7 +83,7 @@ TOTAL = 2 * PER_SOURCE
 PASS_RATIO_NUM, PASS_RATIO_DEN = 4, 5  # 80 %
 PROMPT_VERSION = "eval-memory-1"
 REAL_SOURCES = ("real_record",)
-BOT_SOURCES = ("user_said", "bot_invented")
+BOT_SOURCES = ("user_said", "bot_invented", "user_command")
 GROUP_REAL, GROUP_BOT = "real", "bot"
 MIN_FACT_CHARS = 4
 QUESTION_COMPLETION_TOKENS = 200
@@ -132,6 +134,7 @@ def question_messages(fact_text: str, source: str, note: str = "") -> list[ChatM
         "real_record": "来自过去真实的聊天记录",
         "user_said": "是用户和机器人聊天时自己说过的",
         "bot_invented": "是机器人聊天时说起的关于她自己的事",
+        "user_command": "是用户用“记住”指令专门让机器人记下的",
     }.get(source, "")
     body = f"事实（{origin}）：{fact_text}"
     if note:

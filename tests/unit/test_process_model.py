@@ -98,6 +98,9 @@ def expected_names() -> list[str]:
         "persona regenerate",
         "persona status",
         "persona templates",
+        "persona rules list",
+        "persona rules delete",
+        "persona rules consolidate",
         "stickers list",
         "stickers show",
         "stickers tag",
@@ -124,6 +127,7 @@ def expected_names() -> list[str]:
         "train bundle",
         "train export",
         "train export-status",
+        "train export-dpo",
         "train retrain-check",
         "train remote connect",
         "train remote upload",
@@ -152,7 +156,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 110 == len(expected_names())
+    assert len(names) == 114 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -215,6 +219,9 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "persona regenerate": CommandKind.HEAVY,
         "persona status": CommandKind.READ,
         "persona templates": CommandKind.READ,
+        "persona rules list": CommandKind.READ,
+        "persona rules delete": CommandKind.LIGHT,
+        "persona rules consolidate": CommandKind.HEAVY,
         "stickers list": CommandKind.READ,
         "stickers show": CommandKind.READ,
         "stickers tag": CommandKind.LIGHT,
@@ -242,6 +249,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "train bundle": CommandKind.LIGHT,
         "train export": CommandKind.HEAVY,
         "train export-status": CommandKind.READ,
+        "train export-dpo": CommandKind.LIGHT,
         "train retrain-check": CommandKind.LIGHT,
         "train remote connect": CommandKind.LIGHT,
         "train remote upload": CommandKind.LIGHT,
