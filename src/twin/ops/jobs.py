@@ -383,7 +383,10 @@ class JobQueue:
 
     def batch_summary(self, batch_id: str) -> BatchSummary:
         with self._db.session() as session:
-            jobs = list(session.execute(select(Job).where(Job.batch_id == batch_id)).scalars())
+            jobs = [
+                _view(job)
+                for job in session.execute(select(Job).where(Job.batch_id == batch_id)).scalars()
+            ]
         if not jobs:
             raise BatchNotFoundError(f"no jobs belong to batch {batch_id!r}")
         return BatchSummary(
