@@ -5,16 +5,11 @@ from __future__ import annotations
 import pytest
 
 from tests.support.synth_chat import ChatSpec, build_chat
+from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta
 from twin.profile.api import load_profile
 from twin.profile.builder import rebuild
 from twin.services import Services
-from twin.stickers.rate import (
-    HISTORY_KEY,
-    MemoryBubbleHistory,
-    StickerRateController,
-    StoredBubbleHistory,
-)
-from twin.storage.settings_store import get_setting
+from twin.stickers.rate import BotTurnBubbleHistory, MemoryBubbleHistory, StickerRateController
 
 HER_SHARE = 0.105  # 10.5 % of her messages are stickers (SPEC section 0)
 
@@ -119,18 +114,60 @@ def test_the_window_and_tolerance_must_make_sense() -> None:
         StickerRateController(0.1, history, window=5, tolerance=1.0)
 
 
-def test_the_stored_window_survives_a_restart_and_keeps_only_the_last_bubbles(
+def send(
+    store: BotTurnStore, services: Services, flags: list[bool], *, command: bool = False
+) -> None:
+    """Store one reply per flag: a sticker bubble (``True``) or a text bubble."""
+    for flag in flags:
+        services.clock.now_utc()  # the manual clock only moves when a test asks it to
+        bubble = (
+            OutboundBubble("[表情包:开心]", services.clock.now_utc(), "sticker", "a" * 32)
+            if flag
+            else OutboundBubble("好", services.clock.now_utc())
+        )
+        store.add_bubble(bubble, meta=ReplyMeta("deepseek"), is_command=command)
+        services.clock.tick(1)  # type: ignore[attr-defined]
+
+
+def test_the_window_is_read_from_bot_turns_and_keeps_only_the_last_bubbles(
     services: Services,
 ) -> None:
-    first = StoredBubbleHistory(services.db, services.clock, 5)
-    assert first.flags() == []
-    for flag in (True, False, False, True, False, False, False):
-        first.record(flag)
-    again = StoredBubbleHistory(services.db, services.clock, 5)  # a new process
+    store = BotTurnStore(services.db, services.clock)
+    history = BotTurnBubbleHistory(services.db, 5)
+    assert history.flags() == []
+    send(store, services, [True, False, False, True, False, False, False])
+    again = BotTurnBubbleHistory(services.db, 5)  # a new process sees the same bubbles
     assert again.flags() == [False, True, False, False, False]
-    with services.db.session() as session:
-        assert get_setting(session, HISTORY_KEY) == [0, 1, 0, 0, 0]
-    assert StoredBubbleHistory(services.db, services.clock, 3).flags() == [False, False, False]
+    assert BotTurnBubbleHistory(services.db, 3).flags() == [False, False, False]
+    with pytest.raises(ValueError, match="window"):
+        BotTurnBubbleHistory(services.db, 0)
+
+
+def test_commands_and_thrown_away_replies_are_not_in_the_window(services: Services) -> None:
+    store = BotTurnStore(services.db, services.clock)
+    send(store, services, [True, False])
+    send(store, services, [True, True], command=True)
+    send(store, services, [True])
+    rejected = store.latest_reply()
+    assert store.reject_reply(rejected[0].reply_id or "") == 1
+    assert BotTurnBubbleHistory(services.db, 10).flags() == [True, False]
+
+
+def test_a_history_that_fills_itself_cannot_be_recorded_into(services: Services) -> None:
+    rate = StickerRateController(
+        HER_SHARE, BotTurnBubbleHistory(services.db, 200), window=200, tolerance=0.2
+    )
+    with pytest.raises(TypeError, match="bot_turns"):
+        rate.record(True)
+
+
+def test_stickers_chosen_for_the_same_reply_count_towards_the_limit() -> None:
+    # 24 of the last 200 bubbles are stickers (12 %); one more would make 12.5 %: allowed
+    rate = controller([False] * 176 + [True] * 24)
+    assert not rate.should_drop() and not rate.should_drop_after(())
+    # a sticker already chosen for this reply makes the next one 13 %: over her share plus 20 %
+    assert rate.should_drop_after([True])
+    assert not rate.should_drop_after([False, False])  # text bubbles do not use up the room
 
 
 @pytest.fixture
@@ -154,13 +191,16 @@ def test_her_share_comes_from_her_profile_of_the_scope(chat: Services) -> None:
     assert live.upper == pytest.approx(live.her_share * (1 + config.rate_tolerance))
 
 
-def test_the_default_window_is_stored_and_has_the_configured_size(chat: Services) -> None:
+def test_the_default_window_comes_from_bot_turns_and_has_the_configured_size(
+    chat: Services,
+) -> None:
+    store = BotTurnStore(chat.db, chat.clock)
+    size = chat.settings.stickers.rate_window
+    send(store, chat, [True] * (size + 5))
     rate = StickerRateController.from_services(chat)
-    for _ in range(205):
-        rate.record(True)
-    assert rate.status().bubbles == chat.settings.stickers.rate_window == 200
-    again = StickerRateController.from_services(chat)
-    assert again.status().bubbles == 200 and again.should_drop()
+    assert rate.status().bubbles == size == 200
+    assert rate.should_drop()
+    assert StickerRateController.from_services(chat).status().bubbles == size  # another process
 
 
 def test_a_controller_without_a_profile_never_drops(services: Services) -> None:

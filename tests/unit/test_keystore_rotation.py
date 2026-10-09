@@ -193,6 +193,10 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "followups": {"text", "evidence"},
         # round 08: the day plans (the sleep schedule) join the rotation automatically
         "daily_plans": {"plan"},
+        # round 09: the bot's conversation, its state and the feedback join the rotation
+        "bot_turns": {"text", "media", "plan", "timings", "actions"},
+        "conversation_state": {"pending", "sent", "data"},
+        "feedback": {"correction"},
     }
 
 

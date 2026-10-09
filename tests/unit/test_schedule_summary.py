@@ -94,8 +94,9 @@ def test_the_scopes_are_the_real_records_of_the_day_and_the_bots_conversation(
     writer.store()
     assert summary_scopes(services, day) == ("real",)
     assert summary_scopes(services, date(2026, 10, 7)) == ()  # another day has no records
-    register_bot_turn_reader(lambda _services: conversation(2))
+    register_bot_turn_reader(lambda _services: conversation(2, start=utc(2026, 10, 8, 20, 30)))
     assert summary_scopes(services, day) == ("real", "bot")
+    assert summary_scopes(services, date(2026, 10, 7)) == ()  # no conversation that day either
 
 
 def test_both_summaries_are_queued_for_the_day_before_and_not_twice(
@@ -104,7 +105,7 @@ def test_both_summaries_are_queued_for_the_day_before_and_not_twice(
     writer = MessageWriter(services)
     writer.add(utc(2026, 10, 8, 20, 0), True, "text", "晚上好")
     writer.store()
-    register_bot_turn_reader(lambda _services: conversation(2))
+    register_bot_turn_reader(lambda _services: conversation(2, start=utc(2026, 10, 8, 20, 30)))
     plan = rig.planner.ensure(date(2026, 10, 9))
     found = times(plan.wake or utc(2026, 10, 9, 12, 30))
     first = queue_previous_day_summaries(services, plan, found)

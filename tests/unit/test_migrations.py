@@ -462,3 +462,72 @@ def test_round_08_migration_adds_the_plan_and_time_zone_tables(tmp_path: Path) -
         connection.close()
     migrate.downgrade(path, "0007_memory_tables")
     assert table_names(path) == before
+
+
+def test_round_09_migration_adds_the_conversation_tables_and_their_constraints(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0009_training_tables")
+    before = table_names(path)
+    migrate.upgrade(path, "0010_bot_turns_state_feedback")
+    assert table_names(path) - before == {"bot_turns", "conversation_state", "feedback"}
+    assert migrate.revision_history()[9] == "0010_bot_turns_state_feedback"
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA foreign_keys=ON")
+
+    def turn(name: str, **fields: str) -> str:
+        values = {
+            "direction": "'out'",
+            "kind": "'text'",
+            "external": "NULL",
+            "index": "NULL",
+            "backend": "NULL",
+        } | fields
+        return (
+            "INSERT INTO bot_turns (id, at, direction, kind, text, is_command, external_id, "
+            f"bubble_index, backend, created_at, updated_at) VALUES ('{name}', '2026-03-08', "
+            f"{values['direction']}, {values['kind']}, x'00', 0, {values['external']}, "
+            f"{values['index']}, {values['backend']}, '2026-03-08', '2026-03-08')"
+        )
+
+    try:
+        connection.execute(turn("t1", direction="'in'", external="'ext-1'"))
+        for name, bad in (
+            ("t2", {"direction": "'sideways'"}),
+            ("t3", {"kind": "'poem'"}),
+            ("t4", {"index": "-1"}),
+            ("t5", {"index": "0", "backend": "'oracle'"}),
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(turn(name, **bad))
+        # a channel message id is stored once per direction; other rows are free to have none
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(turn("t6", direction="'in'", external="'ext-1'"))
+        for name in ("n1", "n2"):
+            connection.execute(turn(name, index="0", backend="'deepseek'"))
+        # the same id on the other side is another message
+        connection.execute(turn("t7", external="'ext-1'", index="0", backend="'deepseek'"))
+        state = (
+            "INSERT INTO conversation_state (id, state, state_since, created_at, updated_at) "
+            "VALUES ('{id}', '{state}', '2026-03-08', '2026-03-08', '2026-03-08')"
+        )
+        connection.execute(state.format(id="main", state="COLLECTING"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(state.format(id="other", state="DREAMING"))
+        feedback = (
+            "INSERT INTO feedback (id, type, reply_id, bot_turn_id, created_at, updated_at) "
+            "VALUES ('{id}', '{kind}', 'r1', {turn}, '2026-03-08', '2026-03-08')"
+        )
+        connection.execute(feedback.format(id="f1", kind="redo", turn="'t7'"))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(feedback.format(id="f2", kind="praise", turn="NULL"))
+        with pytest.raises(sqlite3.IntegrityError):  # the rejected bubble must exist
+            connection.execute(feedback.format(id="f3", kind="redo", turn="'nope'"))
+        connection.execute("DELETE FROM bot_turns WHERE id = 't7'")
+        found = connection.execute("SELECT bot_turn_id FROM feedback WHERE id = 'f1'").fetchone()
+        assert found == (None,)  # the feedback outlives the row it was about
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0008_daily_plans_timezone")
+    assert table_names(path) == before
