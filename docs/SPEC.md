@@ -83,6 +83,7 @@ pricing:
 budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00 }
 thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
 backend: { active: "deepseek" }        # deepseek|style|hybrid
+jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
 engine:
   quiet_window_s: 15
   quiet_window_adaptive: false         # true 时按用户连发间隔 p75 自适应，上限 quiet_window_max_s

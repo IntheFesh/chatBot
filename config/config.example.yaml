@@ -1,0 +1,67 @@
+# wechat-twin example configuration (no secrets; secrets live in the credential store).
+# Copy to config/config.yaml and edit.  This file must stay identical to the YAML block in
+# docs/SPEC.md R-CFG-004 and to the defaults of twin.config.Settings (R-CFG-005).
+consent: { confirmed_at: "2026-10-08" }
+paths: { data_dir: "./data", export_dir: null }       # export_dir 指向用户本地的全部导出
+target: { username: null }                            # 目标会话 wxid，首次导入时确认
+time:
+  bot_timezone: "America/Chicago"
+  source_timezone: "America/Chicago"
+  source_timezone_ranges: []          # 例 [{from: "2025-01-01", to: "2025-08-31", tz: "Asia/Shanghai"}]；未覆盖的日期用 source_timezone
+deepseek:
+  base_url: "https://api.deepseek.com"
+  chat_model: "deepseek-flash"
+  offline_model: "deepseek-flash"      # 可改 deepseek-v4-pro
+  vision_model: "deepseek-flash"
+  timeout_s: { non_thinking: 60, thinking: 180 }
+  max_concurrency: 4
+  reasoning_effort: "high"             # low|high|max，只在思考开启时发送
+pricing_usd_per_mtok:                  # 2026-10 官方价格页，高峰价
+  deepseek-flash: { cache_hit: 0.006, cache_miss: 0.30, output: 1.20 }
+  deepseek-v4-pro: { cache_hit: 0.044, cache_miss: 1.32, output: 3.96 }
+pricing:
+  offpeak_multiplier: 0.5              # 官方取消非高峰优惠时改为 1.0
+  extra_offpeak_dates: []              # 额外按非工作日处理的北京日期
+  extra_peak_dates: []                 # 额外按工作日处理的北京日期
+budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00 }
+thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
+backend: { active: "deepseek" }        # deepseek|style|hybrid
+jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
+engine:
+  quiet_window_s: 15
+  quiet_window_adaptive: false         # true 时按用户连发间隔 p75 自适应，上限 quiet_window_max_s
+  quiet_window_max_s: 45
+  max_wait_s: 90
+  history_turns_min: 30
+  history_turns_max: 40                # 超过时一次后移 10 轮（缓存友好）
+  examples_k: 8
+  max_bubbles: 8
+  ai_phrases_file: "config/lists/ai_phrases.txt"
+  commitment_patterns_file: "config/lists/commitment_patterns.txt"
+profile: { burst_gap_s: 120, segment_gap_min: 60, recent_days: 90, recency_weight: 0.6 }
+activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, min_valid_days: 14 }
+proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
+             edge_of_sleep_weekly_max: 2, tick_minutes: 5 }
+channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
+retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10 }
+memory: { daily_summary: true, fact_extraction: true }
+ops:
+  backup_hour_local: 4
+  backup_keep_daily: 14
+  backup_keep_weekly: 8
+  backup_mirror_dir: null              # 可选：外接盘等异地副本目录
+  smtp: { host: null, port: 465, user: null, to: null }
+style_model:
+  mode: "llamacpp_completion"          # llamacpp_completion|vllm_completion
+  endpoint: "http://127.0.0.1:8081"
+  model_id: null
+  tunnel: { local_port: 8082, remote_port: 8000 }
+autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
+training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
+eval: { blind_n: 50, memory_questions: 20 }
+safety:
+  crisis_keywords_file: "config/lists/crisis_keywords.txt"
+  hotlines: { US: "988（美国心理危机热线，电话或短信）", CN: "12356（全国心理援助热线）" }
+  timezone_country: { "America/Chicago": "US", "America/New_York": "US", "America/Denver": "US",
+                      "America/Los_Angeles": "US", "Asia/Shanghai": "CN" }
+  emergency_contact: { enabled: false, email: null }   # 显式开启才生效；邮件不含任何聊天内容

@@ -1,0 +1,40 @@
+# --- runtime data: never committed (CLAUDE.md rule 6) ---
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.enc
+exports/
+models/
+backups/
+.env
+.env.*
+config/config.yaml
+*.gguf
+*.safetensors
+*.bin.enc
+
+# --- python / tooling ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+*.log
+
+# --- editors / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
