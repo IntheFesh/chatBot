@@ -20,6 +20,7 @@ from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
+from twin.memory.cli import memory_app
 from twin.ops.cli import jobs_app
 from twin.ops.components import build_application
 from twin.ops.console import ensure_utf8
@@ -56,6 +57,7 @@ app.add_typer(profile_app, name="profile")
 app.add_typer(routine_app, name="routine")
 app.add_typer(persona_app, name="persona")
 app.add_typer(retrieval_app, name="retrieval")
+app.add_typer(memory_app, name="memory")
 
 log = get_logger("twin.cli")
 

@@ -7,6 +7,7 @@ that adds tables in its own module lists the module here.
 
 from twin.storage import (
     chat_models,
+    memory_models,
     models,
     persona_models,
     profile_models,
@@ -15,6 +16,7 @@ from twin.storage import (
 
 __all__ = [
     "chat_models",
+    "memory_models",
     "models",
     "persona_models",
     "profile_models",

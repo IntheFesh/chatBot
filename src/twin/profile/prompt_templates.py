@@ -39,6 +39,11 @@ PERSONA_MAP = "persona_map"
 PERSONA_REDUCE = "persona_reduce"
 STICKER_TAG = "sticker_tag"
 STICKER_CONTEXT = "sticker_context"
+MEMORY_EXTRACT = "memory_extract"
+MEMORY_EXTRACT_BOT = "memory_extract_bot"
+MEMORY_CONFLICT = "memory_conflict"
+MEMORY_SUMMARY = "memory_summary"
+MEMORY_SUMMARY_MERGE = "memory_summary_merge"
 
 
 class TemplateError(RuntimeError):
@@ -91,6 +96,20 @@ def template_files(directory: Path = TEMPLATE_DIR) -> dict[str, dict[int, Path]]
         if match:
             found.setdefault(match["name"], {})[int(match["version"])] = path
     return found
+
+
+def newest_file_template(name: str, directory: Path = TEMPLATE_DIR) -> PromptText:
+    """The newest file version of a template, read from the file alone (no database access).
+
+    A READ command that has to size a prompt (the cost estimate of ``twin memory replay
+    estimate``) cannot let :class:`TemplateStore` load the files into the table first: that is a
+    write.  The newest file is the version that would be in force after the first load.
+    """
+    versions = template_files(directory).get(name)
+    if not versions:
+        raise TemplateError(f"there is no template file named {name!r}")
+    version = max(versions)
+    return split_template(name, version, versions[version].read_text(encoding="utf-8"))
 
 
 class TemplateStore:

@@ -151,3 +151,27 @@ def test_low_level_modules_do_not_depend_on_the_application_layers() -> None:
             if m.startswith(("twin.ops", "twin.config", "twin.app"))
         }
         assert higher <= ({"twin.ops.winapi"} if lowest == "twin.ops.winapi" else set()), lowest
+
+
+MEMORY_INTERNALS = {
+    "twin.storage.memory_models",
+    "twin.memory.store",
+    "twin.memory.corpus",
+    "twin.memory.memory",
+    "twin.memory.vectors",
+    "twin.memory.lifeline",
+    "twin.memory.followups",
+    "twin.memory.writer",
+    "twin.memory.manage",
+    "twin.memory.visible",
+}
+
+
+def test_training_and_evaluation_reach_the_memory_only_through_the_as_of_view() -> None:
+    """R-TRN-013: code that builds samples cannot read the live memory around ``AsOfView(t)``."""
+    files = sorted((SRC / "twin").rglob("*.py"))
+    known = {module_name(p) for p in files}
+    for path in files:
+        name = module_name(path)
+        if name.startswith(("twin.training", "twin.eval")):
+            assert not (runtime_imports(path, known) & MEMORY_INTERNALS), name

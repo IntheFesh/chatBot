@@ -281,3 +281,48 @@
 
 7. **（后续轮次）** 第 09 轮把 `render_full()` / `render_compact()`、`EmojiCodePolicy`、`StickerSelector`、`StickerRateController`、`describe_incoming_sticker` 接进回复引擎；第 11 轮通过 `write_corrections()` 写入 `[不要这样]`；第 12 轮的 `twin rollback` 会覆盖人设卡与提示词模板的回滚。这些都不需要你现在做什么。
 
+## 第 07 轮 —— 记忆系统（事实库、每日摘要、生活线与待跟进的数据层、检索组装、时间回放、AsOfView）
+
+沙箱里没有 DeepSeek Key 和真实聊天记录，所以事实抽取、冲突判定、每日摘要和全量回放都只用合成对话和固定响应（`respx`）验证；一次性批任务做到“估算费用 → 等 `twin jobs approve` → 执行 → 花费超过估算 120% 暂停”的完整逻辑（有测试）。**这一轮没有向微信发任何消息，也没有改动聊天记录。** 下面是只有你能在自己电脑上做的事。
+
+1. **前置**
+   - 已导入聊天记录（第 03 轮）；已设置 Key：`uv run twin secrets set deepseek_api_key`（第 01 轮）；嵌入模型已下载（第 05 轮第 1 条的 `twin retrieval rebuild --foreground` 会下载；记忆的向量与检索库共用同一个模型和向量库，表各自独立）。
+   - 确认 `time.source_timezone`（搬过家则还有 `time.source_timezone_ranges`）是对的：回放按**她当地的日历日**切分，“明天”“后天”也按那个时区换算成日期。
+
+2. **估算（免费，只读）**
+   - 做什么：`uv run twin memory replay estimate`（可加 `--from 2026-01-01 --to 2026-03-31` 只看一段）。
+   - 预期：表里有“要回放的天数”“已做过的天数”“对话行数”“估算对话 token”“估算费用（美元，高峰价，上界）”“单批上限”。估算按最坏情况算（每天最多 12 条事实、每条最多 6 个旧条目要判定、不计缓存命中、不计非高峰折扣），实际一般明显更低。估算超过 `budget.one_time_usd`（默认 30）时会拆成多个批次，每批不超过上限；单独一天就超过上限时拒绝入队并说出是哪一天。
+   - 请告诉我：天数、行数、估算费用。
+
+3. **排队、批准、执行（要花钱）**
+   - 做什么：
+     ```
+     uv run twin memory replay start                  # 排队；打印批次号和估算，此时还不花钱
+     uv run twin jobs approve memory-<批次号>         # 你同意这个价格（每个批次一次）
+     uv run twin jobs run --until-idle                # 应用没在运行时；运行中的应用会自己在 DeepSeek 非高峰时段执行
+     uv run twin memory replay status                 # 随时看进度（天数、作业、批次花费、记忆里各来源的事实数）
+     ```
+   - 每个作业处理 `memory.replay_job_days`（7）个当地日，按日期顺序；每天先写摘要、再抽取事实与待跟进、再写入记忆（冲突判定、覆盖旧事实、让被真实事实推翻的生活线条目失效）。中断后重跑只做没做完的日子（按输入指纹判断，消息变了的日子会重做）。
+   - 实际花费超过估算的 120% 时该批次自动暂停并告警（`status` 显示 paused）。用 `uv run twin llm status` 看花费，认可后再 `uv run twin jobs approve` 同一批次继续。
+   - 请告诉我：实际花费 / 估算（`status` 里每批一行 `spent … of a cap of …`）、失败的天数（`uv run twin jobs list --status failed --type memory_replay`）。
+
+4. **检查记忆质量（只读）**
+   - `uv run twin memory list`（`--page N`、`--keyword 词`）：编号、文字、来源（`real_record` 来自真实记录），每页 10 条，末尾列出还没结束的待跟进。请通读前 20–30 条：每条都应当能在你们的真实对话里找到。
+   - `uv run twin memory block "最近有什么打算"`：显示提示词里会得到的记忆块（`--at 2026-03-05T09:00:00-06:00` 看某个过去时刻的样子，必须带时区偏移；`--budget N` 改 token 预算）。留意两种情况：
+     - 与话题无关的事实混进来：说明 `memory.recall_min_similarity`（默认 0.35）对真实向量模型偏低，请在 `config.yaml` 里调到 0.45–0.55 再试。默认值是在沙箱的玩具向量上调的，真实模型的相似度分布不同，这是本轮最需要你反馈的一项。
+     - 该出现的纪念日、考试没出现。
+   - 有错的或不想留的：`uv run twin memory forget <编号>`（硬删除，连同仅由它派生的待跟进和生活线条目；被它覆盖过的旧事实恢复生效）。注意：`replay start --force` 会重新抽取，可能把你删掉的事实再抽出来，删过东西的日子不要用 `--force`。
+   - 请告诉我：事实总数、各来源的数量、前 20 条里错了几条、`block` 给出的内容像不像“她该记得的”。
+
+5. **手动写入一条**
+   - `uv run twin memory remember "她不吃香菜"`：来源 `user_command`（优先级最高，覆盖与它冲突的其他来源的事实）。有 Key 时模型会把它整理成带日期、周期的事实，失败则原样保存。
+
+6. **每日摘要**
+   - `uv run twin memory summarize 2026-03-05 --scope real`（排队，非高峰执行；日常账户，不用批准）。第 08 轮的调度器上线后会每天在她“起床”前自动排。摘要 ≤ 300 字；请抽几天对照原对话，看有没有漏掉重要的事、有没有编造。
+
+7. **导入新记录之后**
+   - 导入钩子会找出没回放过（或消息变了）的日子并排队：第一次回放必须你批准；之后的增量如果估算低于 `budget.one_time_usd` 的 10%（`memory.replay_auto_approve_ratio`）则自动批准。导入报告“导入后钩子”里有一行 `memory_replay`，单独补跑用 `uv run twin memory replay start`。
+   - 换了嵌入模型（`retrieval.model`）之后：`uv run twin memory reindex`。
+
+8. **（后续轮次）** 第 08 轮生成每日生活线并按日排每日摘要；第 09 轮把 `MemoryAssembler.build` 接进回复提示词、创建 `bot_turns` 并注册读取器（`register_bot_turn_reader`）、会话静默后调用 `queue_bot_extraction`；第 10 轮读写待跟进；第 11 轮的 `/记住`、`/忘掉`、`/记忆` 调用 `MemoryManager`；第 13 轮的训练集导出只经 `AsOfView(t)` 读记忆。这些都不需要你现在做什么。
+

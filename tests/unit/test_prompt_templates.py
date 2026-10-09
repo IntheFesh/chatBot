@@ -15,6 +15,7 @@ from twin.profile.prompt_templates import (
     TEMPLATE_DIR,
     TemplateError,
     TemplateStore,
+    newest_file_template,
     split_template,
     template_files,
 )
@@ -124,3 +125,21 @@ def test_the_shipped_templates_are_stored_when_first_used(services: Services) ->
     template = store.active(PERSONA_MAP)
     assert template.version == 1 and "evidence" in template.system
     assert set(store.names()) >= {PERSONA_MAP, PERSONA_REDUCE, STICKER_TAG, STICKER_CONTEXT}
+
+
+def test_the_newest_file_can_be_read_without_touching_the_database(
+    services: Services, tmp_path: Path
+) -> None:
+    """A READ command sizes prompts from the files: the store would write them to the table."""
+    write(tmp_path, "sizing", 1, system="第一版。")
+    write(tmp_path, "sizing", 3, system="第三版。")
+    newest = newest_file_template("sizing", tmp_path)
+    assert (newest.name, newest.version, newest.system) == ("sizing", 3, "第三版。")
+    with pytest.raises(TemplateError, match="no template file"):
+        newest_file_template("absent", tmp_path)
+    shipped = newest_file_template(PERSONA_MAP)
+    assert shipped.version == max(template_files()[PERSONA_MAP])
+    store = TemplateStore(services.db, services.clock)
+    with services.db.session() as session:
+        assert get_setting(session, ACTIVE_KEY + PERSONA_MAP) is None  # nothing was stored
+    assert store.names() == []

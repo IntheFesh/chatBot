@@ -32,7 +32,7 @@ import json
 from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import delete, insert, select, update
@@ -43,7 +43,7 @@ from twin.ingest.corpus import conversation_skeleton, messages_by_ids
 from twin.ingest.events import is_reproducible
 from twin.ingest.times import SourceTime
 from twin.profile.holdout import holdout_cutoff
-from twin.profile.localtime import LocalClock
+from twin.profile.localtime import LocalClock, LocalStamp
 from twin.profile.overrides import RoutineOverrides
 from twin.profile.units import BurstSegmenter
 from twin.retrieval.records import NotHerMessageError, require_message
@@ -271,6 +271,14 @@ class LocalPlace:
     def of(self, moment: datetime) -> tuple[int, str]:
         stamp = self._clock.stamp(moment)
         return stamp.slot, str(self._calendar.day_type(stamp.day, stamp.zone))
+
+    def stamp(self, moment: datetime) -> LocalStamp:
+        """Where ``moment`` falls on the clock of the place she was in (day, minute, zone)."""
+        return self._clock.stamp(moment)
+
+    def day_type(self, day: date, zone: str) -> str:
+        """``workday``, ``weekend`` or ``holiday`` for a local date in a zone (R-ACT-002)."""
+        return str(self._calendar.day_type(day, zone))
 
 
 # ------------------------------------------------------------------- syncing

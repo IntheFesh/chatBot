@@ -284,10 +284,9 @@ def test_round_06_migration_adds_the_persona_tables_and_the_sticker_columns(tmp_
         connection.commit()
     finally:
         connection.close()
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0006_persona_sticker_tags")
     assert table_names(path) - before == {"persona_cards", "prompt_templates"}
     assert migrate.revision_history()[5] == "0006_persona_sticker_tags"
-    assert migrate.head_revision() == "0006_persona_sticker_tags"
     connection = sqlite3.connect(path)
     try:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(stickers)")}
@@ -338,5 +337,66 @@ def test_round_06_migration_adds_the_persona_tables_and_the_sticker_columns(tmp_
         )
     finally:
         connection.close()
-    migrate.upgrade(path)  # and up again
+    migrate.upgrade(path, "0006_persona_sticker_tags")  # and up again
     assert table_names(path) - before == {"persona_cards", "prompt_templates"}
+
+
+def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0006_persona_sticker_tags")
+    before = table_names(path)
+    migrate.upgrade(path)
+    assert table_names(path) - before == {
+        "facts",
+        "daily_summaries",
+        "lifeline_events",
+        "followups",
+        "memory_replay_days",
+    }
+    assert migrate.revision_history()[6] == "0007_memory_tables"
+    assert migrate.head_revision() == "0007_memory_tables"
+    connection = sqlite3.connect(path)
+    try:
+        fact = (
+            "INSERT INTO facts (id, rev, number, subject, category, text, source, status, "
+            "confidence, importance, known_at, recurrence, created_at, updated_at) VALUES "
+            "('{id}', 1, {number}, '{subject}', 'life', x'00', '{source}', 'active', 0.8, "
+            "{importance}, '2026-01-01', 'none', '2026-01-01', '2026-01-01')"
+        )
+        connection.execute(
+            fact.format(id="f1", number=1, subject="her", source="real_record", importance=3)
+        )
+        with pytest.raises(sqlite3.IntegrityError):  # a subject of the closed vocabulary only
+            connection.execute(
+                fact.format(id="f2", number=2, subject="dog", source="real_record", importance=3)
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # sources are the four of R-MEM-003
+            connection.execute(
+                fact.format(id="f3", number=3, subject="her", source="guess", importance=3)
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # importance is 1 to 5
+            connection.execute(
+                fact.format(id="f4", number=4, subject="her", source="real_record", importance=6)
+            )
+        with pytest.raises(sqlite3.IntegrityError):  # the number the user sees is unique
+            connection.execute(
+                fact.format(id="f5", number=1, subject="her", source="real_record", importance=3)
+            )
+        summary = (
+            "INSERT INTO daily_summaries (id, rev, scope, local_date, timezone, utc_start, "
+            "utc_end, text, version, is_current, created_at, updated_at) VALUES ('{id}', 1, "
+            "'{scope}', '2026-03-05', 'America/Chicago', '2026-03-05', '2026-03-06', x'00', "
+            "{version}, 1, "
+            "'2026-01-01', '2026-01-01')"
+        )
+        connection.execute(summary.format(id="s1", scope="real", version=1))
+        connection.execute(summary.format(id="s2", scope="real", version=2))  # a recomputed day
+        connection.execute(summary.format(id="s3", scope="bot", version=1))
+        with pytest.raises(sqlite3.IntegrityError):  # one row per scope, day and version
+            connection.execute(summary.format(id="s4", scope="real", version=1))
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(summary.format(id="s5", scope="both", version=1))
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0006_persona_sticker_tags")
+    assert table_names(path) == before

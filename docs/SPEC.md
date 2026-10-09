@@ -118,7 +118,13 @@ stickers: { tags_file: "config/lists/sticker_tags.txt", neighbors_file: "config/
             tag_job_size: 20, context_min_uses: 3, context_max_samples: 5, no_repeat_window: 10,
             repeat_rate_threshold: 0.30, recency_half_life_days: 90, rate_window: 200,
             rate_tolerance: 0.20, describe_timeout_s: 15 }
-memory: { daily_summary: true, fact_extraction: true }
+memory: { daily_summary: true, fact_extraction: true, block_tokens: 800, recall_facts: 12,
+          recent_summary_days: 3, recall_summaries: 2, followup_lookahead_h: 36,
+          recall_min_similarity: 0.35, conflict_candidates: 6, conflict_min_similarity: 0.45,
+          recency_half_life_days: 90,
+          quiet_minutes: 30, replay_job_days: 7, replay_chunk_lines: 400,
+          replay_auto_approve_ratio: 0.10,
+          weights: { similarity: 0.45, importance: 0.15, recency: 0.10, source: 0.10, date: 0.20 } }   # 第 07 轮新增：memory 的 13 个键与 weights 的 5 个子键
 ops:
   backup_hour_local: 4
   backup_keep_daily: 14

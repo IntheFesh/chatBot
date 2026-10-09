@@ -105,13 +105,22 @@ def expected_names() -> list[str]:
         "stickers disable",
         "stickers enable",
         "stickers tag-all",
+        "memory replay estimate",
+        "memory replay start",
+        "memory replay status",
+        "memory list",
+        "memory block",
+        "memory remember",
+        "memory forget",
+        "memory summarize",
+        "memory reindex",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 69 == len(expected_names())
+    assert len(names) == 78 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -181,6 +190,15 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "stickers disable": CommandKind.LIGHT,
         "stickers enable": CommandKind.LIGHT,
         "stickers tag-all": CommandKind.HEAVY,
+        "memory replay estimate": CommandKind.READ,
+        "memory replay start": CommandKind.HEAVY,
+        "memory replay status": CommandKind.READ,
+        "memory list": CommandKind.READ,
+        "memory block": CommandKind.READ,
+        "memory remember": CommandKind.LIGHT,
+        "memory forget": CommandKind.LIGHT,
+        "memory summarize": CommandKind.HEAVY,
+        "memory reindex": CommandKind.LIGHT,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

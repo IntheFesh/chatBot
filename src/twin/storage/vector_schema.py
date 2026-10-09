@@ -7,10 +7,14 @@ Every record written to a table must pass that table's :class:`VectorTableSchema
 rejects any column outside the schema, so a later change that tries to "cache the text next to
 the vector" fails loudly.
 
-Three schemas exist:
+Five schemas exist:
 
 ``GENERIC_SCHEMA``
-    ``id``, ``vector``, ``at``, ``kind`` - the layout of the memory table (round 07);
+    ``id``, ``vector``, ``at``, ``kind`` - the general layout;
+``FACT_SCHEMA`` / ``SUMMARY_SCHEMA``
+    the same four columns in the two tables of the memory (round 07), ``memory_facts`` and
+    ``memory_summaries``; the row id is the id of the fact or summary, ``at`` the moment it
+    became known (a summary: the end of its day), ``kind`` is fixed;
 ``STICKER_SCHEMA``
     the same four columns in a table of its own, ``sticker_descriptions`` (round 06): the vector
     of the description of each sticker, the row id being the sticker's MD5;
@@ -124,6 +128,34 @@ GENERIC_SCHEMA = VectorTableSchema(
             "string",
             lambda value: value in {kind.value for kind in VectorKind},
             "a known record kind (unknown record kind refused)",
+        ),
+    ),
+)
+
+FACT_SCHEMA = VectorTableSchema(
+    name="memory_facts",
+    id_column="id",
+    time_column="at",
+    extras=(
+        ExtraColumn(
+            "kind",
+            "string",
+            lambda value: value == VectorKind.FACT.value,
+            "the fact record kind",
+        ),
+    ),
+)
+
+SUMMARY_SCHEMA = VectorTableSchema(
+    name="memory_summaries",
+    id_column="id",
+    time_column="at",
+    extras=(
+        ExtraColumn(
+            "kind",
+            "string",
+            lambda value: value == VectorKind.SUMMARY.value,
+            "the summary record kind",
         ),
     ),
 )

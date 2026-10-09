@@ -238,9 +238,35 @@ class StickersConfig(_Section):
     describe_timeout_s: float = Field(default=15, gt=0)  # describing a sticker the user sent
 
 
+class MemoryWeights(_Section):
+    """How the five signals of R-MEM-008 are weighed when memory items are scored."""
+
+    similarity: float = Field(default=0.45, ge=0)  # closeness to the current topic
+    importance: float = Field(default=0.15, ge=0)  # the importance 1-5 given when extracted
+    recency: float = Field(default=0.10, ge=0)  # newer is better (half-life below)
+    source: float = Field(default=0.10, ge=0)  # real record > user said > the bot invented
+    date: float = Field(default=0.20, ge=0)  # an anniversary / due date near today
+
+
 class MemoryConfig(_Section):
     daily_summary: bool = True
     fact_extraction: bool = True
+    block_tokens: int = Field(default=800, ge=50)  # memory block budget before R-LLM-008 cuts it
+    recall_facts: int = Field(default=12, ge=1)  # facts taken by meaning and by keyword each
+    recent_summary_days: int = Field(default=3, ge=0)  # the last days whose summary is always in
+    recall_summaries: int = Field(default=2, ge=0)  # older days taken because they fit the topic
+    followup_lookahead_h: float = Field(
+        default=36, gt=0
+    )  # how far ahead a follow-up counts as near
+    recall_min_similarity: float = Field(default=0.35, ge=0, le=1)  # weaker vector hits are noise
+    conflict_candidates: int = Field(default=6, ge=1)  # older facts shown to the conflict judge
+    conflict_min_similarity: float = Field(default=0.45, ge=0, le=1)  # below: not a candidate
+    recency_half_life_days: float = Field(default=90, gt=0)  # decay of the recency signal
+    quiet_minutes: int = Field(default=30, ge=1)  # silence that ends a bot conversation (R-MEM-007)
+    replay_job_days: int = Field(default=7, ge=1)  # local days one replay job works through
+    replay_chunk_lines: int = Field(default=400, ge=20)  # dialogue lines shown to one extraction
+    replay_auto_approve_ratio: float = Field(default=0.10, ge=0, le=1)  # of budget.one_time_usd
+    weights: MemoryWeights = Field(default_factory=MemoryWeights)
 
 
 class SmtpConfig(_Section):
