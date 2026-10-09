@@ -93,7 +93,9 @@ def test_unknown_keys_via_env_and_command_line_are_errors(monkeypatch: pytest.Mo
 
 
 def test_invalid_values_report_the_key_path(tmp_path: Path) -> None:
-    config = write_yaml(tmp_path / "c.yaml", "backend: { active: telepathy }\nbudget: { daily_usd: -1 }\n")
+    config = write_yaml(
+        tmp_path / "c.yaml", "backend: { active: telepathy }\nbudget: { daily_usd: -1 }\n"
+    )
     with pytest.raises(ConfigError) as info:
         load_settings(config)
     message = str(info.value)
@@ -134,8 +136,13 @@ def test_source_timezone_ranges_use_the_from_keyword(tmp_path: Path) -> None:
 
 def test_parse_overrides_builds_nested_mappings_with_yaml_scalars() -> None:
     parsed = parse_overrides(
-        ["budget.daily_usd=2", "target.username=null", "time.bot_timezone=Asia/Shanghai",
-         "proactive.daily_max = 3", "engine.max_bubbles=[1, 2]"]
+        [
+            "budget.daily_usd=2",
+            "target.username=null",
+            "time.bot_timezone=Asia/Shanghai",
+            "proactive.daily_max = 3",
+            "engine.max_bubbles=[1, 2]",
+        ]
     )
     assert parsed == {
         "budget": {"daily_usd": 2},
@@ -254,11 +261,21 @@ def test_relative_paths_are_anchored_at_the_project_root(tmp_path: Path) -> None
 
 
 def test_data_paths_ensure_creates_directories(tmp_path: Path) -> None:
-    paths = resolve_paths(load_settings(None, {"paths": {"data_dir": str(tmp_path / "d")}}), tmp_path)
+    paths = resolve_paths(
+        load_settings(None, {"paths": {"data_dir": str(tmp_path / "d")}}), tmp_path
+    )
     paths.ensure()
     assert paths.logs_dir.is_dir() and paths.locks_dir.is_dir()
-    assert {paths.media_dir.name, paths.tmp_dir.name, paths.reports_dir.name, paths.backups_dir.name} == {
-        "media", "tmp", "reports", "backups",
+    assert {
+        paths.media_dir.name,
+        paths.tmp_dir.name,
+        paths.reports_dir.name,
+        paths.backups_dir.name,
+    } == {
+        "media",
+        "tmp",
+        "reports",
+        "backups",
     }
 
 

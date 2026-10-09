@@ -28,7 +28,15 @@ def test_loader_reports_unreadable_files_and_bad_regexes(tmp_path: Path) -> None
 
 def test_ai_phrases_cover_the_spec_examples() -> None:
     phrases = load_word_list(LISTS / "ai_phrases.txt")
-    for required in ("作为AI", "人工智能", "语言模型", "希望对你有帮助", "有什么可以帮你", "请注意", "总之"):
+    for required in (
+        "作为AI",
+        "人工智能",
+        "语言模型",
+        "希望对你有帮助",
+        "有什么可以帮你",
+        "请注意",
+        "总之",
+    ):
         assert required in phrases
     assert len(phrases) >= 120
     assert all(phrase == phrase.strip() for phrase in phrases)

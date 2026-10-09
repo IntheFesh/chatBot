@@ -38,6 +38,17 @@ class PowerManager(Protocol):
     def stop(self) -> None: ...
 
 
+WINDOWS_DESCRIPTION = "SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)"
+
+
+def describe_power_strategy(platform: str | None = None) -> str:
+    """What the sleep inhibitor does on ``platform`` (no side effects; used by doctor)."""
+    plat = sys.platform if platform is None else platform
+    if plat == "win32":
+        return WINDOWS_DESCRIPTION
+    return NotNeededPowerManager(plat).description
+
+
 class NotNeededPowerManager:
     """Used where the platform needs no sleep inhibitor: records that fact."""
 
@@ -82,7 +93,7 @@ class WindowsPowerManager:
 
     @property
     def description(self) -> str:
-        return "SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)"
+        return WINDOWS_DESCRIPTION
 
     def _hold(self) -> None:
         previous = self._win32.set_thread_execution_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)

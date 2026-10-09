@@ -41,11 +41,13 @@ class SchemaStatus:
     def hint(self) -> str:
         match self.state:
             case SchemaState.MISSING | SchemaState.EMPTY:
-                return "database is not initialised: run `twin db upgrade`"
+                return (
+                    "database is not initialised: run `twin db upgrade` (or `alembic upgrade head`)"
+                )
             case SchemaState.OUTDATED:
                 return (
                     f"database schema {self.current} is older than {self.head}: "
-                    "stop the application and run `twin db upgrade`"
+                    "stop the application and run `twin db upgrade` (or `alembic upgrade head`)"
                 )
             case SchemaState.AHEAD:
                 return (

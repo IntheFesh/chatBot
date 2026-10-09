@@ -27,6 +27,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from twin.clock import Clock, get_clock
+from twin.storage.state import bump_state_version
 
 T = TypeVar("T")
 
@@ -144,8 +145,6 @@ class Database:
             try:
                 yield session
                 if do_bump:
-                    from twin.storage.state import bump_state_version
-
                     bump_state_version(session, self.clock)
                 session.commit()
             except BaseException:

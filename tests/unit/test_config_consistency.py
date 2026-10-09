@@ -54,11 +54,17 @@ def test_spec_block_example_file_and_settings_defaults_have_identical_keys_and_v
     spec = comparable(spec_block())
     example = comparable(example_file())
 
-    assert set(spec) == set(defaults), f"keys differ between SPEC and Settings: {set(spec) ^ set(defaults)}"
-    assert set(example) == set(defaults), f"keys differ between example and Settings: {set(example) ^ set(defaults)}"
+    assert set(spec) == set(defaults), (
+        f"keys differ between SPEC and Settings: {set(spec) ^ set(defaults)}"
+    )
+    assert set(example) == set(defaults), (
+        f"keys differ between example and Settings: {set(example) ^ set(defaults)}"
+    )
     for key in sorted(defaults):
         assert spec[key] == defaults[key], f"SPEC vs Settings default differ at {key}"
-        assert example[key] == defaults[key], f"config.example.yaml vs Settings default differ at {key}"
+        assert example[key] == defaults[key], (
+            f"config.example.yaml vs Settings default differ at {key}"
+        )
 
 
 def test_example_file_is_loadable_and_contains_no_secrets() -> None:

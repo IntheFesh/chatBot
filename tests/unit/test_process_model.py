@@ -36,10 +36,25 @@ runner = CliRunner()
 
 def expected_names() -> list[str]:
     return [
-        "run", "doctor", "config show", "settings list", "settings set", "settings history",
-        "secrets set", "secrets delete", "secrets list", "secrets check", "secrets rotate-db-key",
-        "db upgrade", "db status", "jobs list", "jobs show", "jobs retry", "jobs cancel",
-        "jobs run", "jobs approve",
+        "run",
+        "doctor",
+        "config show",
+        "settings list",
+        "settings set",
+        "settings history",
+        "secrets set",
+        "secrets delete",
+        "secrets list",
+        "secrets check",
+        "secrets rotate-db-key",
+        "db upgrade",
+        "db status",
+        "jobs list",
+        "jobs show",
+        "jobs retry",
+        "jobs cancel",
+        "jobs run",
+        "jobs approve",
     ]
 
 
@@ -176,9 +191,19 @@ def test_twin_run_tolerates_the_supervisor_lock_but_not_a_second_run(
 def test_non_exclusive_commands_work_while_the_application_runs(home_services: Services) -> None:
     lock = hold(home_services, LOCK_RUN)
     try:
-        read = runner.invoke(app, ["--set", f"paths.data_dir={home_services.paths.data_dir}", "jobs", "list"])
+        read = runner.invoke(
+            app, ["--set", f"paths.data_dir={home_services.paths.data_dir}", "jobs", "list"]
+        )
         light = runner.invoke(
-            app, ["--set", f"paths.data_dir={home_services.paths.data_dir}", "settings", "set", "paused", "true"]
+            app,
+            [
+                "--set",
+                f"paths.data_dir={home_services.paths.data_dir}",
+                "settings",
+                "set",
+                "paused",
+                "true",
+            ],
         )
     finally:
         lock.release()
@@ -221,7 +246,9 @@ def custom_app(services: Services, secret_store: SecretStore) -> typer.Typer:
             pass
 
     set_cli_context(
-        CliContext(overrides={"paths": {"data_dir": str(services.paths.data_dir)}}, secrets=secret_store)
+        CliContext(
+            overrides={"paths": {"data_dir": str(services.paths.data_dir)}}, secrets=secret_store
+        )
     )
     return sample
 
@@ -272,10 +299,15 @@ def test_commands_refuse_to_run_without_valid_consent(home_services: Services) -
 def test_operational_errors_become_short_messages_with_distinct_exit_codes(
     home_services: Services,
 ) -> None:
-    missing_db = runner.invoke(app, ["--set", "paths.data_dir=" + str(home_services.paths.data_dir / "other"), "jobs", "list"])
+    missing_db = runner.invoke(
+        app,
+        ["--set", "paths.data_dir=" + str(home_services.paths.data_dir / "other"), "jobs", "list"],
+    )
     assert missing_db.exit_code == ExitCode.SCHEMA
     assert "twin db upgrade" in missing_db.output and "Traceback" not in missing_db.output
-    bad_config = runner.invoke(app, ["--config", str(home_services.paths.data_dir / "no.yaml"), "jobs", "list"])
+    bad_config = runner.invoke(
+        app, ["--config", str(home_services.paths.data_dir / "no.yaml"), "jobs", "list"]
+    )
     assert bad_config.exit_code == ExitCode.CONFIG
     bad_override = runner.invoke(app, ["--set", "nonsense", "jobs", "list"])
     assert bad_override.exit_code == ExitCode.CONFIG
@@ -301,7 +333,9 @@ def test_heavy_work_is_only_queued_by_default(
         ran.append(ctx.job.payload["n"])
 
     heavy_registry.register("heavy_task", handler)
-    ids = enqueue_heavy(services, [JobSpec("heavy_task", {"n": 1}), JobSpec("heavy_task", {"n": 2})])
+    ids = enqueue_heavy(
+        services, [JobSpec("heavy_task", {"n": 1}), JobSpec("heavy_task", {"n": 2})]
+    )
     assert len(ids) == 2 and ran == []
     assert "queued 2 job(s)" in capsys.readouterr().out
     assert JobQueue(services.db, services.clock).counts()["pending"] == 2
@@ -337,13 +371,30 @@ def test_foreground_heavy_work_leaves_execution_to_a_running_application(
     assert JobQueue(services.db, services.clock).counts()["pending"] == 1
 
 
-def test_heavy_job_specs_carry_batch_information(services: Services, heavy_registry: HandlerRegistry) -> None:
+def test_heavy_job_specs_carry_batch_information(
+    services: Services, heavy_registry: HandlerRegistry
+) -> None:
     enqueue_heavy(
         services,
-        [JobSpec("heavy_task", {}, batch_id="b1", estimated_cost_usd=3.0, requires_approval=True, offpeak_only=True, max_attempts=5)],
+        [
+            JobSpec(
+                "heavy_task",
+                {},
+                batch_id="b1",
+                estimated_cost_usd=3.0,
+                requires_approval=True,
+                offpeak_only=True,
+                max_attempts=5,
+            )
+        ],
     )
     job = JobQueue(services.db, services.clock).list_jobs(batch_id="b1")[0]
-    assert (job.estimated_cost_usd, job.requires_approval, job.offpeak_only, job.max_attempts) == (3.0, True, True, 5)
+    assert (job.estimated_cost_usd, job.requires_approval, job.offpeak_only, job.max_attempts) == (
+        3.0,
+        True,
+        True,
+        5,
+    )
 
 
 def test_clock_fixture_is_the_services_clock(services: Services, clock: ManualClock) -> None:

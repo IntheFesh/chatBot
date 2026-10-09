@@ -80,8 +80,10 @@ def test_ciphertext_copied_to_another_row_fails_to_decrypt(db: Database) -> None
         session.add(Setting(key="beta", value="B"))
     with db.transaction() as session:
         session.execute(
-            text("UPDATE settings SET value = (SELECT value FROM settings WHERE key='alpha') "
-                 "WHERE key='beta'")
+            text(
+                "UPDATE settings SET value = (SELECT value FROM settings WHERE key='alpha') "
+                "WHERE key='beta'"
+            )
         )
     with db.session() as session:
         beta = session.get(Setting, "beta")
@@ -205,9 +207,8 @@ def test_write_transactions_roll_back_on_error(db: Database) -> None:
 
 def test_read_only_policy_blocks_writes(db: Database) -> None:
     with use_write_policy(WritePolicy(read_only=True)):
-        with pytest.raises(ReadOnlyViolationError, match="READ"):
-            with db.transaction():
-                pass
+        with pytest.raises(ReadOnlyViolationError, match="READ"), db.transaction():
+            pass
         with db.session() as session:  # reading is still allowed
             assert session.get(Setting, "anything") is None
 

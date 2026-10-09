@@ -75,7 +75,10 @@ def test_non_windows_manager_is_a_real_implementation_that_records_why() -> None
 def test_default_manager_matches_the_platform() -> None:
     assert isinstance(default_power_manager("linux"), NotNeededPowerManager)
     assert isinstance(default_power_manager("darwin"), NotNeededPowerManager)
-    assert isinstance(default_power_manager(), NotNeededPowerManager if sys.platform != "win32" else WindowsPowerManager)
+    assert isinstance(
+        default_power_manager(),
+        NotNeededPowerManager if sys.platform != "win32" else WindowsPowerManager,
+    )
 
 
 @pytest.mark.windows

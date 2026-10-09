@@ -156,7 +156,11 @@ async def test_job_worker_component_runs_jobs_and_stops_gracefully(
 
 async def test_build_application_assembles_the_round_00_components(services: Services) -> None:
     application, watcher = build_application(services)
-    assert [c.name for c in application.start_order()] == ["state_watcher", "heartbeat", "job_worker"]
+    assert [c.name for c in application.start_order()] == [
+        "state_watcher",
+        "heartbeat",
+        "job_worker",
+    ]
     assert isinstance(watcher, StateWatcher)
     await application.start()
     try:
@@ -172,4 +176,8 @@ async def test_build_application_assembles_the_round_00_components(services: Ser
 
 @pytest.mark.parametrize("component", ["state_watcher", "heartbeat", "job_worker"])
 def test_component_names_are_stable(component: str) -> None:
-    assert component in {StateWatcherComponent.name, HeartbeatComponent.name, JobWorkerComponent.name}
+    assert component in {
+        StateWatcherComponent.name,
+        HeartbeatComponent.name,
+        JobWorkerComponent.name,
+    }

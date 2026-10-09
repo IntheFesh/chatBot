@@ -53,9 +53,23 @@ def test_every_table_has_utc_timestamps_and_documented_columns() -> None:
         assert {"created_at", "updated_at"} <= set(table.columns.keys()), table.name
     jobs = Base.metadata.tables["jobs"].columns.keys()
     for column in (
-        "id", "type", "payload", "priority", "status", "attempts", "max_attempts", "run_after",
-        "offpeak_only", "deadline", "last_error", "created_at", "updated_at",
-        "batch_id", "estimated_cost_usd", "requires_approval", "approved_at",
+        "id",
+        "type",
+        "payload",
+        "priority",
+        "status",
+        "attempts",
+        "max_attempts",
+        "run_after",
+        "offpeak_only",
+        "deadline",
+        "last_error",
+        "created_at",
+        "updated_at",
+        "batch_id",
+        "estimated_cost_usd",
+        "requires_approval",
+        "approved_at",
     ):
         assert column in jobs
 

@@ -36,7 +36,7 @@ def store(tmp_path: Path, ring: KeyRing) -> MediaStore:
 
 
 def test_put_and_read_round_trip_with_sha256_file_name(store: MediaStore) -> None:
-    data = "synthetic image bytes ".encode() * 1000
+    data = b"synthetic image bytes " * 1000
     stored = store.put(data, MediaKind.IMAGE)
     digest = hashlib.sha256(data).hexdigest()
     assert stored.sha256 == digest and stored.size == len(data) and stored.created
@@ -233,7 +233,9 @@ def test_temp_file_is_removed_even_when_the_body_raises(store: MediaStore) -> No
     assert not list(store.tmp_dir.iterdir())
 
 
-def test_wipe_overwrites_content_before_unlinking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wipe_overwrites_content_before_unlinking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from twin.storage import media
 
     target = tmp_path / "secret.bin"

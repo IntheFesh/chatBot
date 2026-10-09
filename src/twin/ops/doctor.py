@@ -24,7 +24,7 @@ from twin.config.loader import DataPaths, ensure_consent, resolve_paths
 from twin.config.secrets import SecretStore, SecretStoreError
 from twin.config.settings import Settings
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
-from twin.ops.power import default_power_manager
+from twin.ops.power import describe_power_strategy
 from twin.storage.keystore import KeyStore, KeyStoreError
 from twin.storage.migrate import SchemaState, schema_status
 
@@ -289,8 +289,7 @@ def check_instances(ctx: DoctorContext) -> CheckResult:
 
 @doctor_check
 def check_power(ctx: DoctorContext) -> CheckResult:
-    manager = default_power_manager(ctx.platform)
-    return CheckResult("power", CheckStatus.OK, manager.description)
+    return CheckResult("power", CheckStatus.OK, describe_power_strategy(ctx.platform))
 
 
 def run_checks(ctx: DoctorContext) -> list[CheckResult]:

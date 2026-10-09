@@ -1,4 +1,4 @@
-"""Application lifecycle, supervised tasks and shutdown signals (R-ARCH-001, R-ARCH-004, R-OPS-002)."""
+"""Application lifecycle, supervised tasks, shutdown signals (R-ARCH-001/004, R-OPS-002)."""
 
 from __future__ import annotations
 
@@ -82,8 +82,14 @@ async def test_components_start_in_dependency_order_and_stop_in_reverse() -> Non
     await app.start()
     await app.stop()
     assert log == [
-        "start storage", "start engine", "start channel", "start heartbeat",
-        "stop heartbeat", "stop channel", "stop engine", "stop storage",
+        "start storage",
+        "start engine",
+        "start channel",
+        "start heartbeat",
+        "stop heartbeat",
+        "stop channel",
+        "stop engine",
+        "stop storage",
     ]
     await app.stop()  # idempotent
     assert len(log) == 8
@@ -202,7 +208,9 @@ async def test_a_crashing_task_is_restarted_with_exponential_backoff_and_alerts(
 async def test_backoff_is_capped_and_repeated_crashes_mark_the_component_unhealthy(
     clock: ManualClock,
 ) -> None:
-    supervisor = TaskSupervisor("demo", clock, None, backoff_base_s=10, backoff_cap_s=30, unhealthy_after=4)
+    supervisor = TaskSupervisor(
+        "demo", clock, None, backoff_base_s=10, backoff_cap_s=30, unhealthy_after=4
+    )
 
     async def always_fails() -> None:
         raise RuntimeError("permanent failure")
@@ -218,7 +226,9 @@ async def test_backoff_is_capped_and_repeated_crashes_mark_the_component_unhealt
 
 
 async def test_a_task_that_runs_stably_clears_its_crash_streak(clock: ManualClock) -> None:
-    supervisor = TaskSupervisor("demo", clock, None, backoff_base_s=1, unhealthy_after=2, stable_after_s=60)
+    supervisor = TaskSupervisor(
+        "demo", clock, None, backoff_base_s=1, unhealthy_after=2, stable_after_s=60
+    )
     runs = 0
     hold = asyncio.Event()
 

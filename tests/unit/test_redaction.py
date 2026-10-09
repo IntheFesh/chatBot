@@ -6,6 +6,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from tests.support.synthetic import chatroom, mobile, mobile_formatted, wxid_short
 from twin.llm.redaction import REPLACEMENTS, is_valid_id_card, luhn_valid, redact
 
 
@@ -25,13 +26,13 @@ def make_card(prefix15: str) -> str:
 @pytest.mark.parametrize(
     ("text", "token"),
     [
-        ("打我电话 13800138000 谢谢", "phone"),
-        ("+86 139-0013-9000", None),
+        (f"打我电话 {mobile()} 谢谢", "phone"),
+        (mobile_formatted(), None),
         ("call (312) 555-0198 now", "phone"),
         ("312-555-0198", "phone"),
         ("mail me at someone.name+tag@example.org please", "email"),
-        ("加我 wxid_abcdef123 吧", "wxid"),
-        ("群 12345678@chatroom", "wxid"),
+        (f"加我 {wxid_short()} 吧", "wxid"),
+        (f"群 {chatroom()}", "wxid"),
     ],
 )
 def test_identifiers_are_replaced(text: str, token: str | None) -> None:
@@ -60,7 +61,15 @@ def test_valid_id_cards_and_bank_cards_are_replaced_but_invalid_numbers_are_not(
 
 @pytest.mark.parametrize(
     "text",
-    ["今天 2026-10-09 见", "一共 1234 元", "版本 3.12.13", "12345678901234", "你好，世界", "", "pi=3.14159"],
+    [
+        "今天 2026-10-09 见",
+        "一共 1234 元",
+        "版本 3.12.13",
+        "12345678901234",
+        "你好，世界",
+        "",
+        "pi=3.14159",
+    ],
 )
 def test_ordinary_text_is_untouched(text: str) -> None:
     assert redact(text) == text

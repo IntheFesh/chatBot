@@ -103,8 +103,12 @@ def scan_text(path: str, text: str) -> list[Finding]:
 
 
 def tracked_files(root: Path) -> list[Path]:
+    """Files git tracks plus new files that are not ignored (what a commit could include)."""
     result = subprocess.run(
-        ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=False
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root,
+        capture_output=True,
+        check=False,
     )
     if result.returncode != 0:
         return [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
@@ -136,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("files", nargs="*", type=Path, help="files to scan (default: git ls-files)")
     parser.add_argument("--root", type=Path, default=ROOT)
     args = parser.parse_args(argv)
-    paths = [p if p.is_absolute() else Path.cwd() / p for p in args.files] or tracked_files(args.root)
+    paths = [p if p.is_absolute() else Path.cwd() / p for p in args.files] or tracked_files(
+        args.root
+    )
     findings = list(scan_files(paths, args.root))
     if findings:
         sys.stdout.write("privacy scan FAILED: possible real data in tracked files\n")

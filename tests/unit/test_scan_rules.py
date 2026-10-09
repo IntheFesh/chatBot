@@ -59,16 +59,22 @@ def test_no_direct_clock_access_outside_the_clock_module() -> None:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
                 target = node.func.value
                 if isinstance(target, ast.Name) and (target.id, node.func.attr) in FORBIDDEN_CALLS:
-                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno} {target.id}.{node.func.attr}()")
+                    offenders.append(
+                        f"{path.relative_to(ROOT)}:{node.lineno} {target.id}.{node.func.attr}()"
+                    )
             if isinstance(node, ast.ImportFrom) and node.module in FORBIDDEN_FROM_IMPORTS:
                 bad = {a.name for a in node.names} & FORBIDDEN_FROM_IMPORTS[node.module]
                 if bad:
-                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno} from {node.module} import {bad}")
+                    offenders.append(
+                        f"{path.relative_to(ROOT)}:{node.lineno} from {node.module} import {bad}"
+                    )
     assert not offenders, "use twin.clock instead:\n" + "\n".join(offenders)
 
 
 def test_the_scan_itself_catches_violations(tmp_path: Path) -> None:
-    sample = ast.parse("import time\nfrom datetime import datetime\nx = datetime.now()\ny = time.time()\n")
+    sample = ast.parse(
+        "import time\nfrom datetime import datetime\nx = datetime.now()\ny = time.time()\n"
+    )
     calls = [
         (n.func.value.id, n.func.attr)  # type: ignore[union-attr]
         for n in ast.walk(sample)
@@ -86,12 +92,17 @@ def test_no_stub_or_toy_markers_in_production_code() -> None:
     assert not offenders, "\n".join(offenders)
 
 
-def is_protocol_or_abstract(node: ast.FunctionDef | ast.AsyncFunctionDef, owner: ast.ClassDef | None) -> bool:
+def is_protocol_or_abstract(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, owner: ast.ClassDef | None
+) -> bool:
     if owner is not None:
         bases = {ast.unparse(base) for base in owner.bases}
         if any(base.startswith("Protocol") or "ABC" in base for base in bases):
             return True
-    return any("abstractmethod" in ast.unparse(d) or "overload" in ast.unparse(d) for d in node.decorator_list)
+    return any(
+        "abstractmethod" in ast.unparse(d) or "overload" in ast.unparse(d)
+        for d in node.decorator_list
+    )
 
 
 def test_no_function_has_an_empty_body() -> None:
@@ -104,10 +115,23 @@ def test_no_function_has_an_empty_body() -> None:
                 if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
                     continue
                 body = [
-                    s for s in node.body
-                    if not (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str))
+                    s
+                    for s in node.body
+                    if not (
+                        isinstance(s, ast.Expr)
+                        and isinstance(s.value, ast.Constant)
+                        and isinstance(s.value.value, str)
+                    )
                 ]
-                empty = all(isinstance(s, ast.Pass) or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and s.value.value is Ellipsis) for s in body)
+                empty = all(
+                    isinstance(s, ast.Pass)
+                    or (
+                        isinstance(s, ast.Expr)
+                        and isinstance(s.value, ast.Constant)
+                        and s.value.value is Ellipsis
+                    )
+                    for s in body
+                )
                 if (not body or empty) and not is_protocol_or_abstract(node, owner):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno} {node.name}")
     assert not offenders, "\n".join(offenders)
@@ -127,7 +151,11 @@ def test_no_print_in_production_code() -> None:
     offenders = []
     for path in SOURCES:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "print":
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "print"
+            ):
                 offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert not offenders
 

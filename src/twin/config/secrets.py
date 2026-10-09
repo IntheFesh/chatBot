@@ -237,13 +237,18 @@ def _is_system_candidate(backend: CredentialBackend) -> bool:
 
 
 def select_backend(
-    env: dict[str, str] | None = None, platform: str | None = None
+    env: dict[str, str] | None = None,
+    platform: str | None = None,
+    *,
+    probe_system: bool = True,
 ) -> tuple[CredentialBackend, BackendInfo]:
     """Choose the credential backend.
 
     ``TWIN_KEYRING_BACKEND=system|file`` forces a choice.  Otherwise Windows uses
     the Credential Manager and other platforms use the system keyring when it
-    works, else the encrypted file store.
+    works, else the encrypted file store.  ``probe_system=False`` skips the
+    write/read/delete round trip against the system keyring (``twin doctor`` does
+    its own, so ordinary commands do not churn the Windows Credential Manager).
     """
     environ = dict(os.environ) if env is None else env
     plat = sys.platform if platform is None else platform
@@ -255,13 +260,16 @@ def select_backend(
     if forced != "file":
         system = keyring.get_keyring()
         if _is_system_candidate(system):
-            system_error = _probe(system)
+            system_error = _probe(system) if probe_system else None
             if system_error is None:
                 return system, BackendInfo(
                     name=type(system).__name__, kind="system", usable=True, detail="system keyring"
                 )
         else:
-            system_error = f"no usable system keyring backend ({type(system).__name__})"
+            system_error = (
+                f"no usable system keyring backend "
+                f"({type(system).__module__}.{type(system).__qualname__})"
+            )
         if plat == "win32" or forced == "system":
             return system, BackendInfo(
                 name=type(system).__name__,
@@ -297,7 +305,8 @@ class SecretStore:
 
     @classmethod
     def default(cls) -> SecretStore:
-        backend, info = select_backend()
+        # Windows always uses the native Credential Manager: no probe on every command.
+        backend, info = select_backend(probe_system=sys.platform != "win32")
         return cls(backend, info)
 
     def get(self, name: str) -> str | None:

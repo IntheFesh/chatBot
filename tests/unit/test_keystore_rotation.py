@@ -78,7 +78,7 @@ def test_missing_key_credential_gives_an_actionable_error(
 ) -> None:
     keystore.create_initial()
     credentials.delete(key_secret_name(1))
-    with pytest.raises(KeyStoreError, match="db-key-1.*missing"):
+    with pytest.raises(KeyStoreError, match=r"db-key-1.*missing"):
         keystore.load()
 
 
@@ -240,7 +240,6 @@ def test_an_interrupted_rotation_can_be_resumed(
         assert progress["target_key_id"] == 2
         assert progress["tables"]
         assert len(session.scalars(select(Job)).all()) == 30
-        assert [j.payload["n"] for j in session.scalars(select(Job))] is not None
     assert keystore.load().current_id == 2
     assert keystore.load().retired_ids == frozenset()
 
@@ -284,7 +283,12 @@ def test_resuming_with_a_changed_key_index_is_refused(
     populate(db, media)
     with pytest.raises(KeyboardInterrupt):
         rotate_db_key(
-            db, keystore, ring, db.clock, media, batch_size=5,
+            db,
+            keystore,
+            ring,
+            db.clock,
+            media,
+            batch_size=5,
             on_batch=lambda t, r: (_ for _ in ()).throw(KeyboardInterrupt()),
         )
     stale = KeyRing({1: ring.key_bytes(1), 2: ring.key_bytes(2)}, 1)

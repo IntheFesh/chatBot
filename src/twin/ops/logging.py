@@ -18,6 +18,7 @@ invocations (separate files so two processes never rotate the same file), each
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import logging.handlers
 import sys
@@ -184,7 +185,7 @@ Role = Literal["run", "cli"]
 
 
 def configure_logging(
-    logs_dir: Path,
+    logs_dir: Path | None,
     *,
     level: str | int = "INFO",
     role: Role = "run",
@@ -192,13 +193,17 @@ def configure_logging(
     console_level: int = logging.INFO,
     max_bytes: int = MAX_BYTES,
     backup_count: int = BACKUP_COUNT,
-) -> Path:
+) -> Path | None:
     """Install the file (JSON, rotating) and console handlers; returns the log file path.
 
-    Safe to call repeatedly: handlers installed earlier by this function are replaced.
+    ``logs_dir=None`` installs the console handler only (used when the data directory is
+    unusable, so that diagnostics such as ``twin doctor`` still work).  Safe to call
+    repeatedly: handlers installed earlier by this function are replaced.
     """
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    log_path = logs_dir / ("twin.log" if role == "run" else "twin-cli.log")
+    log_path: Path | None = None
+    if logs_dir is not None:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_path = logs_dir / ("twin.log" if role == "run" else "twin-cli.log")
     numeric = level if isinstance(level, int) else logging.getLevelName(level.upper())
     if not isinstance(numeric, int):
         raise ValueError(f"unknown log level {level!r}")
@@ -211,11 +216,12 @@ def configure_logging(
                 _close_quietly(handler)
 
     handlers: list[logging.Handler] = []
-    file_handler = logging.handlers.RotatingFileHandler(
-        log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8", delay=True
-    )
-    file_handler.setFormatter(JsonFormatter())
-    handlers.append(file_handler)
+    if log_path is not None:
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_path, maxBytes=max_bytes, backupCount=backup_count, encoding="utf-8", delay=True
+        )
+        file_handler.setFormatter(JsonFormatter())
+        handlers.append(file_handler)
     if console:
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(console_level)
@@ -238,10 +244,8 @@ def configure_logging(
 
 def _close_quietly(handler: logging.Handler) -> None:
     """Flush and close; a stream that is already closed (e.g. a captured stderr) is fine."""
-    try:
+    with contextlib.suppress(ValueError, OSError):
         handler.flush()
-    except (ValueError, OSError):
-        pass
     handler.close()
 
 

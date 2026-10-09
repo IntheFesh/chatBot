@@ -31,6 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPEC_ID = re.compile(r"^\s*-\s+\*\*(R-[A-Z]+-\d{3})\*\*", re.MULTILINE)
 PARTIAL = re.compile(r"[（(]部分[:：]\s*第\s*(\d{2}[a-z]?)\s*轮[)）]")
+NOTE = re.compile(r"（[^）]*）")  # any full-width parenthetical is a free-text remark
 IMPLEMENTED = "已实现"
 PENDING = "待实现"
 
@@ -92,8 +93,8 @@ def parse_table(text: str) -> list[Row]:
 
 
 def split_locations(cell: str) -> list[str]:
-    """``path::symbol; path`` -> ['path::symbol', 'path'] without partial notes."""
-    cleaned = PARTIAL.sub("", cell)
+    """``path::symbol; path`` -> ['path::symbol', 'path'] without partial notes or remarks."""
+    cleaned = NOTE.sub("", PARTIAL.sub("", cell))
     return [part.strip() for part in cleaned.split(";") if part.strip()]
 
 
@@ -152,7 +153,9 @@ def collect_tests(root: Path) -> set[str]:
     )
     ids = {line.strip() for line in result.stdout.splitlines() if "::" in line}
     if result.returncode not in (0, 5) and not ids:
-        raise RuntimeError(f"pytest collection failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}")
+        raise RuntimeError(
+            f"pytest collection failed:\n{result.stdout[-2000:]}{result.stderr[-2000:]}"
+        )
     return ids
 
 
@@ -185,7 +188,9 @@ def check(
         if row.req_id not in spec_set:
             problems.append(f"{row.req_id}: row exists but the SPEC does not define it")
         if row.status not in (IMPLEMENTED, PENDING):
-            problems.append(f"{row.req_id}: status must be {IMPLEMENTED} or {PENDING}, got {row.status!r}")
+            problems.append(
+                f"{row.req_id}: status must be {IMPLEMENTED} or {PENDING}, got {row.status!r}"
+            )
 
     def validate_filled(row: Row) -> None:
         for location in split_locations(row.impl):
@@ -215,7 +220,8 @@ def check(
             if round_id == last:
                 if row.status != IMPLEMENTED:
                     problems.append(
-                        f"{row.req_id}: round {round_id} is its last owner but status is {row.status}"
+                        f"{row.req_id}: round {round_id} is its last owner "
+                        f"but status is {row.status}"
                     )
                 else:
                     stats["implemented"] += 1
@@ -232,7 +238,9 @@ def check(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawTextHelpFormatter
+    )
     parser.add_argument("--round", dest="round_id", help="round id, e.g. 00 or 09b")
     parser.add_argument("--spec", type=Path, default=ROOT / "docs" / "SPEC.md")
     parser.add_argument("--trace", type=Path, default=ROOT / "docs" / "TRACEABILITY.md")

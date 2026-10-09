@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
 from twin.ops.alerts import DbAlertSink
 from twin.ops.jobs import (
@@ -31,7 +32,7 @@ from twin.ops.jobs import (
 from twin.storage.db import Database
 from twin.storage.models import Alert, Job
 
-PHONE = "13800138000"
+PHONE = mobile()
 
 
 class AlwaysOffPeak:
@@ -83,7 +84,11 @@ def test_enqueue_stores_encrypted_payload_and_defaults(queue: JobQueue, clock: M
     job = queue.get(job_id)
     assert job is not None
     assert (job.type, job.status, job.attempts, job.max_attempts, job.priority) == (
-        "demo", "pending", 0, 3, 100,
+        "demo",
+        "pending",
+        0,
+        3,
+        100,
     )
     assert job.payload == {"n": 1, "text": "正文"}
     assert job.run_after == clock.now_utc() == job.created_at
@@ -149,7 +154,15 @@ async def test_jobs_without_a_handler_stay_pending_and_are_not_touched(
 
 def test_backoff_delay_is_exponential_and_capped() -> None:
     assert [backoff_delay(n, 30, 3600) for n in (1, 2, 3, 4, 5, 6, 7, 8, 9)] == [
-        30, 60, 120, 240, 480, 960, 1920, 3600, 3600,
+        30,
+        60,
+        120,
+        240,
+        480,
+        960,
+        1920,
+        3600,
+        3600,
     ]
     assert backoff_delay(0, 30, 3600) == 30
 
@@ -173,7 +186,9 @@ async def test_failed_jobs_retry_with_exponential_backoff_then_fail_with_an_aler
     assert (first.retried, first.failed) == (1, 0)
     assert job.status == "pending" and job.attempts == 1
     assert job.run_after == clock.now_utc() + timedelta(seconds=30)
-    assert job.last_error is not None and PHONE not in job.last_error and "[手机号]" in job.last_error
+    assert (
+        job.last_error is not None and PHONE not in job.last_error and "[手机号]" in job.last_error
+    )
 
     assert (await worker.run_until_idle()).retried == 0  # not due yet
     clock.tick(30)
@@ -441,7 +456,12 @@ def test_retry_and_cancel(queue: JobQueue) -> None:
     assert queue.cancel(job_id) is False  # already finished
     assert queue.retry(job_id) is True
     job = queue.get(job_id)
-    assert job is not None and job.status == "pending" and job.attempts == 0 and job.finished_at is None
+    assert (
+        job is not None
+        and job.status == "pending"
+        and job.attempts == 0
+        and job.finished_at is None
+    )
     assert queue.retry(job_id) is False  # pending jobs are not retried
     assert queue.retry("missing") is False and queue.cancel("missing") is False
 

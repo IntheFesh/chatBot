@@ -40,19 +40,25 @@ def runtime(db: Database, clock: ManualClock) -> RuntimeSettings:
     return RuntimeSettings(db, load_settings(), clock)
 
 
-def test_reads_fall_back_to_the_configured_value_before_initialisation(runtime: RuntimeSettings) -> None:
+def test_reads_fall_back_to_the_configured_value_before_initialisation(
+    runtime: RuntimeSettings,
+) -> None:
     assert runtime.get(BOT_TIMEZONE) == "America/Chicago"
     assert runtime.get(PAUSED) is False
 
 
 def test_initialize_seeds_from_config_once(db: Database, clock: ManualClock) -> None:
-    first = RuntimeSettings(db, load_settings(None, {"time": {"bot_timezone": "Asia/Shanghai"}}), clock)
+    first = RuntimeSettings(
+        db, load_settings(None, {"time": {"bot_timezone": "Asia/Shanghai"}}), clock
+    )
     seeded = first.initialize()
     assert set(seeded) == set(registered_settings())
     assert first.get(BOT_TIMEZONE) == "Asia/Shanghai"
     assert first.initialize() == []  # idempotent
     # the config file only supplies the *initial* value: later config edits do not override
-    later = RuntimeSettings(db, load_settings(None, {"time": {"bot_timezone": "America/Denver"}}), clock)
+    later = RuntimeSettings(
+        db, load_settings(None, {"time": {"bot_timezone": "America/Denver"}}), clock
+    )
     assert later.get(BOT_TIMEZONE) == "Asia/Shanghai"
     with db.session() as session:
         assert read_state_version(session) == 0  # seeding is not a user change
@@ -92,7 +98,9 @@ def test_invalid_values_are_rejected_and_not_stored(
     assert runtime.get(spec) == before
 
 
-def test_every_change_keeps_who_when_old_and_new(runtime: RuntimeSettings, clock: ManualClock) -> None:
+def test_every_change_keeps_who_when_old_and_new(
+    runtime: RuntimeSettings, clock: ManualClock
+) -> None:
     runtime.set(BOT_TIMEZONE, "Asia/Shanghai", by="cli")
     clock.tick(3600)
     runtime.set(BOT_TIMEZONE, "America/Chicago", by="wechat:/时区")
@@ -127,10 +135,12 @@ def test_set_bumps_the_state_version_in_the_same_transaction(
         assert read_state_version(session) == 2
 
 
-def test_a_corrupted_stored_value_is_reported_clearly(runtime: RuntimeSettings, db: Database) -> None:
+def test_a_corrupted_stored_value_is_reported_clearly(
+    runtime: RuntimeSettings, db: Database
+) -> None:
     with db.transaction(bump_state=False) as session:
         put_setting(session, THINKING_CHAT.key, "bogus", clock=db.clock)
-    with pytest.raises(SettingValueError, match="stored value of thinking.chat"):
+    with pytest.raises(SettingValueError, match=r"stored value of thinking\.chat"):
         runtime.get(THINKING_CHAT)
 
 

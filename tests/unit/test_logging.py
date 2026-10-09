@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.synthetic import mobile
 from twin.ops.logging import (
     BACKUP_COUNT,
     MAX_BYTES,
@@ -20,7 +21,7 @@ from twin.ops.logging import (
 )
 
 BODY = "这是一段绝对不能出现在日志里的聊天正文"
-PHONE = "13800138000"
+PHONE = mobile()
 
 
 def read_lines(path: Path) -> list[dict[str, object]]:
@@ -81,7 +82,9 @@ def test_exceptions_are_logged_as_type_redacted_message_and_stack(tmp_path: Path
     assert entry["level"] == "ERROR"
     assert str(entry["exc"]).startswith("ValueError: cannot send to [手机号]")
     assert "failing" in str(entry["stack"])
-    assert BODY not in path.read_text(encoding="utf-8") and PHONE not in path.read_text(encoding="utf-8")
+    assert BODY not in path.read_text(encoding="utf-8") and PHONE not in path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_long_exception_messages_are_truncated() -> None:
@@ -107,14 +110,18 @@ def test_records_are_json_lines_with_utc_timestamp_and_bound_fields(tmp_path: Pa
 
 
 def test_sanitize_fields_directly() -> None:
-    assert sanitize_fields(logging.INFO, {"content": "a", "n": 1}) == {"n": 1, "omitted": ["content"]}
+    assert sanitize_fields(logging.INFO, {"content": "a", "n": 1}) == {
+        "n": 1,
+        "omitted": ["content"],
+    }
     assert sanitize_fields(logging.DEBUG, {"Content": PHONE})["Content"] == "[手机号]"
 
 
 def test_rotation_is_ten_megabytes_times_ten_files(tmp_path: Path) -> None:
     configure_logging(tmp_path, console=False)
     handlers = [
-        h for h in logging.getLogger("twin").handlers
+        h
+        for h in logging.getLogger("twin").handlers
         if isinstance(h, logging.handlers.RotatingFileHandler)
     ]
     assert handlers and handlers[0].maxBytes == MAX_BYTES == 10 * 1024 * 1024

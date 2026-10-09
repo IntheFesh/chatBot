@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.clock import ManualClock
 from twin.clock import SystemClock, set_active_clock
 from twin.config.loader import load_settings
 from twin.config.secrets import SecretStore, select_backend
@@ -18,7 +19,6 @@ from twin.services import Services, build_services, set_cli_context
 from twin.storage import migrate
 from twin.storage.crypto import KeyRing, generate_key, set_active_keyring, use_keyring
 from twin.storage.db import Database
-from tests.support.clock import ManualClock
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -42,6 +42,7 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Ite
     monkeypatch.setenv("TWIN_SECRETS_DIR", str(tmp_path / "secrets"))
     monkeypatch.setenv("TWIN_KEYRING_BACKEND", "file")  # never the real credential manager
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("COLUMNS", "200")  # keep rich tables on one line in captured output
     yield home
     shutdown_logging()
     set_cli_context(None)
@@ -85,9 +86,7 @@ def db(tmp_path: Path, keyring_ring: KeyRing, clock: ManualClock) -> Iterator[Da
 
 
 @pytest.fixture
-def services(
-    tmp_path: Path, clock: ManualClock, secret_store: SecretStore
-) -> Iterator[Services]:
+def services(tmp_path: Path, clock: ManualClock, secret_store: SecretStore) -> Iterator[Services]:
     """Full services container on a fresh migrated database."""
     home = Path(os.environ["TWIN_HOME"])
     built_settings = load_settings(None, {"paths": {"data_dir": str(tmp_path / "data")}})

@@ -149,7 +149,8 @@ def jobs_run(
             "pass --until-idle; the long-running worker is part of `twin run`", ExitCode.USAGE
         )
     services = get_cli_context().services()
-    if app_is_running(services) and not force:
+    app_running = app_is_running(services)
+    if app_running and not force:
         raise CliError(
             "the application is running and executes the queue itself; "
             "use --force to run a second worker anyway",
@@ -166,7 +167,8 @@ def jobs_run(
     )
 
     async def _go() -> None:
-        await worker.recover()
+        if not app_running:  # with --force the running application owns its `running` jobs
+            await worker.recover()
         summary = await worker.run_until_idle()
         typer.echo(
             f"done={summary.done} retried={summary.retried} "

@@ -149,9 +149,10 @@ def test_file_backend_passphrase_mode(tmp_path: Path) -> None:
     protected = make_file_backend(tmp_path, "correct horse battery staple")
     protected.set_password(SERVICE_NAME, "k", VALUE)
     assert not (tmp_path / "store" / "secrets.key").exists()  # no key file in this mode
-    assert make_file_backend(tmp_path, "correct horse battery staple").get_password(
-        SERVICE_NAME, "k"
-    ) == VALUE
+    assert (
+        make_file_backend(tmp_path, "correct horse battery staple").get_password(SERVICE_NAME, "k")
+        == VALUE
+    )
     with pytest.raises(SecretStoreError, match="cannot decrypt"):
         make_file_backend(tmp_path, "wrong passphrase").get_password(SERVICE_NAME, "k")
     with pytest.raises(SecretStoreError, match=ENV_PASSPHRASE):
@@ -206,7 +207,9 @@ def test_default_secrets_dir_prefers_explicit_then_xdg(tmp_path: Path) -> None:
 
 
 def test_forced_file_backend_is_usable(tmp_path: Path) -> None:
-    backend, info = select_backend({ENV_BACKEND: "file", secrets_module.ENV_SECRETS_DIR: str(tmp_path)})
+    backend, info = select_backend(
+        {ENV_BACKEND: "file", secrets_module.ENV_SECRETS_DIR: str(tmp_path)}
+    )
     assert info.kind == "file" and info.usable
     assert isinstance(backend, EncryptedFileKeyring)
     assert "AES-256-GCM" in info.detail
@@ -237,6 +240,25 @@ def test_working_system_keyring_is_preferred(
     backend, info = select_backend({secrets_module.ENV_SECRETS_DIR: str(tmp_path)}, "linux")
     assert info.kind == "system" and info.usable
     assert isinstance(backend, SystemKeyring)
+
+
+def test_probe_can_be_skipped_for_the_native_windows_credential_manager(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[str] = []
+
+    class Native(MemoryCredentials):
+        priority = 5
+
+        def set_password(self, service_name: str, username: str, password: str, /) -> None:
+            calls.append("set")
+            super().set_password(service_name, username, password)
+
+    monkeypatch.setattr(secrets_module.keyring, "get_keyring", Native)
+    _backend, info = select_backend({}, "win32", probe_system=False)
+    assert info.kind == "system" and info.usable and calls == []
+    _backend, info = select_backend({}, "win32")
+    assert info.usable and calls == ["set"]
 
 
 def test_broken_system_keyring_is_probed_and_replaced(

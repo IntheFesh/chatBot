@@ -144,13 +144,18 @@ def _guard_locks(
 
 
 def _configure_cli_logging(context: CliContext) -> None:
-    """File log for CLI invocations; the console shows warnings and errors only."""
-    configure_logging(
-        context.paths().logs_dir,
-        level=context.log_level,
-        role="cli",
-        console_level=logging.WARNING,
-    )
+    """File log for CLI invocations; the console shows warnings and errors only.
+
+    A broken configuration or an unusable data directory must not stop diagnostics such as
+    ``twin doctor`` from running, so in those cases only console logging is installed.
+    """
+    try:
+        logs_dir: Path | None = context.paths().logs_dir
+        configure_logging(
+            logs_dir, level=context.log_level, role="cli", console_level=logging.WARNING
+        )
+    except (ConfigError, ConfigFileError, OSError):
+        configure_logging(None, level=context.log_level, role="cli", console_level=logging.WARNING)
 
 
 def command(
