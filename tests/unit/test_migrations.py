@@ -33,7 +33,39 @@ def test_round_00_migration_creates_exactly_the_five_tables(tmp_path: Path) -> N
     path = tmp_path / "m.db"
     migrate.upgrade(path)
     assert table_names(path) == {"settings", "jobs", "cost_ledger", "alerts", "channel_state"}
-    assert migrate.revision_history()[0] == "0001"
+    assert migrate.revision_history()[:2] == ["0001", "0002"]
+
+
+def test_round_01_migration_adds_ledger_accounts_and_keeps_old_rows(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0001")
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "INSERT INTO cost_ledger (id, at, provider, model, purpose, cache_hit_tokens, "
+        "cache_miss_tokens, completion_tokens, cost_usd, peak, thinking, latency_ms, "
+        "created_at, updated_at) VALUES ('a', '2026-10-09 00:00:00', 'deepseek', 'm', 'reply', "
+        "0, 1, 1, 0.5, 1, 0, 10, '2026-10-09 00:00:00', '2026-10-09 00:00:00')"
+    )
+    connection.commit()
+    connection.close()
+    migrate.upgrade(path)
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT account, batch_id, reasoning_tokens, image_count FROM cost_ledger"
+        ).fetchone()
+        assert row == ("daily", None, 0, 0)
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE cost_ledger SET account = 'monthly' WHERE id = 'a'")
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0001")
+    connection = sqlite3.connect(path)
+    try:
+        columns = {r[1] for r in connection.execute("PRAGMA table_info(cost_ledger)")}
+    finally:
+        connection.close()
+    assert "account" not in columns and "batch_id" not in columns
 
 
 def test_migration_and_models_are_in_sync(tmp_path: Path) -> None:
@@ -96,7 +128,7 @@ def test_status_transitions(tmp_path: Path) -> None:
 
     migrate.upgrade(path)
     current = migrate.schema_status(path)
-    assert current.ok and current.current == current.head == "0001"
+    assert current.ok and current.current == current.head == migrate.head_revision()
     assert "up to date" in current.hint()
     assert migrate.require_current_schema(path).ok
 
@@ -122,10 +154,10 @@ def test_outdated_state_is_reported_when_revisions_are_behind(
 ) -> None:
     path = tmp_path / "o.db"
     migrate.upgrade(path)
-    monkeypatch.setattr(migrate, "head_revision", lambda: "0002")
-    monkeypatch.setattr(migrate, "revision_history", lambda: ["0001", "0002"])
+    monkeypatch.setattr(migrate, "head_revision", lambda: "9998")
+    monkeypatch.setattr(migrate, "revision_history", lambda: ["0001", "0002", "9998"])
     status = migrate.schema_status(path)
-    assert status.state is SchemaState.OUTDATED and "older than 0002" in status.hint()
+    assert status.state is SchemaState.OUTDATED and "older than 9998" in status.hint()
 
 
 def test_alembic_command_line_works_from_the_repository_root(tmp_path: Path) -> None:

@@ -15,6 +15,7 @@ from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
+from twin.llm.cli import llm_app
 from twin.ops.cli import jobs_app
 from twin.ops.components import build_application
 from twin.ops.console import ensure_utf8
@@ -37,6 +38,7 @@ app.add_typer(settings_app, name="settings")
 app.add_typer(secrets_app, name="secrets")
 app.add_typer(db_app, name="db")
 app.add_typer(jobs_app, name="jobs")
+app.add_typer(llm_app, name="llm")
 
 log = get_logger("twin.cli")
 

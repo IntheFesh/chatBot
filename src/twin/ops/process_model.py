@@ -245,6 +245,7 @@ def enqueue_heavy(
     services: Services, specs: Sequence[JobSpec], *, foreground: bool = False
 ) -> list[str]:
     """Enqueue HEAVY work; with ``foreground`` run it now if the application is stopped."""
+    from twin.llm.runtime import activate_offpeak_policy
     from twin.ops.jobs import JobQueue, Worker, default_registry, load_handlers
 
     queue = JobQueue(services.db, services.clock)
@@ -268,6 +269,7 @@ def enqueue_heavy(
         typer.echo("the application is running and will execute the queued job(s)")
         return ids
     load_handlers()
+    activate_offpeak_policy(services)
     worker = Worker(
         queue,
         default_registry,

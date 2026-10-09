@@ -52,10 +52,17 @@ def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
         "database",
         "instances",
         "power",
+        "holiday-calendar",
+        "llm-config",
+        "deepseek-key",
     }
-    assert all(r.status is CheckStatus.OK for r in results), [
+    # these depend on the day (does the holiday library know next year?) and on a key the
+    # user has not stored yet; they warn but never fail
+    advisory = {"holiday-calendar", "deepseek-key"}
+    assert all(r.status is CheckStatus.OK for r in results if r.name not in advisory), [
         r for r in results if r.status is not CheckStatus.OK
     ]
+    assert all(r.status is not CheckStatus.FAIL for r in results)
     assert exit_code(results) == 0
 
 
@@ -233,3 +240,45 @@ def test_doctor_check_decorator_registers_new_checks(monkeypatch: pytest.MonkeyP
         return CheckResult("extra", CheckStatus.OK, "added by a later round")
 
     assert run_checks(DoctorContext(None))[0].detail == "added by a later round"
+
+
+def test_holiday_calendar_check_warns_about_years_the_library_lacks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from datetime import UTC, datetime
+
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2026, 10, 9, tzinfo=UTC))
+    warn = doctor.check_holiday_calendar(context(tmp_path))
+    assert warn.status is CheckStatus.WARN and "2027" in warn.detail
+    assert "chinese-calendar" in warn.hint and "extra_peak_dates" in warn.hint
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2024, 3, 1, tzinfo=UTC))
+    ok = doctor.check_holiday_calendar(context(tmp_path))
+    assert ok.status is CheckStatus.OK and "2024, 2025" in ok.detail
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2040, 1, 1, tzinfo=UTC))
+    assert doctor.check_holiday_calendar(context(tmp_path)).status is CheckStatus.WARN
+
+
+def test_llm_config_check_validates_models_prices_and_vision(tmp_path: Path) -> None:
+    good = doctor.check_llm_config(context(tmp_path))
+    assert good.status is CheckStatus.OK and "deepseek-flash" in good.detail
+    pro_vision = load_settings(None, {"deepseek": {"vision_model": "deepseek-v4-pro"}})
+    bad = doctor.check_llm_config(context(tmp_path, settings=pro_vision))
+    assert bad.status is CheckStatus.FAIL and "cannot read images" in bad.detail
+    unpriced = load_settings(None, {"deepseek": {"offline_model": "mystery-model"}})
+    missing = doctor.check_llm_config(context(tmp_path, settings=unpriced))
+    assert missing.status is CheckStatus.FAIL and "mystery-model" in missing.detail
+    legacy = load_settings(None, {"deepseek": {"vision_model": "deepseek-v4-flash"}})
+    assert doctor.check_llm_config(context(tmp_path, settings=legacy)).status is CheckStatus.OK
+    skipped = DoctorContext(settings=None, settings_error="broken")
+    assert doctor.check_llm_config(skipped).status is CheckStatus.WARN
+
+
+def test_deepseek_key_check_reports_presence_and_store_failures(tmp_path: Path) -> None:
+    store = SecretStore(MemoryCredentials())
+    missing = doctor.check_deepseek_key(context(tmp_path, secrets=store))
+    assert missing.status is CheckStatus.WARN and "twin llm probe" in missing.hint
+    store.set("deepseek_api_key", "synthetic-key-1")
+    present = doctor.check_deepseek_key(context(tmp_path, secrets=store))
+    assert present.status is CheckStatus.OK and "synthetic-key-1" not in present.detail
+    broken = doctor.check_deepseek_key(context(tmp_path, secrets=SecretStore(BrokenCredentials())))
+    assert broken.status is CheckStatus.WARN and "cannot read" in broken.detail

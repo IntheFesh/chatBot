@@ -80,7 +80,8 @@ pricing:
   offpeak_multiplier: 0.5              # 官方取消非高峰优惠时改为 1.0
   extra_offpeak_dates: []              # 额外按非工作日处理的北京日期
   extra_peak_dates: []                 # 额外按工作日处理的北京日期
-budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00 }
+budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00,
+          degrade_ratios: [1.0, 1.25, 1.5, 2.0] }   # 进入降级级别 1/2/3/4 时的花费占预算比例（R-LLM-008）
 thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
 backend: { active: "deepseek" }        # deepseek|style|hybrid
 jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
@@ -159,7 +160,7 @@ safety:
 - **R-LLM-005** 可靠性：429/5xx/超时指数退避重试（最多 4 次，带抖动）；全局并发信号量；连续 10 次失败触发熔断 5 分钟并告警。
 - **R-LLM-006** 费用记账：每次调用把 `prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`、`completion_tokens`（含推理 token）按价格表与是否高峰计入 `cost_ledger`，带 `purpose` 标签（reply / plan / proactive / extract / summary / persona / caption / sticker_tag / eval / train_plan）。
 - **R-LLM-007** 高峰判定：北京日期为工作日（用 `chinese_calendar.is_workday()` 判定，含调休上班的周末，不含法定节假日）时，UTC 01:00–04:00 与 06:00–10:00 为高峰，其余为非高峰。`chinese-calendar` 对未收录年份会抛异常——此时回退为"周一至周五为工作日"并合并配置 `pricing.extra_offpeak_dates`/`extra_peak_dates`，同时告警、在 `twin doctor` 中提示升级该依赖。非高峰价格倍率为 `pricing.offpeak_multiplier`（默认 0.5；官方取消优惠时设为 1.0，此时离线任务不再等待非高峰）。提供 `next_offpeak_window(now)`，离线任务默认只在非高峰执行（可设截止时间强制执行）。
-- **R-LLM-008** 预算：日预算与月预算；达到 80% 告警；超出按顺序降级并告警：① 关闭聊天思考 ② 检索例子 8→3、记忆上下文预算减半 ③ 暂停主动消息 ④ 若已激活的风格模型通过了上线门槛（R-SRV-005）且健康，则切到该风格后端，否则保持最小上下文的非思考 DeepSeek。任何情况下都不停止回复用户。一次性批任务的费用不参与本条判断（R-LLM-014）。
+- **R-LLM-008** 预算：日预算与月预算；达到 80% 告警；超出按顺序降级并告警：① 关闭聊天思考 ② 检索例子 8→3、记忆上下文预算减半 ③ 暂停主动消息 ④ 若已激活的风格模型通过了上线门槛（R-SRV-005）且健康，则切到该风格后端，否则保持最小上下文的非思考 DeepSeek。任何情况下都不停止回复用户。一次性批任务的费用不参与本条判断（R-LLM-014）。进入各级的花费占预算比例由 `budget.degrade_ratios` 给出（默认 1.0 / 1.25 / 1.5 / 2.0，取日预算与月预算中比例较大者）。
 - **R-LLM-009** 脱敏 `twin.llm.redaction`：发往 DeepSeek/AutoDL 前替换手机号（中国 `1[3-9]\d{9}` 与美国格式）、邮箱、身份证号（18 位含校验位）、银行卡号（16–19 位且通过 Luhn）、详细地址（省/市/区/路/号/栋/单元/室等启发式）、wxid；替换为类型占位符（如 `[手机号]`）。输出后处理检测占位符外泄（R-ENG-012）。脱敏有属性测试（hypothesis）。
 - **R-LLM-010** 提示词缓存布局：固定前缀（规则 + 人设卡）→ 近期对话（批量窗口，R-MEM-001）→ 可变上下文与本轮用户消息（R-ENG-005）。可验证的性质：除窗口批量后移的那一轮外，第 n+1 次请求的消息序列以第 n 次请求"截至其最后一条历史消息"的内容为前缀（有测试）；记录每次缓存命中率，`/费用` 与 `/状态` 中可见。
 - **R-LLM-011** `StyleModelClient`：两种模式，**都只发送由 `StylePromptBuilder` 渲染好的提示词字符串，绝不使用服务端聊天模板**（训练与推理一致，R-TRN-011）。`llamacpp_completion`：llama.cpp `llama-server` 的 `/completion` 接口；`vllm_completion`：vLLM 的 `/v1/completions` 接口（`prompt` 为渲染字符串，`model` 为 LoRA 名称）。都有健康检查、超时、停止词（`<|im_end|>`），以及启用前的分词核对（R-TRN-011 第 4 点）。

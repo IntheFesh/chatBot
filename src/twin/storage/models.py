@@ -47,6 +47,7 @@ NAMING_CONVENTION = {
 JOB_STATUSES = ("pending", "running", "done", "failed", "cancelled")
 ALERT_SEVERITIES = ("info", "warning", "critical")
 LEDGER_PROVIDERS = ("deepseek", "style_model", "other")
+LEDGER_ACCOUNTS = ("daily", "one_time")
 
 
 class Base(DeclarativeBase):
@@ -133,7 +134,7 @@ class Job(TimestampMixin, Base):
 
 
 class CostLedger(TimestampMixin, Base):
-    """One row per paid model call (R-LLM-006; written by round 01)."""
+    """One row per paid model call (R-LLM-006, R-LLM-014)."""
 
     __tablename__ = "cost_ledger"
 
@@ -150,10 +151,22 @@ class CostLedger(TimestampMixin, Base):
     thinking: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # round 01 (migration 0002): which budget the call counts against (R-LLM-014)
+    account: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="daily", server_default="daily"
+    )
+    batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reasoning_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    image_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
+        CheckConstraint("account IN ('daily', 'one_time')", name="account"),
         Index("ix_cost_ledger_at", "at"),
         Index("ix_cost_ledger_purpose", "purpose"),
+        Index("ix_cost_ledger_account_at", "account", "at"),
+        Index("ix_cost_ledger_batch_id", "batch_id"),
     )
 
 

@@ -20,9 +20,12 @@ from enum import StrEnum
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from twin.clock import now_utc
 from twin.config.loader import DataPaths, ensure_consent, resolve_paths
 from twin.config.secrets import SecretStore, SecretStoreError
 from twin.config.settings import Settings
+from twin.llm.official import VISION_MODELS
+from twin.llm.pricing import PeakCalendar
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
 from twin.ops.power import describe_power_strategy
 from twin.storage.keystore import KeyStore, KeyStoreError
@@ -48,8 +51,9 @@ REQUIRED_MODULES = (
     "chinese_calendar",
     "holidays",
     "orjson",
+    "PIL",
 )
-_DISTRIBUTIONS = {"yaml": "PyYAML", "chinese_calendar": "chinese-calendar"}
+_DISTRIBUTIONS = {"yaml": "PyYAML", "chinese_calendar": "chinese-calendar", "PIL": "pillow"}
 
 
 class CheckStatus(StrEnum):
@@ -290,6 +294,79 @@ def check_instances(ctx: DoctorContext) -> CheckResult:
 @doctor_check
 def check_power(ctx: DoctorContext) -> CheckResult:
     return CheckResult("power", CheckStatus.OK, describe_power_strategy(ctx.platform))
+
+
+@doctor_check
+def check_holiday_calendar(ctx: DoctorContext) -> CheckResult:
+    """The holiday library must cover this year and the next (R-LLM-007, R-OPS-009)."""
+    today = now_utc().date()
+    coverage = PeakCalendar().coverage(today)
+    if coverage.complete:
+        years = ", ".join(str(year) for year in coverage.covered_years)
+        return CheckResult("holiday-calendar", CheckStatus.OK, f"chinese-calendar covers {years}")
+    missing = ", ".join(str(year) for year in coverage.missing_years)
+    return CheckResult(
+        "holiday-calendar",
+        CheckStatus.WARN,
+        f"chinese-calendar has no data for {missing}: peak hours there assume Monday to Friday",
+        "upgrade the dependency when a new release appears (`uv lock --upgrade-package "
+        "chinese-calendar`); until then list exceptions in pricing.extra_offpeak_dates and "
+        "pricing.extra_peak_dates",
+    )
+
+
+@doctor_check
+def check_llm_config(ctx: DoctorContext) -> CheckResult:
+    """The configured DeepSeek models have prices and the vision model can see (R-LLM-004)."""
+    if ctx.settings is None:
+        return CheckResult("llm-config", CheckStatus.WARN, "skipped (configuration did not load)")
+    config = ctx.settings.deepseek
+    prices = ctx.settings.pricing_usd_per_mtok
+    problems: list[str] = []
+    for role, model in (
+        ("chat_model", config.chat_model),
+        ("offline_model", config.offline_model),
+        ("vision_model", config.vision_model),
+    ):
+        canonical = {"deepseek-v4-flash": "deepseek-flash"}.get(model, model)
+        if canonical not in prices:
+            problems.append(f"deepseek.{role} {model!r} has no entry in pricing_usd_per_mtok")
+    if config.vision_model not in VISION_MODELS and config.vision_model != "deepseek-v4-flash":
+        problems.append(f"deepseek.vision_model {config.vision_model!r} cannot read images")
+    if problems:
+        return CheckResult(
+            "llm-config",
+            CheckStatus.FAIL,
+            "; ".join(problems),
+            "fix the deepseek section of the configuration",
+        )
+    return CheckResult(
+        "llm-config",
+        CheckStatus.OK,
+        f"chat={config.chat_model} offline={config.offline_model} vision={config.vision_model}",
+    )
+
+
+@doctor_check
+def check_deepseek_key(ctx: DoctorContext) -> CheckResult:
+    """Whether the DeepSeek API key is stored (a missing key is the normal state before M0)."""
+    store = ctx.secrets
+    try:
+        if store is None:
+            store = SecretStore.default()
+        present = store.exists("deepseek_api_key")
+    except Exception as exc:  # a locked or broken credential store must not stop diagnostics
+        return CheckResult(
+            "deepseek-key", CheckStatus.WARN, f"cannot read the key: {type(exc).__name__}: {exc}"
+        )
+    if present:
+        return CheckResult("deepseek-key", CheckStatus.OK, "deepseek_api_key is set")
+    return CheckResult(
+        "deepseek-key",
+        CheckStatus.WARN,
+        "deepseek_api_key is not set",
+        "run `twin secrets set deepseek_api_key`, then `twin llm probe`",
+    )
 
 
 def run_checks(ctx: DoctorContext) -> list[CheckResult]:
