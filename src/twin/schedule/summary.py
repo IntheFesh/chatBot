@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 
 from twin.config.settings import ScheduleConfig
 from twin.llm.pricing import PeakCalendar
-from twin.memory.dayload import real_day_lines
+from twin.memory.dayload import bot_day_lines, real_day_lines
 from twin.memory.jobs import queue_daily_summary
 from twin.memory.localdate import BOT, REAL, MemoryClock
 from twin.memory.recent import bot_turn_reader
@@ -53,7 +53,8 @@ def summary_scopes(services: Services, day: date) -> tuple[str, ...]:
     clock = MemoryClock.from_services(services)
     if real_day_lines(services, clock, day):
         scopes.append(REAL)
-    if bot_turn_reader(services) is not None:
+    reader = bot_turn_reader(services)
+    if reader is not None and bot_day_lines(reader, clock, day):
         scopes.append(BOT)
     return tuple(scopes)
 

@@ -49,6 +49,7 @@ METRIC_LABELS: Mapping[str, str] = {
     "burst_gap_s": "连发条间隔（秒）",
     "reply_latency_s": "回复延迟（秒）",
     "delayed_reply_rate": "隔了一个会话段才回复的比例",
+    "closing_no_reply_rate": "对方说完结束性短句后她不回的比例",
     "initiations_per_day": "每天先开口次数",
     "initiation_hour": "先开口时段分布",
     "messages_per_day": "每天消息数",

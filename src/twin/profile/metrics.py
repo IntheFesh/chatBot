@@ -28,6 +28,9 @@ Metric names (the same for both sides)::
     burst_size / burst_gap_s    messages per burst, seconds between them (distributions)
     reply_latency_s / reply_latency_by_hour   seconds to answer (all day, per local hour)
     delayed_reply_rate    answers after more than the segment gap, among all answers
+    closing_no_reply_rate (her only) how often a closing message of the user - a short reply that
+                          asks nothing, :mod:`twin.profile.closing` - was not answered inside its
+                          segment
     initiations_per_day / initiation_hour   conversations opened, and at which local hours
     messages_per_day / message_hour   volume and its local time of day
 """
@@ -39,6 +42,7 @@ from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
+from twin.profile.closing import is_closing_message
 from twin.profile.distribution import BucketedDistribution, EmpiricalDistribution
 from twin.profile.textstats import END_CLASSES, PUNCT_GROUPS, analyse_text
 from twin.profile.units import Block, Rec, Step, UnitTracker
@@ -226,6 +230,9 @@ class WindowCollector:
             True: PartyAccumulator(known_codes),
             False: PartyAccumulator(known_codes),
         }
+        self._previous: Rec | None = None
+        self._closings = 0  # closing messages of the user that a later message has followed
+        self._closings_answered = 0  # ... and that she answered inside the same segment
         self._days: set[date] = set()
         self.first_ts: float | None = None
         self.last_ts: float | None = None
@@ -239,6 +246,15 @@ class WindowCollector:
         self._days.add(rec.stamp.day)
         if step.closed is not None:
             self.sides[step.closed.her].close_block(step.closed)
+            previous = self._previous
+            if (
+                not step.closed.her
+                and previous is not None
+                and is_closing_message(previous.kind, previous.text)
+            ):
+                self._closings += 1
+                self._closings_answered += int(rec.her and step.latency_s is not None)
+        self._previous = rec
         self.sides[rec.her].feed(rec, step)
         return step
 
@@ -266,4 +282,8 @@ class WindowCollector:
     def leaves(self) -> dict[str, dict[str, Leaf]]:
         self.finish()
         days = max(1, self.days)
-        return {"her": self.sides[True].leaves(days), "user": self.sides[False].leaves(days)}
+        her = self.sides[True].leaves(days)
+        her["closing_no_reply_rate"] = Scalar(
+            _ratio(self._closings - self._closings_answered, self._closings), self._closings
+        )
+        return {"her": her, "user": self.sides[False].leaves(days)}

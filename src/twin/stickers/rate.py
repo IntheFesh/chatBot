@@ -10,33 +10,38 @@ when the share is low nothing is forced (R-STK-005, "不足时不强行插入").
 A window that is not full yet is counted as if the missing bubbles had been sent at her share, so
 the first sticker of a new conversation is not judged against an empty window.
 
-Where the window comes from.  Round 09 records every bubble the bot sends in ``bot_turns``; this
-module only asks for a :class:`BubbleHistory` - the last bubbles as flags (``True`` for a
-sticker), oldest first.  :class:`MemoryBubbleHistory` keeps them in memory (the evaluation
-sandbox and the tests), :class:`StoredBubbleHistory` keeps them in the ``settings`` table so a
-restart does not forget them, and either can be filled from ``bot_turns``.
+Where the window comes from.  Round 09 writes every bubble the bot sends into ``bot_turns``; this
+module only asks for a :class:`BubbleHistory` - the last bubbles as flags (``True`` for a sticker),
+oldest first.  :class:`BotTurnBubbleHistory` reads them from ``bot_turns`` (the bubbles of the
+conversation, commands and thrown-away replies left out), so a restart forgets nothing and nothing
+has to be recorded twice; :class:`MemoryBubbleHistory` keeps them in memory (the evaluation sandbox
+and the tests) and can be filled with :meth:`MemoryBubbleHistory.record`.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
-from twin.clock import Clock
+from sqlalchemy import select
+
 from twin.profile.api import load_profile
 from twin.services import Services
 from twin.storage.db import Database
-from twin.storage.settings_store import get_setting, put_setting
-
-HISTORY_KEY = "stickers.bubble_window"
+from twin.storage.engine_models import BotTurn
 
 
 class BubbleHistory(Protocol):
     """The last bubbles the bot sent, as flags (``True`` = a sticker), oldest first."""
 
     def flags(self) -> list[bool]: ...
+
+
+@runtime_checkable
+class RecordingHistory(BubbleHistory, Protocol):
+    """A history the caller fills (the ``bot_turns`` one fills itself when a bubble is stored)."""
 
     def record(self, is_sticker: bool) -> None: ...
 
@@ -54,33 +59,34 @@ class MemoryBubbleHistory:
         self._flags.append(bool(is_sticker))
 
 
-class StoredBubbleHistory:
-    """The window in the ``settings`` table (survives restarts)."""
+class BotTurnBubbleHistory:
+    """The window read from ``bot_turns``: the last bubbles the bot sent (R-STK-005, R-ENG-011).
 
-    def __init__(self, db: Database, clock: Clock, window: int) -> None:
+    Only bubbles of the conversation count - not the replies to commands and not replies the user
+    threw away - and a bubble is in the window the moment the engine has stored it.
+    """
+
+    def __init__(self, db: Database, window: int) -> None:
+        if window < 1:
+            raise ValueError("the window must hold at least one bubble")
         self._db = db
-        self._clock = clock
         self._window = window
 
     def flags(self) -> list[bool]:
-        with self._db.session() as session:
-            stored = get_setting(session, HISTORY_KEY, [])
-        return [bool(item) for item in stored][-self._window :]
-
-    def record(self, is_sticker: bool) -> None:
-        with self._db.transaction(bump_state=False) as session:
-            stored = get_setting(session, HISTORY_KEY, [])
-            updated = [*(int(bool(item)) for item in stored), int(bool(is_sticker))][
-                -self._window :
-            ]
-            put_setting(
-                session,
-                HISTORY_KEY,
-                updated,
-                clock=self._clock,
-                by="stickers",
-                record_history=False,
+        stmt = (
+            select(BotTurn.kind)
+            .where(
+                BotTurn.direction == "out",
+                BotTurn.is_command.is_(False),
+                BotTurn.rejected_at.is_(None),
+                BotTurn.kind.in_(("text", "sticker")),
             )
+            .order_by(BotTurn.at.desc(), BotTurn.id.desc())
+            .limit(self._window)
+        )
+        with self._db.session() as session:
+            kinds = list(session.scalars(stmt))
+        return [kind == "sticker" for kind in reversed(kinds)]
 
 
 @dataclass(frozen=True)
@@ -125,7 +131,7 @@ class StickerRateController:
         share = profile.metrics.scalar("her", "sticker_share") if profile is not None else None
         return cls(
             share,
-            history or StoredBubbleHistory(services.db, services.clock, config.rate_window),
+            history or BotTurnBubbleHistory(services.db, config.rate_window),
             window=config.rate_window,
             tolerance=config.rate_tolerance,
         )
@@ -157,10 +163,18 @@ class StickerRateController:
 
     def should_drop(self) -> bool:
         """True if one more sticker would take the share above her share plus the tolerance."""
+        return self.should_drop_after(())
+
+    def should_drop_after(self, pending: Sequence[bool]) -> bool:
+        """The same question once the bubbles of ``pending`` (flags, oldest first) are in.
+
+        A reply with several bubbles is judged bubble by bubble: the stickers already chosen for
+        it count, although the engine stores them only when it sends them.
+        """
         upper = self.upper
         if upper is None:
             return False  # without her profile there is nothing to compare with
-        return self.share_if_added() > upper + 1e-12
+        return self._share_of([*self._history.flags(), *pending, True]) > upper + 1e-12
 
     def status(self) -> RateStatus:
         flags = self._history.flags()
@@ -178,5 +192,7 @@ class StickerRateController:
         return RateStatus(share, self._share, lower, upper, state, min(len(flags), self._window))
 
     def record(self, is_sticker: bool) -> None:
-        """Note one bubble that was sent."""
+        """Note one bubble that was sent (histories that fill themselves refuse)."""
+        if not isinstance(self._history, RecordingHistory):
+            raise TypeError("this window is read from bot_turns; store the bubble there instead")
         self._history.record(is_sticker)

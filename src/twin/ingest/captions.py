@@ -270,6 +270,22 @@ class CaptionService:
         await asyncio.to_thread(self._store, info.id, caption)
         return caption
 
+    async def describe_stored(self, sha256: str) -> str | None:
+        """Describe a picture that is only in the media store, within the wait timeout.
+
+        This is the picture the user has just sent to the bot (a channel message, not a row of
+        ``media_assets``): it is described now, as ``get_caption(wait=True)`` does for an imported
+        one, and ``None`` comes back on a timeout or when the description cannot be made - the
+        reply then goes on without it (R-ENG-013).
+        """
+        info = AssetInfo(sha256, sha256, "available", "image", None)
+        timeout = self._services.settings.ingest.caption_wait_timeout_s
+        try:
+            return await asyncio.wait_for(self.generate(info), timeout)
+        except Exception as exc:  # the description is a nicety; the reply must not depend on it
+            log.warning("inbound_caption_gave_up", reason=type(exc).__name__)
+            return None
+
     def queue_caption(self, asset_id: str) -> str | None:
         """Queue a description job for one picture unless one is already waiting."""
         queue = JobQueue(self._services.db, self._services.clock)

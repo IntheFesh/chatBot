@@ -139,8 +139,8 @@ def test_the_policy_comes_from_the_engine_settings(services: Services) -> None:
     assert len(recent.window(None).turns) == 6
 
 
-def test_round_09_registers_its_reader_and_until_then_there_is_none(services: Services) -> None:
-    assert bot_turn_reader(services) is None
+def test_the_reader_that_is_registered_is_the_one_the_memory_asks(services: Services) -> None:
+    """Round 09 registers the ``bot_turns`` reader on import; any other can be put in its place."""
     reader = conversation(4)
     register_bot_turn_reader(lambda _services: reader)
     try:

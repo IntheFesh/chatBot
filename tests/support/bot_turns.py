@@ -1,8 +1,9 @@
-"""A stand-in for the bot's conversation until round 09 creates ``bot_turns`` (round 07).
+"""A conversation kept in memory, for tests that do not need the ``bot_turns`` table (round 07).
 
-``ListBotTurnReader`` implements :class:`twin.memory.recent.BotTurnReader` over a list kept in
-memory.  It exists only in the tests: the table it stands for is created by round 09, whose own
-reader replaces it (``register_bot_turn_reader``).  The memory modules never import this file.
+``ListBotTurnReader`` implements :class:`twin.memory.recent.BotTurnReader` over a list.  The real
+reader (``twin.engine.turns.BotTurnMessages``, round 09) reads the table; tests of the memory and
+of the schedule register this one with ``register_bot_turn_reader`` when they want a conversation
+of their own.  The memory modules never import this file.
 """
 
 from __future__ import annotations
