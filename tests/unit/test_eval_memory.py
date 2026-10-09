@@ -17,6 +17,7 @@ from tests.support.eval_world import (
     serve,
 )
 from tests.support.export_world import World
+from tests.support.memory import add_fact
 from twin.eval.isolation import changes, snapshot
 from twin.eval.memory_test import (
     JUDGE_SYSTEM,
@@ -29,11 +30,13 @@ from twin.eval.memory_test import (
     finish_run,
     leaked,
     plan_memory,
+    question_messages,
     summarize,
 )
 from twin.eval.store import EvalStore, ItemView, NewItem
 from twin.eval.ui import LineKeys
 from twin.llm.runtime import build_llm_runtime
+from twin.memory.manage import MemoryManager
 from twin.ops.jobs import JobQueue
 
 
@@ -119,7 +122,7 @@ async def test_the_plan_takes_ten_from_each_source_and_prices_the_questions(worl
     assert len(items) == TOTAL and {i.status for i in items} == {"pending"}
     sources = [i.source for i in items]
     assert sources.count("real_record") == PER_SOURCE
-    assert sum(s in {"user_said", "bot_invented"} for s in sources) == PER_SOURCE
+    assert sum(s in {"user_said", "bot_invented", "user_command"} for s in sources) == PER_SOURCE
     assert len({i.sample_key for i in items}) == TOTAL
     run = store.get_run(plan.run.id)
     assert run.kind == "memory" and run.mode == "live" and run.params["seed"] == 3
@@ -148,6 +151,44 @@ async def test_too_few_facts_from_the_bots_conversation_is_not_passed_and_nothin
     assert any("chat a few more days" in r for r in run.summary["reasons"])
     assert store.items(run.id) == []  # no real record was drawn to make up the number
     assert JobQueue(world.services.db, world.services.clock).list_jobs() == []
+
+
+async def test_what_the_user_asked_her_to_remember_is_asked_and_what_was_forgotten_is_not(
+    world: World,
+) -> None:
+    """R-EVAL-003 once the commands exist: ``/记住`` facts are part of the bot's conversation."""
+    add_memory_facts(world, real=12, bot=8)
+    manager = MemoryManager(world.memory)
+    kept = await manager.remember("她的猫叫豆包", now=KNOWN)
+    dropped = await manager.remember("她的鞋码是三十八", now=KNOWN)
+    assert {kept.facts[0].source, dropped.facts[0].source} == {"user_command"}
+    now = world.services.clock.now_utc()
+    real, bot = eligible_facts(world.services, now)
+    assert len(bot) == 10 and {f.source for f in bot} >= {"user_command"}
+    assert "user_command" not in {f.source for f in real}
+
+    manager.forget(str(dropped.facts[0].number))
+    _, after = eligible_facts(world.services, now)
+    assert [f.text for f in after if f.source == "user_command"] == ["她的猫叫豆包"]
+    assert len(after) == 9  # a forgotten fact is not asked about, and nothing fills its place
+
+    add_fact(world.memory, "她爱吃酸辣粉：酸辣粉", KNOWN, source="user_command")
+    router = serve(memory_script())
+    try:
+        plan = await plan_memory(world.services, seed=5)
+    finally:
+        router.stop()
+    assert not plan.insufficient and plan.bot_available == PER_SOURCE
+    items = EvalStore(world.services.db, world.services.clock).items(plan.run.id)
+    asked = {i.source for i in items if i.source != "real_record"}
+    assert asked >= {"user_command"} and len(items) == TOTAL
+    assert all("鞋码" not in str(i.payload) for i in items)
+
+
+def test_the_question_names_where_a_remember_fact_came_from() -> None:
+    message = question_messages("她的猫叫豆包", "user_command")[1]["content"]
+    assert "记住" in message and message.endswith("她的猫叫豆包")
+    assert "来自过去真实的聊天记录" not in message
 
 
 async def test_too_few_real_records_is_not_passed_either(world: World) -> None:

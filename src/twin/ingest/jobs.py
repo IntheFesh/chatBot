@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import dataclass
+from pathlib import Path
 
-from twin.ingest.importer import ImportRunner
+from twin.ingest.importer import ImportRunner, prepare_import
 from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
 from twin.services import Services
 
@@ -58,3 +60,25 @@ def queue_import(services: Services, run_id: str) -> str:
     return JobQueue(services.db, services.clock).enqueue(
         IMPORT_JOB, {"run_id": run_id}, priority=50, max_attempts=3
     )
+
+
+@dataclass(frozen=True)
+class QueuedImport:
+    """An import that was prepared and queued: its run, its job and what it is about."""
+
+    run_id: str
+    job_id: str
+    resumed: bool  # an unfinished run of the very same files is continued
+    total: int | None  # messages of the target conversation in the export
+
+
+def enqueue_import(services: Services, directory: Path, target_username: str) -> QueuedImport:
+    """Prepare the run for ``directory`` and queue its ``import`` job (R-ARCH-006).
+
+    The one function behind ``twin import <directory>`` and ``/导入 <路径>``: both only enqueue,
+    the running application (or ``twin jobs run --until-idle``) does the work.  The caller has
+    chosen the target conversation; the export is validated here.
+    """
+    prepared = prepare_import(services, directory, target_username=target_username)
+    job_id = queue_import(services, prepared.run_id)
+    return QueuedImport(prepared.run_id, job_id, prepared.resumed, prepared.total)

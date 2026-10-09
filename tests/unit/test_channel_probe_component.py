@@ -302,7 +302,9 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
         "channel_probe",
         "engine",
         "heartbeat",
+        "import_report",  # says how an import started from the chat ended (round 11)
         "job_worker",
+        "learning",  # queues the weekly consolidation of the correction rules (round 11)
         "power_events",
         "schedule",
         "state_watcher",

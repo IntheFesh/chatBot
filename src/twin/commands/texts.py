@@ -104,6 +104,150 @@ REDO_UNDONE = "撤销了她那轮回复里编出来的 {count} 条小细节。"
 REDO_SAFETY = "这一条不能重来：那是你提到难受的事时，跳出角色的关心回复，不会撤销。"
 REDO_NOTHING = "现在没有可以重来的回复（还没有回复过，或者上一轮已经撤销、正在重来）。"
 
+# ----------------------------------------------------------------------------- /时区
+TZ_SHOW = "当前时区：{zone}，当地时间 {local}"
+TZ_HER = "她现在：{state}，到 {until}"
+TZ_SWITCHED = "时区已从 {old} 切到 {new}，当地时间 {local}。今天剩下的日程已按新时区重排。"
+TZ_SAME = "已经是 {zone} 了，当地时间 {local}。"
+TZ_UNKNOWN = (
+    "不认识这个时区：{name}。可以写 Asia/Shanghai、America/Chicago，或者 北京、上海、芝加哥。"
+)
+TZ_SHOW_WORDS = ("查看", "show", "now", "当前")
+
+# ----------------------------------------------------------------------- /暂停 和 /恢复
+PAUSE_SET = (
+    "好的，暂停到 {until}（{zone}，还有约 {left}）。期间不回复也不主动发消息，"
+    "到点后她会像刚看到你的消息一样回复。发 /恢复 可以提前结束。"
+)
+PAUSE_UNREADABLE = "没看懂这个时长：{text}。可以写 2小时、30分钟、1天，或者 到明早、到22:00。"
+PAUSE_TOO_LONG = "最长只能暂停 {hours} 小时。"
+PAUSE_NOT_FUTURE = "这个时长不对：暂停的结束时间必须在现在之后。"
+RESUME_DONE = "已恢复，她会正常回复，也会照常主动发消息。"
+RESUME_NOT_PAUSED = "现在没有在暂停。"
+
+# ------------------------------------------------------------------------------ /主动
+PROACTIVE_RANGE = "主动消息每天 {low}-{high} 条，已设好（明天起按这个抽，今天剩下的日程已重排）。"
+PROACTIVE_RANGE_OFF = "主动消息现在是关着的，发 /主动 开 才会发。"
+PROACTIVE_ON = "主动消息已开启。"
+PROACTIVE_OFF = "主动消息已关闭，不会再主动发消息；发 /主动 开 打开。"
+PROACTIVE_BAD_RANGE = "范围要满足 0 ≤ 最少 ≤ 最多 ≤ 12，收到的是：{text}"
+PROACTIVE_UNREADABLE = "没看懂：{text}。写成 最少-最多（例如 2-5），或者 开、关。"
+PROACTIVE_ON_WORDS = ("开", "开启", "打开", "on")
+PROACTIVE_OFF_WORDS = ("关", "关闭", "off")
+
+# ------------------------------------------------------------------------------ /作息
+ROUTINE_SLEEP_SET = "睡眠时间已设为每天 {start}–{end}（{zone}本地时间），记为第 {number} 条。"
+ROUTINE_BUSY_SET = "已记下：{days} {start}–{end} 她在忙，记为第 {number} 条。"
+ROUTINE_HOLIDAY_SET = "已记下：{first} 至 {last} 按假期算，记为第 {number} 条。"
+ROUTINE_REBUILT = "今天剩下的日程已按新的作息重排。"
+ROUTINE_REBUILD_LATER = "今天的日程这次没能立刻重排，稍后会自动重排。"
+ROUTINE_LIST_HEADER = "作息修正（编号用于 /作息 删除 <编号>）："
+ROUTINE_LIST_LINE = "{number}. {text}{state}"
+ROUTINE_LIST_DISABLED = "（已停用）"
+ROUTINE_EMPTY = "没有手动修正，她的作息完全来自聊天记录。"
+ROUTINE_REMOVED = "已删除第 {number} 条：{text}。"
+ROUTINE_NO_SUCH = "没有第 {number} 条，发 /作息 查看 看编号。"
+ROUTINE_BAD_SLEEP = "睡眠时间没看懂：{reason}"
+ROUTINE_BAD_BUSY = "忙碌时段没看懂：{reason}"
+ROUTINE_BAD_HOLIDAY = "假期日期没看懂：{reason}"
+ROUTINE_VIEW_WORDS = ("查看", "列表", "list", "show")
+ROUTINE_DELETE_WORDS = ("删除", "删", "remove", "delete")
+ROUTINE_SLEEP_WORDS = ("睡", "睡眠", "sleep")
+ROUTINE_BUSY_WORDS = ("忙", "忙碌", "busy")
+ROUTINE_HOLIDAY_WORDS = ("假期", "放假", "节假日", "holiday")
+
+# ------------------------------------------------------------------- /记住 /忘掉 /记忆
+REMEMBER_DONE = "记住了（第 {number} 条）：{text}"
+REMEMBER_FOLLOWUPS = "，另外记下了 {count} 条待跟进"
+REMEMBER_REPLACED = "，它取代了 {count} 条旧的"
+REMEMBER_AS_WRITTEN = "（没能分析这句话，按原话存下）"
+FORGET_DONE = "已删除："
+FORGET_FACT = "第 {number} 条：{text}"
+FORGET_FOLLOWUP = "待跟进：{text}"
+FORGET_LIFELINE = "生活安排：{text}"
+FORGET_RESTORED = "原来被它取代的第 {numbers} 条重新生效。"
+FORGET_AMBIGUOUS = "有 {count} 条都符合，没有删除。请用编号再发一次，例如 /忘掉 {example}："
+FORGET_FOLLOWUPS_AMBIGUOUS = "有多条待跟进都符合，没有删除。请说得更具体一些："
+FORGET_NONE = "没有找到符合的记忆。发 /记忆 看看现在有哪些。"
+MEMORY_EMPTY = "还没有记住什么。"
+MEMORY_NO_MATCH = "没有包含「{word}」的记忆。"
+MEMORY_LINE = "{number}. {text}{when}"
+MEMORY_WHEN = "（{date}）"
+MEMORY_FOLLOWUP = "待跟进：{text}"
+MEMORY_FOOTER = "第 {page}/{pages} 页，共 {total} 条"
+MEMORY_NEXT = "；发 /记忆 {page} 看下一页"
+MEMORY_SNIPPET_CHARS = 40
+
+# ------------------------------------------------------------------------------ /不像
+NOT_LIKE_DONE = "记下了：上一轮不像她。"
+NOT_LIKE_PAIR = "你给的说法已存为一对对照（现在共 {total} 对），以后用来教她改。"
+NOT_LIKE_PAIR_AGAIN = "这个说法之前已经记过了。"
+NOT_LIKE_PAIR_SKIPPED = "这一轮没有可以对照的上文（不是在回你的话），所以只记成了负例。"
+NOT_LIKE_HINT = "想教她怎么说，可以发 /不像 她会怎么说。"
+NOT_LIKE_WEEKLY = "这类反馈每周会被整理成“不要这样”的说话规则。"
+NOT_LIKE_NOTHING = "现在没有可以标记的回复。"
+NOT_LIKE_NOT_HERS = "这一条不是她平时的回复（是跳出角色的关心或系统消息），不记为“不像”。"
+NOT_LIKE_NO_TEXT = "上一轮她没有说话，没有可以标记的内容。"
+
+# ---------------------------------------------------------- the correction in plain words
+CORRECTION_ASK = "要把这次记为“不像”吗？回复“是”确认。"
+CORRECTION_DONE = "好的，上一轮已记为“不像”。"
+CORRECTION_CONFIRM_WORDS = ("是", "是的", "确认")
+
+# ------------------------------------------------------------------------------ /费用
+COST_TITLE_DAY = "今天（{date}）的费用"
+COST_TITLE_MONTH = "{month} 的费用"
+COST_TOTAL = "合计 ${spent:.4f}，预算 ${budget:.2f}，还剩 ${left:.4f}（已用 {used}）"
+COST_NO_CALLS = "这段时间还没有调用。"
+COST_PURPOSES = "按用途：{items}"
+COST_PURPOSE_ITEM = "{purpose} ${cost:.4f}（{share}）"
+COST_CACHE = "缓存命中率：{ratio}（命中 {hit:,} / 共 {total:,} 个输入 token）"
+COST_ONE_TIME = "一次性批任务另计：${spent:.4f}（不占预算）"
+COST_LEVEL = "预算级别：{level}（{meaning}）"
+COST_DAY_WORDS = ("今天", "今日", "today", "day")
+COST_MONTH_WORDS = ("本月", "这个月", "当月", "month")
+PURPOSE_NAMES = {
+    "reply": "回复",
+    "plan": "规划",
+    "proactive": "主动消息",
+    "extract": "抽取",
+    "summary": "摘要",
+    "persona": "人设",
+    "caption": "看图",
+    "sticker_tag": "表情包标签",
+    "eval": "评估",
+    "train_plan": "训练规划",
+    "probe": "探针",
+}
+
+# ------------------------------------------------------------------------------ /导入
+IMPORT_STARTED = (
+    "已开始导入 {name}（任务 {run}，约 {total} 条消息）。完成后我会告诉你统计；"
+    "进度发 /状态 就能看到。"
+)
+IMPORT_RESUMED = (
+    "这批文件之前导入到一半，现在接着导入（任务 {run}）。完成后我会告诉你；发 /状态 看进度。"
+)
+IMPORT_NO_FOLDER = "找不到这个文件夹：{path}。请给聊天记录导出所在的目录。"
+IMPORT_NEEDS_TARGET = (
+    "还没有选定要模仿的会话（第一次导入要在电脑上选）。请在电脑上运行 twin import {path}。"
+)
+IMPORT_BAD_EXPORT = "这个文件夹不是可以导入的导出：{reason}"
+IMPORT_NOT_IN_EXPORT = "已选定的会话不在这个导出里：{reason}"
+IMPORT_BUSY = "已经有一次导入在进行（任务 {run}），等它结束再开始新的。"
+IMPORT_DONE = (
+    "导入完成：新增 {inserted} 条，重复 {duplicates} 条，更新 {updated} 条，"
+    "保留原有 {kept} 条，无效 {invalid} 条，用时 {took}。画像、检索库和记忆回放等已排队处理。"
+)
+IMPORT_FAILED = (
+    "导入没有完成（{status}）：已处理 {processed}/{total}。"
+    "请在电脑上运行 twin import status 看原因，twin import --resume 接着导入。"
+)
+IMPORT_SUPERSEDED = "这次导入被新的一次取代了，不再继续。"
+STATUS_IMPORT = "导入：任务 {run} {status}，{phase}，已处理 {processed}/{total}"
+STATUS_REPLAY = "记忆回放：{text}"
+STATUS_DPO = "{text}"
+
 # --------------------------------------------------------------------- the command table
 SUMMARIES = {
     "帮助": "列出全部指令，或某个指令的用法",
@@ -112,6 +256,17 @@ SUMMARIES = {
     "显示思考": "是否把思考内容以系统消息发给你（调试用）",
     "后端": "切换生成后端（风格模型未启用或不健康时不能切到 style / hybrid）",
     "重来": "撤销她上一轮回复（记为负例）并重新生成",
+    "时区": "查看或切换机器人所在的时区（可以写 北京、芝加哥）",
+    "暂停": "暂停回复和主动消息一段时间（几小时、到明早）",
+    "恢复": "结束暂停",
+    "主动": "主动消息每天的条数范围，或者开关",
+    "作息": "手动修正她的睡眠、忙碌时段和假期",
+    "记住": "让她记住一件事（来源是你说的，优先级最高）",
+    "忘掉": "删除一条记忆，和只由它产生的待跟进、生活安排",
+    "记忆": "分页看她现在记得的事，或者按关键词找",
+    "不像": "标记她上一轮不像她；附上她会怎么说就存成一对对照",
+    "费用": "今天或本月的费用、按用途拆分、缓存命中率、预算剩余",
+    "导入": "导入新的聊天记录导出（给出电脑上的文件夹路径）",
 }
 SYNTAXES = {
     "帮助": "/帮助 [指令名]",
@@ -120,6 +275,20 @@ SYNTAXES = {
     "显示思考": "/显示思考 开|关",
     "后端": "/后端 deepseek|style|hybrid",
     "重来": "/重来",
+    "时区": "/时区 <IANA 名称>|查看",
+    "暂停": "/暂停 <时长>",
+    "恢复": "/恢复",
+    "主动": "/主动 <最少>-<最多>|开|关",
+    "作息": (
+        "/作息 睡 <HH:MM>-<HH:MM> | 忙 <星期> <HH:MM>-<HH:MM> | 假期 <日期>[..<日期>] "
+        "| 查看 | 删除 <编号>"
+    ),
+    "记住": "/记住 <内容>",
+    "忘掉": "/忘掉 <内容或编号>",
+    "记忆": "/记忆 [页码|关键词]",
+    "不像": "/不像 [正确说法]",
+    "费用": "/费用 [今天|本月]",
+    "导入": "/导入 <路径>",
 }
 EXAMPLES = {
     "帮助": "/帮助 思考",
@@ -128,4 +297,15 @@ EXAMPLES = {
     "显示思考": "/显示思考 开",
     "后端": "/后端 deepseek",
     "重来": "/重来",
+    "时区": "/时区 北京",
+    "暂停": "/暂停 2小时",
+    "恢复": "/恢复",
+    "主动": "/主动 2-5",
+    "作息": "/作息 睡 01:00-08:30",
+    "记住": "/记住 她下周三有考试",
+    "忘掉": "/忘掉 3",
+    "记忆": "/记忆 2",
+    "不像": "/不像 那你早点睡吧",
+    "费用": "/费用 本月",
+    "导入": "/导入 D:\\聊天记录\\导出",
 }

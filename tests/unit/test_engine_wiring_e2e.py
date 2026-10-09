@@ -304,7 +304,7 @@ async def test_command_replies_reach_the_user_exactly_as_the_router_wrote_them(
         reason=texts.BACKEND_REASONS["not_registered"].format(detail="")
     )  # commas and full stops inside, and not split into bubbles
     assert "，" in refused and refused.endswith("。")
-    unknown = await world.command("/不像", count=4, answers=4)
+    unknown = await world.command("/没有这条指令", count=4, answers=4)
     assert unknown.startswith(PREFIX) and "/帮助" in unknown  # a slash command is never chat
     assert world.route.call_count == 0
     stored = {row.text for row in world.rows() if row.direction == "out"}

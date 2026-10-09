@@ -18,6 +18,10 @@ on the instance (R-ARCH-006).
     hybrid share are missing it queues them as priced batches that wait for
     ``twin jobs approve <batch>`` and ends; run it again afterwards.  ``export-status`` shows how
     the last export ended;
+``export-dpo``
+    writes the preference pairs of ``/不像 <正确说法>`` (the only reader of ``preference_pairs``) as
+    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset (LIGHT:
+    no model is called);
 ``retrain-check``
     compares her messages now with the ones the last training covered (R-TRN-012) and raises
     the ``retrain_suggested`` alert when it is time (the post-import hook calls the same code).
@@ -38,6 +42,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from twin.learning.pairs import PreferencePairStore, dpo_hint
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
@@ -45,6 +50,7 @@ from twin.services import Services, get_cli_context
 from twin.training import bundle_crypto
 from twin.training.bundle import BundleError, build_bundle, verify_bundle
 from twin.training.dataset_dir import DatasetError, file_sha256, load_dataset_dir
+from twin.training.dpo_export import export_dpo
 from twin.training.export import ExportError
 from twin.training.export_job import (
     EXPORT_JOB,
@@ -354,6 +360,46 @@ def export_status_command() -> None:
     typer.echo("plans: " + ", ".join(f"{name} {number}" for name, number in counts.items()))
 
 
+@train_app.command("export-dpo")
+@command(CommandKind.LIGHT)
+def export_dpo_command(
+    dataset: Annotated[
+        Path | None,
+        typer.Option(
+            "--dataset", help="The exported dataset the SFT adapter is trained on (default: newest)"
+        ),
+    ] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the new dataset here (default: next to it)")
+    ] = None,
+) -> None:
+    """Write the preference pairs of /不像 as the DPO file of a new dataset version."""
+    services = get_cli_context().services()
+    with _failures():
+        result = export_dpo(services, dataset=dataset, out_dir=out)
+    meta = result.dataset.meta
+    typer.echo(
+        f"dataset {meta.dataset_version}: {result.pairs} preference pair(s) in dpo_train.jsonl"
+    )
+    typer.echo(f"in {result.dataset.path}")
+    if result.regenerated:
+        typer.echo(
+            f"{result.regenerated} system segment(s) made again for the card "
+            f"{meta.persona_version} and the template {meta.template_version} "
+            "the adapter is locked to"
+        )
+    if result.skipped:
+        typer.echo(
+            "left out: " + ", ".join(f"{why} {n}" for why, n in sorted(result.skipped.items()))
+        )
+    if not result.enough:
+        typer.echo(
+            f"DPO needs at least {result.minimum} pairs; with fewer, dpo.sh skips the step "
+            "(more come with /不像 <正确说法>)"
+        )
+    typer.echo("next: twin train bundle --profile <profile> --dataset <that directory>")
+
+
 @train_app.command("retrain-check")
 @command(CommandKind.LIGHT)
 def retrain_check_command() -> None:
@@ -363,6 +409,11 @@ def retrain_check_command() -> None:
     typer.echo(status.describe())
     if status.suggested:
         typer.echo("export the data again with `twin train export`, then train from the base model")
+    pairs = PreferencePairStore(services.db, services.clock).count()
+    typer.echo(f"preference pairs: {pairs}")
+    hint = dpo_hint(pairs, services.settings.training.dpo_min_pairs)
+    if hint:
+        typer.echo(hint)
 
 
 # ------------------------------------------------------------------------------ remote

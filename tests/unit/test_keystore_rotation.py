@@ -201,6 +201,8 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "feedback": {"correction"},
         # round 09b: the texts of the pairs and questions of the evaluation
         "eval_items": {"payload"},
+        # round 11: the three texts of a preference pair
+        "preference_pairs": {"prompt_sample", "chosen", "rejected"},
     }
 
 
