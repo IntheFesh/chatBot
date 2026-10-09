@@ -186,6 +186,8 @@ class OutboundResult:
     session_expired: bool = False
     message_id: str | None = None
     client_id: str | None = None
+    ret: int | None = None  # the response's own ``ret`` and ``errcode`` (``code`` is the one
+    errcode: int | None = None  # that wins by the documented precedence); kept for the probe
 
     @classmethod
     def success(
@@ -208,6 +210,9 @@ class QuoteTarget:
     text: str
 
 
+TEST_PREFIX = "[测试]"  # every message the diagnostics and the probe send starts with this
+
+
 @dataclass(frozen=True)
 class BypassRequest:
     """What a send that wants to skip the safe window and quota thresholds is about to do."""
@@ -218,15 +223,28 @@ class BypassRequest:
     gate_reason: str | None  # why the safe thresholds would have refused this send (or None)
 
 
+@dataclass(frozen=True)
+class BypassGrant:
+    """Extra permissions an authorised bypass can carry (everything defaults to "none").
+
+    ``empty_context_token`` makes the send carry an empty ``context_token`` (the optional
+    experiment of the M0 probe, docs/ILINK_PROTOCOL.md section 9.2); nothing else about the
+    send changes.
+    """
+
+    empty_context_token: bool = False
+
+
 class SendBypass(Protocol):
     """Authorises a send that skips the safe thresholds (the M0 probe, R-CH-009).
 
     ``authorize`` returns normally to allow the send and raises :class:`BypassRefused` to
-    forbid it; it also writes the audit record.  The normal engine and proactive paths have no
-    object of this kind.
+    forbid it; it also writes the audit record.  It may return a :class:`BypassGrant` for the
+    rare send that needs more than skipping the thresholds.  The normal engine and proactive
+    paths have no object of this kind.
     """
 
-    def authorize(self, request: BypassRequest) -> None: ...
+    def authorize(self, request: BypassRequest) -> BypassGrant | None: ...
 
 
 # ------------------------------------------------------- capabilities, state

@@ -62,6 +62,13 @@ def expected_names() -> list[str]:
         "channel send-test",
         "channel unbind",
         "channel listen",
+        "channel echo-test",
+        "channel probe start",
+        "channel probe status",
+        "channel probe answer",
+        "channel probe stop",
+        "channel probe report",
+        "chat",
         "import start",
         "import status",
         "import inspect",
@@ -73,7 +80,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 31 == len(expected_names())
+    assert len(names) == 38 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -100,6 +107,13 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "channel send-test": CommandKind.LIGHT,
         "channel unbind": CommandKind.LIGHT,
         "channel listen": CommandKind.EXCLUSIVE,
+        "channel echo-test": CommandKind.EXCLUSIVE,
+        "channel probe start": CommandKind.LIGHT,
+        "channel probe status": CommandKind.READ,
+        "channel probe answer": CommandKind.LIGHT,
+        "channel probe stop": CommandKind.LIGHT,
+        "channel probe report": CommandKind.LIGHT,
+        "chat": CommandKind.EXCLUSIVE,
         "import start": CommandKind.HEAVY,
         "import status": CommandKind.READ,
         "import inspect": CommandKind.READ,
@@ -112,8 +126,9 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
     run_spec = get_spec(names["run"])
     assert run_spec is not None
     assert run_spec.acquires == (LOCK_RUN,) and run_spec.tolerates == (LOCK_SUPERVISOR,)
-    listen_spec = get_spec(names["channel listen"])  # polls, so it must exclude `twin run`
-    assert listen_spec is not None and listen_spec.acquires == (LOCK_RUN,)
+    for polling in ("channel listen", "channel echo-test", "chat"):  # they must exclude `twin run`
+        spec = get_spec(names[polling])
+        assert spec is not None and spec.acquires == (LOCK_RUN,), polling
 
 
 def test_the_check_detects_an_undeclared_command() -> None:

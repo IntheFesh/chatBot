@@ -48,6 +48,7 @@ from twin.channel.policy import (
     ProbeImageManifest,
     StickerAllowList,
 )
+from twin.channel.probe.summary import load_channel_probe_summary, measured_capabilities
 from twin.channel.state import ChannelStateStore
 from twin.channel.window import SessionWindow
 from twin.clock import Clock
@@ -153,8 +154,14 @@ class IlinkChannel(Channel):
         banner: AlertBanner | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> IlinkChannel:
-        """Build the channel from the configuration (``channel.*`` safe window and quota)."""
+        """Build the channel from the configuration (``channel.*`` safe window and quota).
+
+        What the M0 probe measured (window, message count, whether a GIF moves) is read from the
+        database and shown by :meth:`capabilities`; it never changes the configured thresholds.
+        """
         config = services.settings.channel
+        with services.db.session() as session:
+            window_h, quota, gif = measured_capabilities(load_channel_probe_summary(session))
         return cls(
             db=services.db,
             clock=services.clock,
@@ -167,6 +174,9 @@ class IlinkChannel(Channel):
             banner=banner,
             http_client=http_client,
             poll=poll,
+            measured_window_h=window_h,
+            measured_quota=quota,
+            gif_animated=gif,
         )
 
     # ----------------------------------------------------------- lifecycle

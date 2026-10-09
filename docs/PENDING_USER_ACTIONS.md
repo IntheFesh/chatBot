@@ -63,7 +63,7 @@
 
 ## 第 02 轮 —— 微信通道（openclaw-weixin / iLink 协议）、本地控制台通道、M0 通道实测
 
-协议文档 `docs/ILINK_PROTOCOL.md`（步骤 02a）已根据官方源码写好（`@tencent-weixin/openclaw-weixin` 2.4.9，并对照 AstrBot 4.28.2 的 `weixin_oc`）。**官方源码已由沙箱拉取阅读，你不需要安装 Node.js**（除非想自己复核：`npm pack @tencent-weixin/openclaw-weixin`）。沙箱里没有微信账号，所以下面这些步骤**从未真实运行过**：`docs/CHANNEL_REPORT.md` 在拿到你的实测数据之前只能是"待实测"模板，源码读不出来的行为（主动发送窗口、可连发条数、`ret:-2` 的真实含义等，清单见协议文档第 13 节）都等这些步骤的结果。02b 步骤已提供 `twin channel login / status / send-test / unbind` 与 `twin doctor` 里的 WeChat 连通性检查（下面第 1–3 项现在可以做，**全部用合成响应测试过，从未对真实服务运行过**）；`twin channel probe` 与 `report` 随 02c、`twin chat --local` 与 `channel echo-test` 随 02d 合入，合入之前第 4、5 项不可用。
+协议文档 `docs/ILINK_PROTOCOL.md`（步骤 02a）已根据官方源码写好（`@tencent-weixin/openclaw-weixin` 2.4.9，并对照 AstrBot 4.28.2 的 `weixin_oc`）。**官方源码已由沙箱拉取阅读，你不需要安装 Node.js**（除非想自己复核：`npm pack @tencent-weixin/openclaw-weixin`）。沙箱里没有微信账号，所以下面这些步骤**从未真实运行过**：`docs/CHANNEL_REPORT.md` 在拿到你的实测数据之前只能是"待实测"模板，源码读不出来的行为（主动发送窗口、可连发条数、`ret:-2` 的真实含义等，清单见协议文档第 13 节）都等这些步骤的结果。02b 步骤已提供 `twin channel login / status / send-test / unbind` 与 `twin doctor` 里的 WeChat 连通性检查（下面第 1–3 项现在可以做，**全部用合成响应测试过，从未对真实服务运行过**）；第 4、5 项（`twin channel probe …`、`twin chat --local`、`twin channel echo-test`）随 02c/02d 一并提供，同样只用合成响应和模拟平台测试过。
 
 1. **准备手机微信，并检查这台电脑能不能连上微信服务器**
    - 做什么：把手机微信升级到支持 ClawBot 的版本（iOS ≥ 8.0.70 / Android ≥ 8.0.69），在"我 → 设置 → 插件"里确认能看到 ClawBot。然后在 Windows 电脑上运行 `uv run twin doctor`，看 `ilink-api` 与 `ilink-cdn` 两行。
@@ -82,14 +82,24 @@
    - 请把 `listen` 的输出和 `status` 里出现的 `UNKNOWN` 类型号或解析失败计数（例如 `image.decrypt_failed`、`video_no_cover`、`voice_untranscribed`、`quote=unresolved`）原样发给维护者，用来补全协议文档里标"需 M0 实测确认"的入站形态（表情包、视频封面、语音转写覆盖率、只带 id 的引用）。不要贴任何聊天内容。
 
 4. **运行 M0 通道探针（需要用户在手机上操作，约 26 小时）**
-   - 做什么：`uv run twin channel probe start`，按终端和微信里的提示依次操作。每一步开始前，终端和微信都会提示你先给机器人发一条新消息；完成后才开始该步。第 3 步（窗口）开始后约 25 小时内**不要给机器人发任何消息**，否则该步作废、需要重做。过程中探针会问你：GIF 在手机上是否在动、是否看到"对方正在输入"，并且每步结束后问"手机上实际收到几条 [测试] 消息"（接口返回成功不一定等于手机收到，以你手机上的数为准）。源码不支持发送引用，所以不会有引用子步骤。
-   - 预期：`uv run twin channel probe status` 随时可看进度；全部完成后 `uv run twin channel probe report` 生成 `docs/CHANNEL_REPORT.md`（只含测量结果与时间），并给出 `channel.proactive_window_safe_h` 与 `channel.outbound_quota_safe` 的建议值（实测值留 10% 余量）。**建议值需要你确认后才会写入配置**。
-   - 如果报告写"未达标"（窗口 < 12 小时或连发条数 < 3）：这是提示词要求的"停下来告诉我"——主动消息（第 10 轮）依赖这两个条件。把报告发给维护者，由你决定下一步（企业微信通道不在本规格范围，需要另开一轮）。
-   - 提交 `docs/CHANNEL_REPORT.md`（只含技术结果，不含任何对话内容）。
+   - 前提：第 1–3 项已做完（已登录、已绑定，`send-test` 能在手机上收到 `[测试]` 消息）。探针由**运行中的应用**执行，所以要有一个窗口一直开着 `uv run twin run`，电脑不要睡眠；应用重启没关系，探针从数据库里存的计划继续。
+   - 做什么：
+     1. 窗口 A：`uv run twin run`，保持开着。
+     2. 窗口 B：`uv run twin channel probe start`，读完说明后输入 `y`。之后随时 `uv run twin channel probe status` 看进度、当前该做什么、有没有问题在等你回答。（可选：加 `--empty-token-experiment`，多测一项"不带 context_token 的文字能不能送达"，默认不测。）
+     3. **每一步开始前**，窗口 A 会弹出一个红框提示（探针同时往微信里发一条 `[测试]` 提示——但只有平台当时还接收消息才发得出去，第 2 步开始前通常发不出去，这时只有终端提示，`probe status` 会写明）。请给机器人发**一条**消息（内容随意，只发一条），然后等；探针看到这条消息、等 3 秒后才开始。
+     4. 第 1 步（条数，约 30 分钟）：手机上每 2 分钟收到一条 `[测试] 条数测试 i/15（先别回复我）`，直到第一次失败或发满 15 条。**期间不要给机器人发消息。**结束后窗口 B 运行 `uv run twin channel probe answer`，回答"手机上实际收到几条 `[测试] 条数测试`"。
+     5. 第 2 步（图片、GIF、正在输入，几分钟）：先发一条新消息；手机上收到三张画着 `[TEST]` 的合成图（JPG、PNG、GIF）。`probe answer` 会问每张是否收到、GIF 是否在动（`moving` / `still` / `missing`）；然后让你打开 ClawBot 聊天窗口盯着对话顶部，按回车后程序发送"正在输入"并保持 30 秒，再问你是否看到（`yes` / `no` / `unsure`）。如果第 1 步测得的条数 N 很小，图片会分成几次发，每次之前都要你再发一条新消息；源码不支持发送引用，所以没有引用子步骤。
+     6. 第 3 步（窗口，约 25 小时）：先发一条新消息，**此后约 25 小时内不要给机器人发任何消息**，否则这一步作废，终端会告诉你并要求你再发一条消息重做。你发出那条消息之后约 1、6、12、20、23、25 小时，手机上各会收到一条 `[测试] 窗口测试 …`（条数不够时只保留靠后的测量点，报告会写明省略了哪些）。窗口 A 和电脑要一直开着。最后一条之后用 `probe answer` 回答共收到几条。
+     7. 全部做完后：`uv run twin channel probe report`。
+   - 对账（很重要）：程序提问时给出的是"服务器接受了几条"，你回答的是**你的手机聊天窗口里实际看到几条**，以你的回答为准。接口返回成功不一定等于手机收到（社区报告过缺 token 时接口"成功"但消息不推送，打开聊天窗口才出现）；两个数字不一致时报告里标"**不一致**"，并按手机上的数算。拿不准就打开 ClawBot 聊天窗口往上翻着数，只数以 `[测试] 条数测试`（或 `[测试] 窗口测试`）开头的消息；不要数 `[测试] 通道探针` 开头的提示消息。
+   - 预期：`probe status` 最终显示 `completed`；`probe report` 写出 `docs/CHANNEL_REPORT.md`（只含测量结果与时间，文件头是 `channel-report: measured`），打印判定，并逐项显示"当前 → 建议"的 `channel.proactive_window_safe_h`（窗口下限 ×0.9）与 `channel.outbound_quota_safe`（N ×0.9），**问你是否写入 `config/config.yaml`**——回答 `n` 则不改任何配置，之后想改也可以重新运行 `probe report`。每次失败的 `ret`、`errcode`、`errmsg`（已脱敏）都在报告的失败表里，请原样保留。
+   - 如果报告写"**未达标**"（窗口 < 12 小时，或一次入站后手机上收到的连发条数 < 3）：`probe report` 以退出码 1 结束并打印 `STOP`，这是提示词要求的"停下来告诉我"——主动消息（第 10 轮）依赖这两个条件。把报告发给维护者，由你决定下一步；企业微信通道不在本规格范围，需要你确认后另开一轮。"无法判定"表示某项没测到或测的点不足以下结论（报告写明缺什么），不算通过，补测即可。
+   - 中途想放弃：`uv run twin channel probe stop`（已测到的保留，`probe report` 照样能出一份"未做完"的报告）。窗口测试被打断或网络断了，探针自己会作废那次尝试并要求你再发一条消息重做（每步最多 10 次）。
+   - 提交 `docs/CHANNEL_REPORT.md`（只含技术结果，不含任何对话内容）；第 09b 轮的 `twin eval gate M0` 读取数据库里的同一份结果（`settings` 键 `m0.channel_probe`，格式见 `docs/DECISIONS.md` D-158）。
 
-5. **（可选）本地控制台通道**
-   - 做什么：`uv run twin chat --local`（引擎在第 09 轮接入前只能用 `uv run twin channel echo-test` 验证通道本身），输入 `/img <路径>` 发送图片。
-   - 预期：终端里双向聊天，机器人发表情包时显示 `[表情包：标签] <文件路径>`，显示"对方正在输入…"。
+5. **（可选）本地控制台通道与回显诊断**
+   - 做什么：`uv run twin chat --local`（与 `twin run` 互斥，要先停掉它）。输入一行文字回车就是发一条消息；`/img <图片路径>` 发送一张你电脑上的图片（路径可带引号）；`/help`、`/quit` 离开。再试 `uv run twin channel echo-test --local`：它把你写的话以 `[测试]回显:` 为前缀回给你，用来检查通道本身；对微信可以用 `uv run twin channel echo-test`（只回给已绑定的你，仍受安全窗口和条数限制；`twin run` 要先停掉）。
+   - 预期：`twin chat --local` 先打印"The persona engine is not connected yet (it arrives in round 09) …"，你输入的每条消息得到一行 `(received N character(s) of text; the engine is not connected, no reply)`——这是引擎（第 09 轮）接入前的真实行为，不是故障；机器人发表情包时显示 `bot: [表情包：<标签>] <文件路径>`、发其他允许的图片时显示 `bot: [图片] <路径>`、发之前显示 `对方正在输入…`（表情包标签第 06 轮之前显示"未标注"）。
 
 ## 第 03 轮 —— 聊天记录导入（流式、可续传、媒体与表情包、图片描述、报告、导入后钩子）
 

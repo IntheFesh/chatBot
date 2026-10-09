@@ -739,3 +739,20 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 入站 | §6.5 | 一个 `WeixinMessage` 去掉工具调用 item 后只有一个 item → `id = message_id`，多个 → `message_id#<序号>`；**文件不下载**，只取文件名（D-128）；窗口与 context_token 以"用户的任意消息"为准（即使消息里没有可交付的内容）；`create_time_ms` 同时接受毫秒与秒；引用的 `partial_text` 下标按 0 起算【推断：源码示例是 0，未被证实】，有 `quotemd5` 时用它在两种读法里选，没有时取"全局第 n 次" |
 | 地址 | §7.2 | `baseurl`、`redirect_host`、`full_url`、`upload_full_url` 只接受 https |
 | 绑定 | D-012 | 未绑定时消息不处理，只记录第一个发送者和它的 `context_token`；绑定时沿用该 token，所以 `send-test` 在绑定后立刻可用 |
+
+### 14.1 02c/02d 的实现对照（实现者笔记，不是协议事实）
+
+> 探针与本地通道按 §9.2、§10.8 实现；这里只记录和文档建议不同或补充的地方。设计决策见 `docs/DECISIONS.md` D-152～D-163。
+
+| 主题 | 文档建议 | 实现（`src/twin/channel/probe/`、`local.py`） |
+| --- | --- | --- |
+| 探针令牌 | §10.8：探针发送显式传入探针令牌 | `ProbeSendPolicy` 实现 `SendBypass.authorize(BypassRequest)`；计划未运行、不在一次尝试中、文字不以 `[测试]` 开头时抛 `BypassRefused`，每次（允许或拒绝）写审计（`channel_state` 键 `probe.audit`，不记录非测试文字的内容）。可返回 `BypassGrant(empty_context_token=True)`，只供可选的空令牌实验 |
+| 入站记录 | §10.8：把该入站的 `context_token` 记入探针记录 | 只记 token 的 SHA-256 前 8 位（`context_fp`），不存 token；入站时间取窗口状态里的 `last_inbound_at`（`create_time_ms` 与本机时间的较小者），测量点 = 该时间 + 小时数 |
+| 失败记录 | §9.2：完整记录 `ret`/`errcode`/`errmsg` | `OutboundResult` 增加 `ret`、`errcode`（`code` 仍是文档 §3.1 优先级选出的那个）；`errmsg` 经 `redact_text`，截断到 200 字符；另记 HTTP 状态、`outcome`、距入站的小时数 |
+| 手机对账 | §9.2：每步结束问"手机上实际收到几条" | 问题写在计划里，由 `twin channel probe answer` 回答并校验（数字不能超过接口接受的条数）；N、窗口下限都取手机的数 |
+| 重试 | §9.2：失败即停 | 平台的回答（错误码、HTTP 错误）是测量结果，立即停该次尝试、不重试；没有得到回答的失败（网络、结果未知、登录失效、重启）使该次尝试作废并重做；"请求没发出去"的网络错误每分钟重试一次、最多 5 次（D-153） |
+| 测试图片 | §10.8：Pillow 生成 JPG/PNG/多帧 GIF | 320×240；渐变底色 + 描边的 `[TEST] JPG/PNG/GIF` 字样；GIF 8 帧、一块黄色方块从左滑到右，循环播放；发送前按 SHA-256 登记到 `ilink.probe_images` |
+| 正在输入 | §13 #6 | 先问用户是否在看手机，答复后发 `sendtyping` 并保持 30 秒再取消；`send_typing` 不返回成功与否，结论只看用户的回答 |
+| 窗口测量点 | §9.2 的 1/6/12/20/23/25 小时 | 时刻 = 用户那条入站的时间 + 小时数，存在计划里，重启不漂移；机器睡过头时按实际经过的小时数判定，并记录迟到了多久 |
+| 微信里的提示 | R-CH-009：终端和微信里都提示 | 尽力而为：平台还接收消息时才发得出去；第 1 步以平台拒绝结束后（`-2`，窗口被平台关闭，本地也不再发送），第 2 步的微信提示被本地拒绝，只有终端提示 |
+| 本地控制台 | R-CH-011 | `LocalConsoleChannel`：同接口、同收件人守卫、同图片白名单，模拟窗口与条数用 `SessionWindow`；`twin chat --local` 启动只连本地通道的应用，引擎未接入时明说（D-162、D-163） |
