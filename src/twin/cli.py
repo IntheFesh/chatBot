@@ -35,6 +35,8 @@ from twin.retrieval.cli import retrieval_app
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
+from twin.training.cli import train_app
+from twin.training.model_cli import model_app
 
 app = typer.Typer(
     name="twin",
@@ -58,6 +60,8 @@ app.add_typer(routine_app, name="routine")
 app.add_typer(persona_app, name="persona")
 app.add_typer(retrieval_app, name="retrieval")
 app.add_typer(memory_app, name="memory")
+app.add_typer(train_app, name="train")
+app.add_typer(model_app, name="model")
 
 log = get_logger("twin.cli")
 

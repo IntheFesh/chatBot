@@ -32,6 +32,9 @@ dependencies = [
     "lancedb>=0.17",
     "numpy>=1.26",
     "torch>=2.4",  # direct so that [tool.uv.sources] picks the CPU build on Linux
+    "jinja2>=3.1",
+    "zstandard>=0.23",
+    "asyncssh>=2.18",
 ]
 
 [project.scripts]
@@ -61,13 +64,14 @@ dev = [
     "mypy>=1.13",
     "types-PyYAML>=6.0",
     "pre-commit>=4.0",
+    "shellcheck-py>=0.10",
 ]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/twin"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/twin", "config", "docs", "README.md", "pyproject.toml"]
+include = ["src/twin", "config", "training", "docs", "README.md", "pyproject.toml"]
 
 # ---------------------------------------------------------------- ruff
 [tool.ruff]

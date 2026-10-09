@@ -12,6 +12,7 @@ from twin.storage import (
     persona_models,
     profile_models,
     retrieval_models,
+    training_models,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "persona_models",
     "profile_models",
     "retrieval_models",
+    "training_models",
 ]

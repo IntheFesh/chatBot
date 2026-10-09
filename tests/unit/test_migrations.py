@@ -345,7 +345,7 @@ def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_pat
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0006_persona_sticker_tags")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0007_memory_tables")
     assert table_names(path) - before == {
         "facts",
         "daily_summaries",
@@ -354,7 +354,6 @@ def test_round_07_migration_adds_the_memory_tables_and_their_constraints(tmp_pat
         "memory_replay_days",
     }
     assert migrate.revision_history()[6] == "0007_memory_tables"
-    assert migrate.head_revision() == "0007_memory_tables"
     connection = sqlite3.connect(path)
     try:
         fact = (

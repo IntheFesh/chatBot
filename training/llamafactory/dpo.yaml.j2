@@ -1,0 +1,55 @@
+### LLaMA-Factory {{ llamafactory_version }} - DPO on top of the SFT adapter ({{ profile.name }})
+### rendered by twin.training.yaml_render; do not edit by hand
+### The SFT adapter is continued (the reference model is the base model with the adapter switched
+### off), so one adapter lineage results in every profile: output/dpo replaces output/sft.
+
+### model
+model_name_or_path: {{ model_path }}
+adapter_name_or_path: {{ output_dir }}/sft
+trust_remote_code: false
+flash_attn: sdpa
+{% if profile.quantization_bit %}
+quantization_bit: {{ profile.quantization_bit }}
+quantization_method: bnb
+{% endif %}
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+lora_rank: {{ profile.lora_rank }}
+lora_alpha: {{ profile.lora_alpha }}
+lora_target: all
+pref_beta: {{ dpo_beta }}
+pref_loss: sigmoid
+
+### dataset
+dataset: {{ dataset_dpo }}
+dataset_dir: {{ data_dir }}
+template: {{ template }}
+cutoff_len: {{ cutoff_len }}
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+seed: 42
+
+### output
+output_dir: {{ output_dir }}/dpo
+logging_steps: 5
+save_steps: 100
+save_total_limit: 2
+save_only_model: false
+plot_loss: true
+overwrite_output_dir: false
+report_to: none
+resume_from_checkpoint: null
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: {{ dpo_grad_accum }}
+learning_rate: {{ dpo_learning_rate }}
+num_train_epochs: {{ dpo_epochs }}.0
+lr_scheduler_type: cosine
+warmup_ratio: {{ warmup_ratio }}
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000

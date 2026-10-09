@@ -1,0 +1,7 @@
+step 1: merge_adapter - merge the LoRA adapter into the bf16 base model (llamafactory-cli export)
+step 2: prepare_llama_cpp - clone llama.cpp b11177 and build llama-quantize on the CPU
+step 3: convert_f16 - convert the merged model to an F16 GGUF (convert_hf_to_gguf.py)
+step 4: delete_merged_hf - delete the merged HF weights
+step 5: quantize - quantize the F16 GGUF to Q4_K_M,Q5_K_M,Q8_0
+step 6: delete_f16 - delete the F16 GGUF
+step 7: collect_artifacts - copy the adapter, compute sha256 and write artifacts/manifest.json

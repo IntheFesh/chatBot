@@ -114,13 +114,28 @@ def expected_names() -> list[str]:
         "memory forget",
         "memory summarize",
         "memory reindex",
+        "train bundle",
+        "train remote connect",
+        "train remote upload",
+        "train remote setup",
+        "train remote train",
+        "train remote dpo",
+        "train remote eval",
+        "train remote export",
+        "train remote download",
+        "train remote cleanup",
+        "train remote status",
+        "train remote all",
+        "model register",
+        "model list",
+        "model show",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 78 == len(expected_names())
+    assert len(names) == 93 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -199,6 +214,22 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "memory forget": CommandKind.LIGHT,
         "memory summarize": CommandKind.HEAVY,
         "memory reindex": CommandKind.LIGHT,
+        # the remote commands write short records only; the work happens on the instance
+        "train bundle": CommandKind.LIGHT,
+        "train remote connect": CommandKind.LIGHT,
+        "train remote upload": CommandKind.LIGHT,
+        "train remote setup": CommandKind.LIGHT,
+        "train remote train": CommandKind.LIGHT,
+        "train remote dpo": CommandKind.LIGHT,
+        "train remote eval": CommandKind.LIGHT,
+        "train remote export": CommandKind.LIGHT,
+        "train remote download": CommandKind.LIGHT,
+        "train remote cleanup": CommandKind.LIGHT,
+        "train remote status": CommandKind.READ,
+        "train remote all": CommandKind.LIGHT,
+        "model register": CommandKind.LIGHT,
+        "model list": CommandKind.READ,
+        "model show": CommandKind.READ,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

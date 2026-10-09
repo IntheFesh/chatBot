@@ -1,0 +1,38 @@
+### LLaMA-Factory 0.9.5 - one generated reply for every context of the test set (5090-8b)
+### rendered by twin.training.yaml_render; do not edit by hand
+### eval.sh points adapter_name_or_path at the best adapter (output/dpo when it exists)
+
+### model
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen3-8B
+adapter_name_or_path: /root/autodl-tmp/twin/output/sft
+trust_remote_code: false
+flash_attn: sdpa
+
+### method
+stage: sft
+do_train: false
+do_predict: true
+predict_with_generate: true
+finetuning_type: lora
+
+### dataset
+eval_dataset: twin_sft_test
+dataset_dir: /root/autodl-tmp/twin/data
+template: qwen3_nothink
+cutoff_len: 2048
+mask_history: true
+preprocessing_num_workers: 8
+seed: 42
+
+### generation: fixed sampling and seed, one reply per context
+do_sample: true
+temperature: 0.7
+top_p: 0.9
+max_new_tokens: 256
+
+### output
+output_dir: /root/autodl-tmp/twin/output/eval_generate
+per_device_eval_batch_size: 4
+overwrite_output_dir: true
+report_to: none
+bf16: true
