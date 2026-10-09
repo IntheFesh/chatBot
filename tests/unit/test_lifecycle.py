@@ -186,11 +186,11 @@ async def test_a_crashing_task_is_restarted_with_exponential_backoff_and_alerts(
     assert attempts == [1]  # still backing off (1 s)
     await clock.advance(0.2)
     assert attempts == [1, 2]
-    await clock.advance(1.9)
-    assert attempts == [1, 2]  # second backoff is 2 s
-    await clock.advance(0.2)
+    await clock.advance(1.7)  # t = 2.8: the second backoff (2 s, from t = 1.0) is not over
+    assert attempts == [1, 2]
+    await clock.advance(0.4)  # t = 3.2
     assert attempts == [1, 2, 3]
-    await clock.advance(4.1)  # third backoff is 4 s
+    await clock.advance(4.0)  # third backoff is 4 s (t = 3.0 -> 7.0)
     await wait_until(healthy.is_set)
     assert clock.sleeps[:3] == [1, 2, 4]
     assert supervisor.crash_counts == {"worker": 3}
