@@ -33,6 +33,7 @@ FILE_TRAIN: Final = "sft_train.jsonl"
 FILE_VAL: Final = "sft_val.jsonl"
 FILE_TEST: Final = "sft_test.jsonl"
 FILE_DPO: Final = "dpo_train.jsonl"
+FILE_PARITY: Final = "parity_cases.jsonl"
 FILE_DATASET_META: Final = "dataset_meta.json"
 FILE_DATASET_INFO: Final = "dataset_info.json"
 

@@ -10,7 +10,17 @@
     still have data on an instance.
 
 The commands are LIGHT: they write only short records to ``training_runs`` while the work happens
-on the instance (R-ARCH-006).  The dataset export itself (``twin train export``) is round 13b.
+on the instance (R-ARCH-006).
+
+``export``
+    builds the training set from her real reply blocks (HEAVY: it queues the ``training_export``
+    job; ``--foreground`` runs it here when the application is stopped).  When the plans of the
+    hybrid share are missing it queues them as priced batches that wait for
+    ``twin jobs approve <batch>`` and ends; run it again afterwards.  ``export-status`` shows how
+    the last export ended;
+``retrain-check``
+    compares her messages now with the ones the last training covered (R-TRN-012) and raises
+    the ``retrain_suggested`` alert when it is time (the post-import hook calls the same code).
 """
 
 from __future__ import annotations
@@ -20,19 +30,32 @@ import json
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.ops.process_model import CliError, CommandKind, ExitCode, command
+from twin.ops.foreground import run_jobs_until_idle
+from twin.ops.jobs import HandlerRegistry
+from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
 from twin.services import Services, get_cli_context
 from twin.training import bundle_crypto
 from twin.training.bundle import BundleError, build_bundle, verify_bundle
 from twin.training.dataset_dir import DatasetError, file_sha256, load_dataset_dir
+from twin.training.export import ExportError
+from twin.training.export_job import (
+    EXPORT_JOB,
+    ExportRequest,
+    handle_training_export,
+    local_range,
+    queue_export,
+    read_state,
+)
 from twin.training.layout import RemoteLayout
+from twin.training.plans import PlanStore
 from twin.training.profiles import (
     ProfileError,
     TrainingProfile,
@@ -43,6 +66,7 @@ from twin.training.registry import RegistryError
 from twin.training.remote.connection import RemoteError, target_from_settings
 from twin.training.remote.session import RemoteSession
 from twin.training.remote.steps import RemoteSteps, inspect_instance
+from twin.training.retrain import check_retrain
 from twin.training.runs import (
     RunError,
     RunStore,
@@ -51,6 +75,7 @@ from twin.training.runs import (
     hyperparameters,
     new_run_id,
 )
+from twin.training.tokenizer import TokenizerError
 
 train_app = typer.Typer(help="Train the style model on a rented GPU.", no_args_is_help=True)
 remote_app = typer.Typer(help="Run the training on the AutoDL instance.", no_args_is_help=True)
@@ -75,10 +100,12 @@ def _failures() -> Iterator[None]:
     except (
         BundleError,
         DatasetError,
+        ExportError,
         ProfileError,
         RegistryError,
         RemoteError,
         RunError,
+        TokenizerError,
         bundle_crypto.BundleDecryptionError,
     ) as exc:
         raise CliError(str(exc), ExitCode.FAILURE) from exc
@@ -188,6 +215,154 @@ def bundle_command(
         f"decrypt:  {built.path.parent / 'decrypt_bundle.py'} (standard library + cryptography)"
     )
     typer.echo("keep the passphrase: it is needed by `twin train remote setup` and is not stored")
+
+
+# ----------------------------------------------------------------------------- export
+
+FROM_OPTION = typer.Option("--from", help="First local day (YYYY-MM-DD); default: the first record")
+TO_OPTION = typer.Option("--to", help="Last local day (YYYY-MM-DD); default: the last record")
+
+
+def _day(value: str | None, option: str) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise CliError(f"{option} must be a date like 2026-03-05", ExitCode.USAGE) from exc
+
+
+def format_state(state: dict[str, Any]) -> list[str]:
+    """The lines ``export`` and ``export-status`` print about the last export (no text)."""
+    kind = state.get("state")
+    lines = [f"export: {kind} ({state.get('at', '?')})"]
+    if kind == "failed":
+        lines.append(f"  {state.get('message', '')}")
+    elif kind == "waiting_for_plans":
+        lines.append(
+            f"  {state.get('missing', 0)} of {state.get('selected', 0)} planned samples have no "
+            "plan yet"
+        )
+        for batch in state.get("batches", []):
+            lines.append(f"  approve with: twin jobs approve {batch}")
+        if state.get("batches"):
+            lines.append(f"  estimated ${state.get('estimated_usd', 0):.2f} (an upper bound)")
+        lines.append(
+            "  after the plans are written (`twin jobs run --until-idle` if the application is "
+            "stopped) run `twin train export` again"
+        )
+    elif kind == "done":
+        lines.append(
+            f"  dataset {state.get('dataset_version')}: {state.get('train')} train, "
+            f"{state.get('val')} validation, {state.get('test')} test samples"
+        )
+        lines.append(f"  in {state.get('directory')}")
+        lines.extend(f"  {line}" for line in format_stats(state.get("stats", {})))
+        lines.append("  next: twin train bundle --profile <profile> --dataset <that directory>")
+    return lines
+
+
+def format_stats(stats: dict[str, Any]) -> list[str]:
+    """The numbers of an export report as short lines."""
+    if not stats:
+        return []
+    sample = stats.get("samples", {})
+    tokens = stats.get("tokens", {})
+    plans = stats.get("plans", {})
+    sticker = stats.get("sticker_share", {})
+    codes = stats.get("emoji_code_rate", {})
+    chars = stats.get("target_chars", {})
+    hours = stats.get("training_hours", {})
+    lines = [
+        f"samples {sample.get('total')}; dropped {stats.get('dropped', {})}",
+        f"turns per sample {stats.get('turns_per_sample', {}).get('mean')}; target length "
+        f"p50 {chars.get('p50')} / p90 {chars.get('p90')} / max {chars.get('max')} characters",
+        f"stickers {sticker.get('export')} of target lines (her profile {sticker.get('profile')}); "
+        f"emoji codes {codes.get('export')} of text lines (profile {codes.get('profile')})",
+        f"plans {plans.get('planned')}/{plans.get('selected')} chosen; "
+        f"{plans.get('share_of_train_and_val')} of train+val",
+        f"tokens {tokens.get('total')} ({tokens.get('train')} in train), "
+        f"{stats.get('epochs')} epochs; about "
+        + ", ".join(f"{name} {value} h" for name, value in hours.items())
+        + " (planning figures)",
+    ]
+    return lines
+
+
+async def _export_in_foreground(services: Services) -> None:
+    registry = HandlerRegistry()
+    registry.register(EXPORT_JOB, handle_training_export)
+    summary = await run_jobs_until_idle(services, registry)
+    if summary.failed or summary.retried:
+        typer.echo(f"the export did not finish: {'; '.join(summary.failures) or 'see the log'}")
+
+
+@train_app.command("export")
+@command(CommandKind.HEAVY)
+def export_command(
+    first: Annotated[str | None, FROM_OPTION] = None,
+    last: Annotated[str | None, TO_OPTION] = None,
+    out: Annotated[
+        Path | None, typer.Option("--out", help="Write the dataset here (default: data/training)")
+    ] = None,
+    tokenizer: Annotated[
+        Path | None,
+        typer.Option("--tokenizer", help="tokenizer.json of Qwen3 (default: download once)"),
+    ] = None,
+    foreground: Annotated[
+        bool, typer.Option("--foreground", help="Run here when the application is stopped")
+    ] = False,
+) -> None:
+    """Export the training set from her real reply blocks (queued as a job, resumable)."""
+    services = get_cli_context().services()
+    start, end = _day(first, "--from"), _day(last, "--to")
+    if start and end and end < start:
+        raise CliError("--to is before --from", ExitCode.USAGE)
+    since, until = local_range(services, start, end)
+    request = ExportRequest(since, until, out, tokenizer)
+    queued = queue_export(services, request)
+    verb = "an export is already waiting" if queued.already_queued else "queued"
+    typer.echo(f"{verb} (job {queued.job_id})")
+    if not foreground:
+        typer.echo("the running application executes it; see `twin train export-status`")
+        return
+    if app_is_running(services):
+        typer.echo("the application is running and will execute the job")
+        return
+    asyncio.run(_export_in_foreground(services))
+    state = read_state(services)
+    if state is None:
+        raise CliError("the export left no record; see `twin jobs list`", ExitCode.FAILURE)
+    for line in format_state(state):
+        typer.echo(line)
+    if state.get("state") == "failed":
+        raise CliError("the export failed", ExitCode.FAILURE)
+
+
+@train_app.command("export-status")
+@command(CommandKind.READ)
+def export_status_command() -> None:
+    """Show how the last export ended and how far the plans of the hybrid share are."""
+    services = get_cli_context().services()
+    state = read_state(services)
+    if state is None:
+        typer.echo("no export has run yet: `twin train export`")
+    else:
+        for line in format_state(state):
+            typer.echo(line)
+    counts = PlanStore(services.db).counts()
+    typer.echo("plans: " + ", ".join(f"{name} {number}" for name, number in counts.items()))
+
+
+@train_app.command("retrain-check")
+@command(CommandKind.LIGHT)
+def retrain_check_command() -> None:
+    """Compare her messages now with the last training; raise the alert when it is time."""
+    services = get_cli_context().services()
+    status = check_retrain(services)
+    typer.echo(status.describe())
+    if status.suggested:
+        typer.echo("export the data again with `twin train export`, then train from the base model")
 
 
 # ------------------------------------------------------------------------------ remote

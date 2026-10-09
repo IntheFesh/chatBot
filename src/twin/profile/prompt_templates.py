@@ -46,6 +46,7 @@ MEMORY_SUMMARY = "memory_summary"
 MEMORY_SUMMARY_MERGE = "memory_summary_merge"
 LIFELINE_GENERATE = "lifeline_generate"
 LIFELINE_CHECK = "lifeline_check"
+TRAIN_PLAN = "train_plan"
 
 
 class TemplateError(RuntimeError):

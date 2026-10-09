@@ -44,7 +44,13 @@ def test_a_written_dataset_directory_loads_back_with_counts_and_hashes(tmp_path:
     written = write_synthetic_dataset(tmp_path / "ds", train=10, val=2, test=3, pairs=4)
     loaded = load_dataset_dir(tmp_path / "ds")
     assert loaded.meta == written.meta
-    assert loaded.meta.counts.model_dump() == {"train": 10, "val": 2, "test": 3, "dpo": 4}
+    assert loaded.meta.counts.model_dump() == {
+        "train": 10,
+        "val": 2,
+        "test": 3,
+        "dpo": 4,
+        "parity": 0,
+    }
     assert loaded.has_dpo and loaded.data_files() == [
         "sft_train.jsonl",
         "sft_val.jsonl",
@@ -276,7 +282,7 @@ def test_the_manifest_names_the_versions_the_profile_and_the_hashes(
     assert manifest["template_version"] == lf_template.TEMPLATE_VERSION
     assert manifest["persona_version"] == "v3" and manifest["profile_version"]
     assert manifest["llamafactory_version"] == "0.9.5" and manifest["llama_cpp_tag"] == "b11177"
-    assert manifest["counts"] == {"train": 40, "val": 6, "test": 6, "dpo": 3}
+    assert manifest["counts"] == {"train": 40, "val": 6, "test": 6, "dpo": 3, "parity": 0}
     assert manifest["epochs"] == 3 and manifest["has_dpo"] is True
     paths = {f["path"] for f in manifest["files"]}
     assert {

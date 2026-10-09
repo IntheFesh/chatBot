@@ -261,6 +261,27 @@ async def test_training_data_left_on_a_rented_machine_and_the_retraining_reminde
     assert "twin train remote cleanup" in report
 
 
+async def test_the_retraining_reminder_is_read_from_the_training_records(
+    rig: Rig, services: Services
+) -> None:
+    """R-TRN-012: without a source passed in, ``/状态`` compares her messages with the training."""
+    from tests.support.synth_chat import MessageWriter
+    from tests.support.training_history import record_training
+
+    writer = MessageWriter(services)
+    for number in range(100):
+        writer.add(
+            rig.clock.now_utc() - timedelta(minutes=200 - number), True, "text", f"她的第{number}句"
+        )
+    writer.store()
+    assert lines_of(await rig.report())["重训提醒"] == texts.STATUS_NONE  # nothing trained yet
+    record_training(services, covered=95)
+    assert lines_of(await rig.report())["重训提醒"] == texts.STATUS_NONE  # 5 %: not yet
+    record_training(services, "r2", "ds-2", covered=80)
+    reminder = lines_of(await rig.report())["重训提醒"]
+    assert "25%" in reminder and "建议重新训练风格模型" in reminder
+
+
 async def test_what_later_rounds_add_appears_at_the_end_and_one_broken_source_costs_one_line(
     rig: Rig,
 ) -> None:

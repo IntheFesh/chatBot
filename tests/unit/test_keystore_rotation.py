@@ -186,6 +186,8 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         # round 06: the persona card joins the rotation automatically
         "persona_cards": {"content", "provenance"},
         "prompt_templates": {"content"},
+        # round 13b: the plans written for training samples
+        "training_plans": {"input", "plan"},
         # round 07: the memory tables join the rotation automatically
         "facts": {"text", "evidence"},
         "daily_summaries": {"text"},

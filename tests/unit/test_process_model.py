@@ -122,6 +122,9 @@ def expected_names() -> list[str]:
         "plan lifeline",
         "plan lifeline-generate",
         "train bundle",
+        "train export",
+        "train export-status",
+        "train retrain-check",
         "train remote connect",
         "train remote upload",
         "train remote setup",
@@ -142,7 +145,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 100 == len(expected_names())
+    assert len(names) == 103 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -230,6 +233,9 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "plan lifeline-generate": CommandKind.HEAVY,
         # the remote commands write short records only; the work happens on the instance
         "train bundle": CommandKind.LIGHT,
+        "train export": CommandKind.HEAVY,
+        "train export-status": CommandKind.READ,
+        "train retrain-check": CommandKind.LIGHT,
         "train remote connect": CommandKind.LIGHT,
         "train remote upload": CommandKind.LIGHT,
         "train remote setup": CommandKind.LIGHT,

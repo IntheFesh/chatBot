@@ -51,6 +51,7 @@ HOOK_MODULES: tuple[str, ...] = (
     "twin.profile.persona.hook",
     "twin.stickers.hook",
     "twin.memory.hook",
+    "twin.training.hook",  # the retraining reminder (round 13b)
 )
 
 

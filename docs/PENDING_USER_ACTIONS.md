@@ -386,8 +386,8 @@
    - `uv run twin secrets set autodl_password`（实例密码存进凭据管理器，不写任何文件）。
    - 第一次 `uv run twin train remote connect` 会显示主机密钥指纹并询问是否信任，对照控制台后输入 `y`；实例重建后指纹会变，按提示删除 `data/training/known_hosts` 里那一行再连。
 
-3. **准备数据集（13b 提供导出命令）**
-   - 13b 的 `twin train export` 会写出数据集目录（`dataset_meta.json`、`sft_train.jsonl` 等，格式见 `training/README.md` 与 DECISIONS D-249）。在它完成之前 `twin train bundle` 只能用测试里的合成数据目录验证流程，不要拿真实数据手工拼。
+3. **准备数据集**
+   - `twin train export`（13b，见下一节）会写出数据集目录（`dataset_meta.json`、`sft_train.jsonl` 等，格式见 `training/README.md` 与 DECISIONS D-249）。不要拿真实数据手工拼数据集目录。
 
 4. **打包与运行**（13b 完成后）
    - `uv run twin train bundle --profile 5090-8b --dataset <数据集目录>`：输入两次口令（至少 12 个字符，**不会保存**，丢了就只能重新打包）。输出在 `data/training/bundles/`，同目录有独立解密脚本。
@@ -397,13 +397,45 @@
 5. **第一次真实运行时请留意（这些在沙箱里验证不了，请把输出贴给我）**
    - `setup.sh` 打印的 GPU 型号、驱动、计算能力、PyTorch 与 CUDA 版本和架构列表，以及它是否重装了 PyTorch。
    - bitsandbytes 4-bit（`5090-14b`）在 sm_120 上是否能训练；`setup.sh <档位> verify` 的 1 step 试跑最终用的批大小。
-   - `setup.sh <档位> verify` 在 13b 提供 `twin.training.parity_check` 之前会**明确报错并停下**（这是设计：模板一致性检查不能跳过）。
+   - `setup.sh <档位> verify` 会运行 `twin.training.parity_check`（13b 已提供，随训练包进入实例）；它不通过或找不到时**明确报错并停下**（这是设计：模板一致性检查不能跳过）。
    - `export.sh`：llama.cpp（标签 b11177）能否在实例上编译 `llama-quantize`、转换 Qwen3 是否成功、三个量化文件的大小，以及每一步前的剩余空间。
    - `serve_vllm.sh`（第 14 轮才用到）：vLLM 0.26.0 的 cu128 轮子在 5090 / PRO 6000 上能否启动；沙箱没法下载 GitHub 发布页，所以脚本有 PyPI 回退，两条路径都没在真卡上试过（DECISIONS D-243）。
 
 6. **费用与安全**
    - 按小时计费：训练、评估、导出连起来可能是几小时；做完立刻 `twin train remote cleanup` 并释放实例。
    - 不要把口令、实例密码写进任何文件或聊天；训练包本身经 AES-256-GCM 加密，实例上的明文数据只在解密后存在，`cleanup.sh` 会覆盖后删除，并清掉日志与数据集缓存。
+
+## 第 13 轮（13b）—— 训练集导出、防未来泄露、规划合成、模板 token 级一致性、重训提醒
+
+> 沙箱里没有真实聊天记录、DeepSeek Key 和 GPU：导出用合成对话 + respx 验证，模板一致性在装了固定版本 LLaMA-Factory 0.9.5 的独立环境里对真实 Qwen3 分词器跑过（205 个样本全部逐 token 一致，最长 1781 token；DECISIONS D-332）。下面是你自己环境里要做的事。
+
+1. **前提**
+   - 人设卡、画像与作息的 `pre_holdout` 版本已生成（`twin persona generate`、`twin profile rebuild`），记忆回放已覆盖要导出的日期范围（`twin memory replay start` 并批准）。缺了哪个，`twin train export` 会直接告诉你先做什么。
+   - 分词器：第一次导出会下载 `tokenizer.json`（约 11MB，先 Hugging Face 再 ModelScope，核对哈希）。两处都连不上时，手动下载 `Qwen/Qwen3-8B` 仓库里的 `tokenizer.json`，用 `--tokenizer <文件或目录>` 指定。
+
+2. **在真实数据上导出**
+   - `uv run twin train export --foreground`（应用没运行时；应用在运行就去掉 `--foreground`，应用会执行）。可用 `--from 2026-01-01 --to 2026-06-30` 限定本地日期范围；切分点始终是 `holdout_cutoff()`。
+   - 第一次通常停在 `waiting_for_plans`：它不写数据集，而是把“规划合成”排成一次性批任务并打印批次号与**估算费用**（上限，按峰时价）。你确认费用后：`uv run twin jobs approve <批次>`；应用不在运行时 `uv run twin jobs run --until-idle`；再运行一次 `uv run twin train export --foreground`，这次写出数据集。费用超过估算 20% 时批次会自己暂停并告警（R-LLM-014）；可以随时 `uv run twin train export-status` 看进度。
+   - 完成后：`uv run twin train bundle --profile <档位> --dataset <打印出的目录>`，后面接 13a 的流程。
+
+3. **检查导出统计**（`twin train export-status`，同样的数字在 `dataset_meta.json` 的 `stats` 里）
+   - 各切分的样本数与丢弃原因。`no_user_turn_to_answer`（她主动开口的块，DECISIONS D-320）在合成数据里约占四分之一，真实数据按你们的聊天习惯会不同；`over_budget` 或 `target_too_long` 很多时请告诉我。
+   - 表情包占比、表情代码占比应接近她的画像（统计里并排显示 `export` 与 `profile`），相差很大说明导出没有教到她的习惯。
+   - 规划样本占训练+验证的约 30%；测试集不带规划（D-321）。
+   - token 总数与各档位预计训练时长：**规划用的粗略数字**（D-327），不是测量；第一次真实训练后以 `training_runs` 为准。
+   - 抽查几行 `sft_train.jsonl`：目标里没有 `[图片]`、`[语音…]` 等事件文字，上下文里有；占位符如 `[手机号#1]` 在整个数据集里指同一个号码。
+   - 真实数据量大时（十万个样本量级）导出会花不少时间（每个样本一次“当时的记忆块”检索和一次向量编码）；沙箱里 440 个样本约 7 秒（用的是测试里的小向量模型），真实模型的耗时没有测过，请把你机器上的耗时告诉我。
+
+4. **模板一致性检查**
+   - 第一次 `setup.sh <档位> verify`（`twin train remote setup` 会跑）会在实例上运行 `python -m twin.training.parity_check --model-dir <基座目录> --cases <工作目录>/data/parity_cases.jsonl`，用的是实例上装的 LLaMA-Factory 0.9.5 和基座的分词器；退出码非 0 就**不要训练**，把输出贴给我（输出只有位置和 token 数，没有聊天文字）。
+   - 想在自己机器上提前跑（可选）：`tests/integration/test_template_parity.py` 顶部写了怎么建独立环境（不要装进项目依赖）和需要的环境变量（`TWIN_LLAMAFACTORY_PYTHON`、`TWIN_QWEN_TOKENIZER`）。
+
+5. **重训提醒**
+   - 每次导入后自动检查，也可以手动 `uv run twin train retrain-check`：她的新消息达到上次训练数据的 10% 时发 `retrain_suggested` 告警，`/状态` 的“重训提醒”显示百分比。第一次训练完成之前没有基线，不会提醒。
+   - 重训 = 重新 `twin train export`（新版本号）→ `bundle` → `remote all`，从基座全量训练，不在旧适配器上叠加。
+
+6. **没有做、也不属于这一步的**
+   - `twin train export-dpo` 和“偏好对 ≥ 200 的提示”在第 11 轮（读 `preference_pairs`）；服务、激活与上线门槛在第 14 轮。
 
 ## 第 09 轮 —— 回复引擎（分三步：09-1 无状态部分，09-2 后端与指令，09-3 状态机与发送）
 

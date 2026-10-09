@@ -52,6 +52,18 @@ GGUF_QUANTS: Final = ("Q4_K_M", "Q5_K_M", "Q8_0")
 VLLM: Final = "0.26.0"
 VLLM_TORCH: Final = "2.11.0"
 
+# The tokenizer of the Qwen3 family (8B, 14B and 32B ship the same ``tokenizer.json``: checked
+# 2026-10-09, identical bytes on Hugging Face and on ModelScope).  The training export counts
+# tokens with it, so it is pinned by hash.
+QWEN3_TOKENIZER_FILE: Final = "tokenizer.json"
+QWEN3_TOKENIZER_SHA256: Final = "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+QWEN3_TOKENIZER_BYTES: Final = 11_422_654
+QWEN3_TOKENIZER_URLS: Final = (
+    "https://huggingface.co/Qwen/Qwen3-8B/resolve/"
+    "b968826d9c46dd6066d109eabc6255188de91218/tokenizer.json",
+    "https://modelscope.cn/api/v1/models/Qwen/Qwen3-8B/repo?Revision=master&FilePath=tokenizer.json",
+)
+
 
 def versions_env() -> str:
     """The pinned versions as ``KEY=value`` lines (``training/autodl/versions.env``)."""

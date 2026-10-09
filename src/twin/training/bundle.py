@@ -54,8 +54,9 @@ ZSTD_LEVEL: Final = 9
 BUNDLE_SUFFIX: Final = ".bundle.enc"
 EXECUTABLE_SUFFIXES: Final = (".sh", ".py")
 
-# modules of ``twin`` the instance imports; the template check of round 13b adds its own entry
-PYLIB_MODULES: Final = ("lf_template",)
+# modules of ``twin`` the instance imports: the template constants and the template check
+# (``setup.sh verify`` runs ``python -m twin.training.parity_check``, R-TRN-011)
+PYLIB_MODULES: Final = ("lf_template", "parity_check")
 
 Source = bytes | Path
 
