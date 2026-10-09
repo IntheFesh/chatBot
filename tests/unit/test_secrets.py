@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from keyring.backends.fail import Keyring as FailKeyring
 from keyring.errors import PasswordDeleteError
 
 import twin.config.secrets as secrets_module
@@ -216,13 +217,24 @@ def test_forced_file_backend_is_usable(tmp_path: Path) -> None:
     SecretStore(backend, info).set("deepseek_api_key", VALUE)
 
 
+@pytest.fixture
+def no_system_keyring(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A host without a usable credential store (headless Linux): keyring's own "fail" backend.
+
+    Stated explicitly because the machine running the tests may well have one (Windows
+    always does, a desktop Linux usually does).
+    """
+    monkeypatch.setattr(secrets_module.keyring, "get_keyring", FailKeyring)
+
+
+@pytest.mark.usefixtures("no_system_keyring")
 def test_unusable_system_keyring_falls_back_on_linux_with_a_diagnosis(tmp_path: Path) -> None:
-    # In the sandbox keyring's own default is the "fail" backend: nothing is forced here.
     _backend, info = select_backend({secrets_module.ENV_SECRETS_DIR: str(tmp_path)}, "linux")
     assert info.kind == "file" and info.usable
     assert "system keyring unavailable" in info.detail
 
 
+@pytest.mark.usefixtures("no_system_keyring")
 def test_windows_never_falls_back_to_a_file(tmp_path: Path) -> None:
     _backend, info = select_backend({secrets_module.ENV_SECRETS_DIR: str(tmp_path)}, "win32")
     assert info.kind == "system"
@@ -278,6 +290,7 @@ def test_forcing_an_unknown_backend_name_is_an_error() -> None:
         select_backend({ENV_BACKEND: "registry"})
 
 
+@pytest.mark.usefixtures("no_system_keyring")
 def test_forced_system_backend_does_not_fall_back(tmp_path: Path) -> None:
     _backend, info = select_backend(
         {ENV_BACKEND: "system", secrets_module.ENV_SECRETS_DIR: str(tmp_path)}, "linux"

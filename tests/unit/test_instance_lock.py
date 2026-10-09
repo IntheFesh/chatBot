@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import subprocess
 import sys
 import textwrap
@@ -68,12 +69,46 @@ def test_context_manager_and_double_acquire(tmp_path: Path) -> None:
 def test_locks_held_elsewhere_lists_the_busy_ones(tmp_path: Path) -> None:
     assert locks_held_elsewhere(tmp_path) == []
     supervisor = InstanceLock(LOCK_SUPERVISOR, locks_dir=tmp_path)
-    assert supervisor.acquire()
-    assert locks_held_elsewhere(tmp_path) == [LOCK_SUPERVISOR]
-    assert locks_held_elsewhere(tmp_path, (LOCK_RUN,)) == []
     run = InstanceLock(LOCK_RUN, locks_dir=tmp_path)
-    assert run.acquire()
-    assert set(locks_held_elsewhere(tmp_path)) == {LOCK_RUN, LOCK_SUPERVISOR} == set(ALL_LOCKS)
+    try:
+        assert supervisor.acquire()
+        assert locks_held_elsewhere(tmp_path) == [LOCK_SUPERVISOR]
+        assert locks_held_elsewhere(tmp_path, (LOCK_RUN,)) == []
+        assert run.acquire()
+        assert set(locks_held_elsewhere(tmp_path)) == {LOCK_RUN, LOCK_SUPERVISOR} == set(ALL_LOCKS)
+    finally:
+        # Windows named mutexes are machine-wide (not per directory): a lock left held here
+        # would make every later test that takes "run" or "supervisor" fail.
+        run.release()
+        supervisor.release()
+    assert locks_held_elsewhere(tmp_path) == []
+
+
+def test_a_lock_whose_object_is_dropped_is_freed(tmp_path: Path) -> None:
+    holder = InstanceLock(LOCK_RUN, locks_dir=tmp_path)
+    probe = InstanceLock(LOCK_RUN, locks_dir=tmp_path)
+    assert holder.acquire()
+    assert probe.is_held_elsewhere() is True
+    del holder
+    gc.collect()
+    assert probe.is_held_elsewhere() is False
+
+
+def test_dropping_a_windows_lock_closes_its_mutex_handle_exactly_once(tmp_path: Path) -> None:
+    registry: dict[str, int] = {}
+    name = "Local\\wechat-twin-run"
+    dropped = InstanceLock(
+        LOCK_RUN, locks_dir=tmp_path, platform="win32", win32=FakeWin32(registry)
+    )
+    released = InstanceLock(
+        LOCK_SUPERVISOR, locks_dir=tmp_path, platform="win32", win32=FakeWin32(registry)
+    )
+    assert dropped.acquire() and released.acquire()
+    assert registry == {name: 1, "Local\\wechat-twin-supervisor": 1}
+    released.release()  # explicit release first: the finalizer must not close the handle again
+    del dropped, released
+    gc.collect()
+    assert registry == {name: 0, "Local\\wechat-twin-supervisor": 0}
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses a POSIX file lock in a child process")

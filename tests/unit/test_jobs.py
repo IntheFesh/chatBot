@@ -393,20 +393,36 @@ async def test_worker_uses_the_registered_policy_when_none_is_injected(
 async def test_concurrency_is_bounded(
     queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
 ) -> None:
+    # Event-driven rather than timed: a handler keeps its slot until the test lets go, so how
+    # many run at once depends on the Worker alone.  (A short sleep() inside the handler is
+    # not enough: the Worker claims jobs one at a time through SQLite commits, and on Windows,
+    # with ~15 ms timer ticks and slow fsyncs, each job could finish before the next was claimed.)
     active = 0
     peak = 0
+    release = asyncio.Event()
 
     async def tracked(ctx: JobContext) -> None:
         nonlocal active, peak
         active += 1
         peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        active -= 1
+        try:
+            await release.wait()
+        finally:
+            active -= 1
 
     registry.register("t", tracked)
     for index in range(8):
         queue.enqueue("t", {"n": index})
-    summary = await make_worker(queue, registry, db, clock, concurrency=3).run_until_idle()
+    worker = make_worker(queue, registry, db, clock, concurrency=3)
+    run = asyncio.create_task(worker.run_until_idle())
+    try:
+        await wait_until(lambda: active >= 3)  # every slot is taken ...
+        counts = queue.counts()
+        assert worker.running_count == 3  # ... and the Worker claimed nothing beyond the bound
+        assert counts["running"] == 3 and counts["pending"] == 5
+    finally:
+        release.set()
+    summary = await asyncio.wait_for(run, timeout=10)
     assert summary.done == 8 and peak == 3
     with pytest.raises(ValueError, match="concurrency"):
         make_worker(queue, registry, db, clock, concurrency=0)

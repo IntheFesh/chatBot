@@ -4,15 +4,23 @@ Two independent locks exist: ``run`` (held by ``twin run``) and ``supervisor``
 (held by ``twin supervise``, round 12).  Different names never conflict.
 
 * Windows: a named mutex ``Local\\wechat-twin-<name>`` (``CreateMutexW``); the
-  operating system removes it when the owning process dies.
+  operating system removes it when the owning process dies.  The name is
+  machine-wide for the logon session, *not* scoped to ``locks_dir``.
 * Other platforms: an advisory ``flock`` on ``<locks_dir>/<name>.lock``.
 
 ``is_held_elsewhere()`` is a non-destructive probe used by EXCLUSIVE commands.
+
+A lock lives until ``release()`` or until its ``InstanceLock`` object is garbage
+collected, whichever comes first, on every platform.  Without the finalizer a
+dropped object would keep its Windows mutex handle (and, elsewhere, its file
+descriptor) open for the rest of the process, so the lock would silently outlive
+every reference to it.
 """
 
 from __future__ import annotations
 
 import sys
+import weakref
 from pathlib import Path
 from typing import Protocol
 
@@ -93,6 +101,11 @@ class InstanceLock:
         else:
             self._backend = _FileBackend(locks_dir / f"{name}.lock")
         self._held = False
+        # Both backends' release() is idempotent, so running it after an explicit release()
+        # (or never, when released) is harmless.  The callback refers to the backend only,
+        # never to ``self``, which is what lets the object be collected.
+        self._finalizer = weakref.finalize(self, self._backend.release)
+        self._finalizer.atexit = False  # at process exit the operating system frees it anyway
 
     @property
     def held(self) -> bool:

@@ -19,6 +19,7 @@ from twin import __version__
 from twin import cli as cli_module
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
+from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.jobs import JobContext, JobQueue, default_registry
 from twin.ops.process_model import ExitCode
 from twin.services import Services, build_services
@@ -345,8 +346,6 @@ def test_jobs_run_requires_the_flag_and_defers_to_a_running_application(
     enqueue({"n": 1})
     assert runner.invoke(app, ["jobs", "run"]).exit_code == ExitCode.USAGE
     services = open_services()
-    from twin.ops.instance_lock import LOCK_RUN, InstanceLock
-
     lock = InstanceLock(LOCK_RUN, locks_dir=services.paths.locks_dir)
     assert lock.acquire()
     try:
@@ -364,8 +363,6 @@ def test_forced_second_worker_leaves_the_running_applications_jobs_alone(
 ) -> None:
     (busy_id,) = enqueue({"n": 1})
     services = open_services()
-    from twin.ops.instance_lock import LOCK_RUN, InstanceLock
-
     queue = JobQueue(services.db, services.clock)
     claimed = queue.claim_next({"cli_demo"}, offpeak_allowed=True, worker_id="the-running-app")
     assert claimed is not None and claimed.id == busy_id
@@ -421,14 +418,16 @@ def test_run_command_wires_logging_masked_config_runtime_settings_and_the_lock(
     served: list[bool] = []
 
     async def fake_serve(services: Services) -> None:
-        lock_file = services.paths.locks_dir / "run.lock"
-        served.append(await asyncio.to_thread(lock_file.exists))  # held while serving
+        # The lock is a file on POSIX but a named mutex on Windows, so ask the lock itself.
+        probe = InstanceLock(LOCK_RUN, locks_dir=services.paths.locks_dir)
+        served.append(await asyncio.to_thread(probe.is_held_elsewhere))  # held while serving
 
     monkeypatch.setattr(cli_module, "_serve", fake_serve)
     result = runner.invoke(app, ["--set", f"target.username={wxid()}", "run"])
     assert result.exit_code == 0, result.output
     assert "effective configuration" in result.output and "synthetic123" not in result.output
     assert served == [True]
+    assert not InstanceLock(LOCK_RUN, locks_dir=initialised / "locks").is_held_elsewhere()
     assert (initialised / "logs" / "twin.log").exists()
     services = open_services()
     try:
@@ -444,8 +443,6 @@ def test_run_command_wires_logging_masked_config_runtime_settings_and_the_lock(
 def test_run_command_refuses_a_second_instance_and_a_missing_database(
     data_dir: Path, initialised: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from twin.ops.instance_lock import LOCK_RUN, InstanceLock
-
     served: list[bool] = []
 
     async def fake_serve(services: Services) -> None:
