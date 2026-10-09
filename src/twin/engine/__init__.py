@@ -1,6 +1,6 @@
 """The reply engine (round 09): from a message of the user to the bubbles she would send.
 
-Step 1 (this part of the package, stateless):
+Step 1 (stateless):
 
 ==========================  =========================================================
 :mod:`.pipeline`            ``ReplyPipeline.run(context, data_view) -> ReplyDraft`` - the one
@@ -17,6 +17,23 @@ Step 1 (this part of the package, stateless):
 :mod:`.state_store`,        of the recent conversation
 :mod:`.feedback`,
 :mod:`.history`
+==========================  =========================================================
+
+Step 3 (the running bot):
+
+==========================  =========================================================
+:mod:`.machine`             ``ConversationEngine``: IDLE, COLLECTING, DECIDING, GENERATING and
+                            SENDING, persisted in ``conversation_state`` and recovered per state
+:mod:`.roundstate`,         what a round keeps in ``conversation_state.data``; the queries the
+:mod:`.rounds`              machine needs about messages and replies
+:mod:`.decision`,           when she answers (free, busy, asleep, paused, retry) and how fast
+:mod:`.pacing`              she types, from her profile and her routine
+:mod:`.sender`,             the bubbles one after the other with typing; ``StickerSender`` is
+:mod:`.sticker_sender`      the only module that sends a picture
+:mod:`.fallback`            the short answer of hers for a reply that could not be made
+:mod:`.command_port`        what the engine asks of the command router (step 2)
+:mod:`.component`           ``build_engine`` and ``register_engine``: the wiring of ``twin run``
+                            and ``twin chat --local``
 ==========================  =========================================================
 
 :mod:`twin.engine.api` lists what other rounds import.

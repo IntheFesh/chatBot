@@ -286,7 +286,9 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
     services: Services, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from twin.cli import _serve
+    from twin.llm.runtime import DEEPSEEK_SECRET
 
+    services.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
     seen: list[str] = []
 
     async def record(self: Application, stop_event: object, *, signals: object = None) -> None:
@@ -297,6 +299,7 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
     assert seen == [
         "channel",
         "channel_probe",
+        "engine",
         "heartbeat",
         "job_worker",
         "power_events",

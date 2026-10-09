@@ -97,6 +97,7 @@ ignore = [
 "scripts/**" = ["T20", "S603", "S607", "S101"]
 "src/twin/llm/probe_report.py" = ["E501"]  # prose of the written report
 "src/twin/channel/probe/report.py" = ["E501"]  # prose of the written report
+"src/twin/engine/command_port.py" = ["E501"]  # shared word for word with round 09-2
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

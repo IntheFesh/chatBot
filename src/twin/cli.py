@@ -1,6 +1,7 @@
 """``twin`` command line entry point."""
 
 import asyncio
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -11,13 +12,16 @@ from rich.table import Table
 
 from twin import __version__
 from twin.app import ComponentStartError, ShutdownSignals
+from twin.channel.chat import CHANNEL_COMPONENT_NAME, LocalChannelComponent
 from twin.channel.cli import channel_app, chat_command
 from twin.channel.component import register_channel
+from twin.channel.local import LocalConsoleChannel, StreamInput, StreamOutput
 from twin.channel.probe.component import register_probe
 from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
+from twin.engine.component import register_engine
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
 from twin.memory.cli import memory_app
@@ -118,16 +122,39 @@ def main(
 
 
 async def _serve(services: Services) -> None:
+    """Assemble and run the application: the channel, the schedule and the reply engine."""
     application, watcher = build_application(services)
-    channel = register_channel(application, services)
+    stop = asyncio.Event()
+    channel_component = register_channel(application, services)
     register_probe(application, services)
     register_schedule(
         application,
         services,
         watcher,
-        reconnect=channel.reconnect if channel is not None else None,
+        reconnect=channel_component.reconnect if channel_component is not None else None,
     )
-    stop = asyncio.Event()
+    if channel_component is not None:  # channel.kind "ilink": the user's WeChat conversation
+        register_engine(
+            application,
+            services,
+            channel_component.channel,
+            watcher=watcher,
+            after=(channel_component.name, "schedule"),
+        )
+    else:  # channel.kind "console": the terminal in place of WeChat
+        console = LocalConsoleChannel.from_services(
+            services, input=StreamInput(sys.stdin), output=StreamOutput(sys.stdout)
+        )
+        application.register(LocalChannelComponent(console))
+        register_engine(
+            application,
+            services,
+            console,
+            watcher=watcher,
+            after=(CHANNEL_COMPONENT_NAME, "schedule"),
+            on_finished=stop.set,
+            restart_dispatch=False,
+        )
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()
     power.start()
@@ -140,7 +167,7 @@ async def _serve(services: Services) -> None:
 @app.command("run")
 @command(CommandKind.EXCLUSIVE, acquires=(LOCK_RUN,), tolerates=(LOCK_SUPERVISOR,))
 def run() -> None:
-    """Start the application (job queue, state watcher, heartbeat)."""
+    """Start the application: channel, schedule, reply engine, job queue, state watcher."""
     context = get_cli_context()
     services = context.services()
     log_path = configure_logging(services.paths.logs_dir, level=context.log_level, role="run")

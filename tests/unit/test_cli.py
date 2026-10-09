@@ -174,6 +174,19 @@ def test_settings_set_list_and_history(initialised: Path) -> None:
     assert flag.exit_code == 0
 
 
+def test_the_pause_of_the_engine_is_set_and_lifted_from_the_command_line(
+    initialised: Path,
+) -> None:
+    until = "2026-10-09T20:00:00+00:00"
+    paused = runner.invoke(app, ["settings", "set", "engine.paused_until", until])
+    assert paused.exit_code == 0, paused.output
+    assert "engine.paused_until" in runner.invoke(app, ["settings", "list"]).output
+    naive = runner.invoke(app, ["settings", "set", "engine.paused_until", "2026-10-09T20:00:00"])
+    assert naive.exit_code == ExitCode.USAGE  # a time without a zone is refused
+    lifted = runner.invoke(app, ["settings", "set", "engine.paused_until", "null"])
+    assert lifted.exit_code == 0, lifted.output
+
+
 def test_settings_errors(initialised: Path) -> None:
     unknown = runner.invoke(app, ["settings", "set", "nope", "1"])
     assert unknown.exit_code == 1 and "unknown setting" in unknown.output
@@ -480,6 +493,9 @@ async def test_serve_runs_the_application_until_a_termination_signal(
     services: Services,
 ) -> None:
     """The real wiring: components start, SIGTERM stops them gracefully."""
+    from twin.llm.runtime import DEEPSEEK_SECRET
+
+    services.secrets.set(DEEPSEEK_SECRET, SECRET)
     started = asyncio.create_task(cli_module._serve(services))
     from twin.storage.settings_store import get_setting
 
@@ -493,6 +509,35 @@ async def test_serve_runs_the_application_until_a_termination_signal(
     timer.start()
     await asyncio.wait_for(started, timeout=10)
     timer.join()
+
+
+def test_run_without_the_deepseek_key_says_how_to_set_it_instead_of_crashing(
+    initialised: Path,
+) -> None:
+    """No key, no engine: the message names the command to run (R-CFG-002), exit code 6."""
+    result = runner.invoke(app, ["--set", f"target.username={wxid()}", "run"])
+    assert result.exit_code == ExitCode.SECRETS, result.output
+    assert "twin secrets set deepseek_api_key" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_run_with_the_console_channel_serves_the_terminal_and_stops_at_its_end(
+    initialised: Path,
+) -> None:
+    """``channel.kind=console``: the engine serves the terminal; the end of the input stops it."""
+    from twin.llm.runtime import DEEPSEEK_SECRET
+
+    services = open_services()
+    try:
+        services.secrets.set(DEEPSEEK_SECRET, SECRET)
+    finally:
+        services.close()
+    result = runner.invoke(
+        app,
+        ["--set", "channel.kind=console", "--set", f"target.username={wxid()}", "run"],
+        input="",
+    )
+    assert result.exit_code == 0, result.output
 
 
 def test_python_m_twin_entry_point_exists() -> None:
