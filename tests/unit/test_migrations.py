@@ -40,7 +40,7 @@ def test_round_03_migration_adds_the_import_tables_and_keeps_the_old_ones(tmp_pa
     path = tmp_path / "m.db"
     migrate.upgrade(path, "0002")
     before = table_names(path)
-    migrate.upgrade(path)
+    migrate.upgrade(path, "0003_import_tables")
     assert table_names(path) - before == {
         "conversations",
         "messages",
@@ -131,7 +131,7 @@ def test_downgrade_removes_the_tables_and_upgrade_is_repeatable(tmp_path: Path) 
     assert table_names(path) == set()
     migrate.upgrade(path)
     migrate.upgrade(path)  # already current: nothing happens
-    assert len(table_names(path)) == 11
+    assert table_names(path) == set(Base.metadata.tables)
 
 
 def test_status_transitions(tmp_path: Path) -> None:
@@ -193,3 +193,33 @@ def test_alembic_command_line_works_from_the_repository_root(tmp_path: Path) -> 
     )
     assert result.returncode == 0, result.stderr
     assert table_names(home / "data" / "twin.db") >= {"settings", "jobs"}
+
+
+def test_round_04_migration_adds_the_profile_and_routine_tables(tmp_path: Path) -> None:
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0003_import_tables")
+    before = table_names(path)
+    migrate.upgrade(path)
+    assert table_names(path) - before == {
+        "profile_versions",
+        "activity_models",
+        "routine_overrides",
+    }
+    assert migrate.revision_history()[3] == "0004_profile_activity_tables"
+    connection = sqlite3.connect(path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO profile_versions (id, scope, reason, input_hash, her_messages, "
+                "data_range, metrics, summary_rules, created_at, updated_at) VALUES "
+                "('p', 'elsewhere', 'r', 'h', 0, x'00', x'00', x'00', '2026-01-01', '2026-01-01')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO routine_overrides (id, kind, params, enabled, created_at, "
+                "updated_at) VALUES ('o', 'nap', x'00', 1, '2026-01-01', '2026-01-01')"
+            )
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0003_import_tables")
+    assert table_names(path) == before

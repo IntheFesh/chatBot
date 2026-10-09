@@ -11,9 +11,25 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+_CHECKOUT = Path(__file__).resolve().parents[3]
+
 
 class WordListError(ValueError):
     """A list file is unreadable or contains an invalid entry."""
+
+
+def locate_list_file(root: Path, relative: str) -> Path:
+    """The file named by a ``*_file`` setting: below ``root``, else in the source checkout.
+
+    ``root`` is the project root of the running installation.  The lists ship with the
+    repository; when ``root`` has no copy (tests with a temporary home, a data-only root) the
+    copy next to the source tree is used so a missing user copy never changes behaviour.
+    """
+    for base in (root, _CHECKOUT):
+        candidate = base / relative
+        if candidate.is_file():
+            return candidate
+    raise WordListError(f"list file {relative!r} was found neither in {root} nor in {_CHECKOUT}")
 
 
 def load_word_list(path: Path) -> list[str]:

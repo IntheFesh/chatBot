@@ -168,6 +168,10 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "media_assets": {"source_path", "caption"},
         "messages": {"text", "raw", "quote"},
         "stickers": {"url", "source_path"},
+        # round 04: the profile and routine tables join the rotation automatically
+        "profile_versions": {"data_range", "metrics", "phrases", "summary_rules", "diff"},
+        "activity_models": {"data_range", "model", "diff"},
+        "routine_overrides": {"params", "note"},
     }
 
 

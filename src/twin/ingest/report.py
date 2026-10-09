@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from twin.ingest.events import KINDS
 from twin.ingest.runs import RunView
 from twin.ingest.times import SourceTime
+from twin.profile.report_section import style_change_lines
 from twin.storage.chat_models import MediaAsset, Message, Sticker, StickerUse
 
 if TYPE_CHECKING:
@@ -179,6 +180,9 @@ def build_report(
     lines += ["", "## 数据质量提示", ""]
     notes = _quality_notes(run)
     lines += [f"- {note}" for note in notes] if notes else ["- 无"]
+
+    lines += ["", "## 风格变化", ""]
+    lines += style_change_lines(services)
 
     lines += ["", "## 导入后钩子", ""]
     if run.hooks:

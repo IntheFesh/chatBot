@@ -101,8 +101,10 @@ engine:
   max_bubbles: 8
   ai_phrases_file: "config/lists/ai_phrases.txt"
   commitment_patterns_file: "config/lists/commitment_patterns.txt"
-profile: { burst_gap_s: 120, segment_gap_min: 60, recent_days: 90, recency_weight: 0.6 }
-activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, min_valid_days: 14 }
+profile: { burst_gap_s: 120, segment_gap_min: 60, recent_days: 90, recency_weight: 0.6,
+           rules_file: "config/lists/style_rules.yaml", emoji_codes_file: "config/lists/wechat_emoji_codes.txt" }
+activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, min_valid_days: 14,
+            sleep_rate_ratio: 0.25, busy_rate_ratio: 0.5, busy_latency_ratio: 3.0 }   # 第 04 轮新增：profile.rules_file、profile.emoji_codes_file 与 activity 的三个阈值
 proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
              edge_of_sleep_weekly_max: 2, tick_minutes: 5 }
 channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }

@@ -101,6 +101,20 @@ class PeakCalendar:
             self._note_fallback(day.year)
             return day.weekday() < 5
 
+    def public_holiday(self, day: date) -> str | None:
+        """Name of the Chinese statutory holiday on ``day``; ``None`` on every other day.
+
+        Ordinary weekends and compensatory working days have no name, and neither has a date
+        outside the years the library knows (there :meth:`is_workday` falls back to
+        Monday to Friday).  The routine model (round 04) uses it to tell a holiday from a
+        plain weekend.
+        """
+        try:
+            is_holiday, name = chinese_calendar.get_holiday_detail(day)
+        except Exception:  # outside the library's years
+            return None
+        return str(name) if is_holiday and name else None
+
     def _note_fallback(self, year: int) -> None:
         if year in self._warned_years:
             return

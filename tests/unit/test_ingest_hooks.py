@@ -64,6 +64,26 @@ def isolated_registry(monkeypatch: pytest.MonkeyPatch) -> PostImportHooks:
 # ------------------------------------------------------------------ registration
 
 
+def test_hooks_run_in_the_order_of_the_hook_modules_whatever_was_imported_first() -> None:
+    def later(context: HookContext) -> HookResult:
+        return HookResult("done", "later")
+
+    def earlier(context: HookContext) -> HookResult:
+        return HookResult("done", "earlier")
+
+    def elsewhere(context: HookContext) -> HookResult:
+        return HookResult("done", "elsewhere")
+
+    later.__module__ = "twin.profile.hook"
+    earlier.__module__ = "twin.ingest.builtin_hooks"
+    registry = PostImportHooks()
+    registry.register("elsewhere", elsewhere, backfill_command="x run")
+    registry.register("later", later, backfill_command="p run")
+    registry.register("earlier", earlier, backfill_command="b run")
+    assert registry.names() == ("earlier", "later", "elsewhere")
+    assert [h.name for h in registry.hooks()] == ["earlier", "later", "elsewhere"]
+
+
 def test_the_backfill_command_is_a_required_argument() -> None:
     registry = PostImportHooks()
     with pytest.raises(TypeError, match="backfill_command"):
@@ -155,10 +175,12 @@ def test_every_registered_hook_has_a_backfill_command_that_exists() -> None:
     registry = load_hooks()
     commands = {name for name, _ in iter_commands(app)}
     assert registry.missing_commands(commands) == []
-    assert registry.names()[:2] == ("image_caption", "sticker_download")
+    assert registry.names()[:3] == ("image_caption", "sticker_download", "profile")
     by_name = {h.name: h.backfill_command for h in registry.hooks()}
     assert by_name["image_caption"] == "images caption-backfill"
     assert by_name["sticker_download"] == "stickers download"
+    assert by_name["profile"] == "profile rebuild"
+    assert "twin.profile.hook" in HOOK_MODULES
     assert "twin.ingest.builtin_hooks" in HOOK_MODULES
 
 
@@ -177,7 +199,7 @@ def test_hooks_run_after_the_import_and_are_listed_with_their_results(
 
     export = make_export(tmp_path, target_messages=80)
     outcome = run_import(services, export)
-    assert list(outcome.run.hooks) == ["image_caption", "sticker_download", "recorder"]
+    assert list(outcome.run.hooks) == ["image_caption", "sticker_download", "profile", "recorder"]
     assert outcome.run.hooks["recorder"] == {
         "name": "recorder",
         "status": "done",

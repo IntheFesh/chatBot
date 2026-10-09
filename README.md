@@ -5,7 +5,7 @@
 - 需求与规格：[`docs/SPEC.md`](docs/SPEC.md)（唯一事实源）、追踪表 [`docs/TRACEABILITY.md`](docs/TRACEABILITY.md)
 - 项目规则：[`CLAUDE.md`](CLAUDE.md)；取舍与偏差：[`docs/DECISIONS.md`](docs/DECISIONS.md)；需要你手动做的事：[`docs/PENDING_USER_ACTIONS.md`](docs/PENDING_USER_ACTIONS.md)
 
-> 当前进度：第 03 轮（聊天记录导入）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`；DeepSeek 客户端（思考开关、JSON、看图、重试与熔断）、费用记账与非高峰判定、预算降级、一次性批任务预算、脱敏、风格模型客户端、M0 探针；聊天记录导入（流式、可续传、增量、媒体与表情包、图片描述、导入报告与导入后钩子）。通道、聊天等逐轮加入。
+> 当前进度：第 04 轮（风格统计画像与作息模型）。已有：配置与秘密、加密存储与媒体库、持久化任务队列、CLI 进程模型、应用生命周期、日志、Windows 单实例与防休眠、`twin doctor`；DeepSeek 客户端（思考开关、JSON、看图、重试与熔断）、费用记账与非高峰判定、预算降级、一次性批任务预算、脱敏、风格模型客户端、M0 探针；聊天记录导入（流式、可续传、增量、媒体与表情包、图片描述、导入报告与导入后钩子）；风格统计画像（可抽样的经验分布、双窗口、版本化与回滚）、作息活动模型（睡眠/忙碌/先开口/回复延迟，按当地钟点学习，手动修正）与唯一的留出切分点 `holdout_cutoff()`（live 与 pre_holdout 两个范围）。通道、聊天等逐轮加入。
 
 ## 安装（Windows 10/11 x64 或 Linux）
 
@@ -43,6 +43,12 @@ uv run twin run              # Ctrl+C 优雅退出
 | `twin import inspect <目录>` | 只输出导出目录的结构（键名、类型、枚举取值计数），不含任何值；写 `data/reports/inspect-*.md` | 只读 |
 | `twin stickers download [--retry-failed]` | 下载导出里没有文件的表情包（并发 4、每秒 ≤ 4） | 重任务 |
 | `twin images caption-backfill [--days N]` | 为最近 N 天的图片排队描述（一次性批任务，先给估算费用，`twin jobs approve` 后执行） | 重任务 |
+| `twin profile rebuild [--scope live\|pre_holdout\|all] [--foreground] [--force]` | 重算风格画像与作息模型（导入后自动排队；结果与上一版相同时不写新版本） | 重任务 |
+| `twin profile show [版本] [--scope live\|pre_holdout]` | 风格数字（与 SPEC §0 样本并列）、数字风格规则、作息概览（当地时间；睡眠落在白天时醒目警告）并请你确认睡眠时段 | 只读 |
+| `twin profile history\|diff <a> <b>\|phrases` | 版本列表；两版相差超过 10% 的指标；她的高频整句/字组/称呼候选（仅本机屏幕） | 只读 |
+| `twin profile rollback <版本>` | 切回旧版本（连同当时的作息模型） | 轻量修改 |
+| `twin routine list` | 手动作息修正列表 | 只读 |
+| `twin routine add sleep\|busy\|holiday …` / `remove\|enable\|disable <id>` | 手动修正睡眠区间、每周忙碌时段、节假日日期区间（优先于推断） | 轻量修改 |
 
 全局选项：`--config <文件>`、`--set 键.路径=值`（可重复）、`--log-level`。配置优先级：命令行 > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config/config.yaml` > 默认值。
 

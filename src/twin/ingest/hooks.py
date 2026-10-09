@@ -21,6 +21,7 @@ How a round registers its hook::
         return HookResult("queued", "profile rebuild queued", jobs=1)
 
 and adds the module's dotted name to :data:`HOOK_MODULES` so it is loaded before hooks run.
+Hooks run in the order of that tuple, whatever the import order was.
 A hook only *queues* work (jobs) or does small database updates; it must be safe to run
 again, because ``--resume`` and re-imports call it again.  Its ``detail`` text is shown in
 the report and must not contain message content.
@@ -43,7 +44,7 @@ log = get_logger("twin.ingest.hooks")
 HookStatus = Literal["queued", "done", "skipped", "failed"]
 
 # Modules that register hooks on import; each later round appends its module here.
-HOOK_MODULES: tuple[str, ...] = ("twin.ingest.builtin_hooks",)
+HOOK_MODULES: tuple[str, ...] = ("twin.ingest.builtin_hooks", "twin.profile.hook")
 
 
 class HookRegistrationError(ValueError):
@@ -118,10 +119,23 @@ class PostImportHooks:
         return run
 
     def hooks(self) -> tuple[RegisteredHook, ...]:
-        return tuple(self._hooks.values())
+        """The hooks in running order: by hook module (``HOOK_MODULES``), then registration.
+
+        The order of registration alone would depend on which module happened to be imported
+        first (a test importing ``twin.profile.hook`` before the others, for example); ranking
+        by ``HOOK_MODULES`` makes the order the same in every process.  A hook registered from a
+        module that is not listed there runs after the listed ones, in registration order.
+        """
+        unlisted = len(HOOK_MODULES)
+
+        def rank(hook: RegisteredHook) -> int:
+            module = getattr(hook.run, "__module__", "")
+            return HOOK_MODULES.index(module) if module in HOOK_MODULES else unlisted
+
+        return tuple(sorted(self._hooks.values(), key=rank))
 
     def names(self) -> tuple[str, ...]:
-        return tuple(self._hooks)
+        return tuple(hook.name for hook in self.hooks())
 
     def missing_commands(self, available: Iterable[str]) -> list[str]:
         """Hooks whose backfill command is not in ``available`` (names of CLI commands)."""

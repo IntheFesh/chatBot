@@ -147,3 +147,43 @@
 
 8. **（可选）Windows 长路径与中文路径**
    - 如果导出目录很深（媒体文件路径超过 260 字符），代码已对 Windows 使用 `\\?\` 前缀；若仍有"文件不存在"的缺失媒体，开启系统的长路径支持（`LongPathsEnabled`）后重新导入，缺失项会被补上。
+
+## 第 04 轮 —— 风格统计画像、作息活动模型与留出切分点
+
+沙箱里没有真实聊天记录，画像与作息只用 `tests/support/synth_chat.py` 生成的、带**已知规律**的合成数据（她 01:00–08:30 不发消息、工作日 13:00–17:00 回复慢、每天先开口 4 次、逗号率 3% 等）和 SPEC §0 的小时向量验证过。下面这些要在你自己的电脑上、用真实数据做一遍：
+
+1. **回填一次画像与作息（验收命令）**
+   - 做什么：确认真实数据已按第 03 轮导入，且 `time.source_timezone` 与导出里 `createTimeText` 所用的时区一致（第 03 轮导入报告里"createTime 与 createTimeText 相差超过一小时"一栏为空即可）。然后
+     ```
+     uv run twin profile rebuild --scope all --foreground
+     ```
+     （应用在运行时去掉 `--foreground`，命令只入队，运行中的应用执行；以后每次 `twin import` 有她的新消息时钩子会自动排队同一件事。）
+   - 预期：打印 `live:` 与 `pre_holdout:` 两行（版本号、她的消息条数）。第一次计算同时**确定并保存留出切分点**（她的回复块里最近的 10%，之后导入新数据不会移动它）。
+   - 请把耗时和消息总条数告诉我（沙箱里合成数据约 210 微秒/条，见 DECISIONS D-176），真实数据慢得多的话我再优化。
+
+2. **确认推断出的睡眠时段（本轮最重要的一步）**
+   - 做什么：`uv run twin profile show`，看"作息概览（当地时间）"：睡眠（工作日/周末分别）、忙碌时段、每天先开口次数、置信度。
+   - 预期：睡眠时段是你熟悉的她的作息。**如果输出里有以 `!!!` 开头的红色警告**，说明推断出的睡眠核心落在当地白天 10:00–18:00，几乎一定是 `time.source_timezone`（或 `time.source_timezone_ranges`）与导出的时区不一致——先改配置再重新运行第 1 步，不要用 `routine add` 去掩盖。
+   - 不对但时区没问题：用手动修正（优先于推断，立即生效，不需要重算；与第 11 轮的微信指令共用同一个存储）：
+     ```
+     uv run twin routine add sleep 01:00 08:30                      # 所有日子
+     uv run twin routine add sleep 02:00 10:30 --days weekend,holiday
+     uv run twin routine add busy 13:00 17:00 --weekdays mon-fri
+     uv run twin routine add holiday 2026-10-01 2026-10-07          # 学习时按节假日算，需再运行第 1 步
+     uv run twin routine list        # 以及 routine remove / disable / enable <id>
+     ```
+   - 置信度写"低"（可用于推断的夜晚少于 `activity.min_valid_days` = 14 个）时，睡眠时段取的是整体活跃曲线里最长的低谷，请特别核对。
+
+3. **核对风格数字**
+   - 做什么：同一条 `twin profile show` 的"风格指标"表，右边一列是 SPEC §0 那 7 天样本的数字。你的完整记录算出来的数字和样本有出入是正常的（样本只有 7 天），但如果某一项明显离谱（例如她的逗号率 40%、连发中位数 1），请把整张表贴给我——多半是我对某类消息的归类和你的数据不一致。
+   - 另有 `uv run twin profile phrases`：在**本机屏幕上**列出她的高频整句、高频字组和"称呼候选"（句首/句尾反复出现的 2–3 字组合，附次数）。这些是真实消息原文，不会写进任何文件、日志或画像 JSON（它们加密存放在 `profile_versions.phrases` 列）。请看一眼称呼候选里有没有她叫你的名字、有没有明显不是称呼的词——第 06 轮的人设卡会用到。
+
+4. **版本、对比与回滚**
+   - 做什么：`uv run twin profile history`（`~0` 是最新）、`uv run twin profile diff ~1 ~0 --scope live`（列出变化超过 10% 的指标）、`uv run twin profile rollback ~1 --scope live`（连同当时的作息模型一起切回去）。
+   - 预期：两个范围（`live` 线上用、`pre_holdout` 训练与评估用）各有自己的版本链；结果和上一版逐字节相同时不会产生新版本。
+
+5. **导入后的"风格变化"（下次导入时看）**
+   - 下次 `uv run twin import <新导出>` 之后，导入报告多一节"风格变化"：画像重算排队中时先写"还没有计算/首次画像"，任务跑完后这一节会被改写成"相对上一版变化超过 10% 的指标"。没有她的新消息的导入不会触发重算。
+
+6. **（后续轮次）重切留出集**
+   - 函数 `twin.profile.holdout.resplit_holdout()` 已完成并有测试；命令 `twin retrieval resplit` 在第 05 轮提供。重切会让评估结果前后不可比，并自动排队重算 pre_holdout 范围的派生数据。

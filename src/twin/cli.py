@@ -28,6 +28,7 @@ from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR
 from twin.ops.logging import configure_logging, get_logger, shutdown_logging
 from twin.ops.power import default_power_manager
 from twin.ops.process_model import CliError, CommandKind, command
+from twin.profile.cli import profile_app, routine_app
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
@@ -49,6 +50,8 @@ app.add_typer(import_app, name="import")
 app.add_typer(stickers_app, name="stickers")
 app.add_typer(images_app, name="images")
 app.command("chat")(chat_command)
+app.add_typer(profile_app, name="profile")
+app.add_typer(routine_app, name="routine")
 
 log = get_logger("twin.cli")
 
