@@ -77,6 +77,7 @@ class WeChatDouble:
     last_user_at: datetime | None = None
     sent_since_user: int = 0
     refused: int = 0
+    refusals: list[tuple[datetime, str]] = field(default_factory=list)  # (when, why)
     lose_response: bool = False  # the next delivery is shown, its answer never arrives
     after_delivery: Callable[[Delivery], None] | None = None
     requests: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
@@ -142,6 +143,7 @@ class WeChatDouble:
         )
         if expired or self.sent_since_user >= self.quota:
             self.refused += 1
+            self.refusals.append((now, "window" if expired else "count"))
             return httpx.Response(
                 200, json={"ret": ERR_SEND_REJECTED, "errmsg": "session expired or count used"}
             )

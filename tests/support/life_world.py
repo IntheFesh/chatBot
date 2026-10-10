@@ -121,6 +121,7 @@ class ReplyBook:
     rules: list[ReplyRule] = field(default_factory=list)
     queue: deque[str] = field(default_factory=deque)
     default: tuple[str, ...] = ("嗯嗯",)
+    reasoning: str | None = None  # what the model "thought", sent when thinking is on
 
     def when(self, needle: str, *lines: str, in_context: bool = False) -> None:
         self.rules.append(ReplyRule(needle, lines, in_context))
@@ -176,6 +177,8 @@ KIND_OF_TEMPLATE = {
     "lifeline_generate": "lifeline",
     "lifeline_check": "lifeline",
     "correction_check": "correction",
+    "correction_rules": "rules",
+    "correction_rule_check": "rules_check",
     "sticker_tag": "sticker_tag",
     "sticker_context": "sticker_tag",
 }
@@ -190,8 +193,10 @@ class LifeDeepSeek:
         self.lifeline = ScriptedLifelineModel()
         self.proactive = ProactiveScript(by_hand=self._plan_by_hand)
         self._variant: Counter[str] = Counter()
+        self.on_her_own: dict[str, tuple[tuple[str, ...], ...]] = {}  # replaces VARIANTS by kind
         self.book = ReplyBook()
         self.caption = "一张桌子上放着一杯咖啡的照片"
+        self.rules = ["不要说得太客气", "少用句号"]  # what the weekly consolidation finds
         self.sticker_tags = ["开心"]
         self.sticker_description = "一只笑着的小猫"
         self.calls: Counter[str] = Counter()
@@ -208,7 +213,7 @@ class LifeDeepSeek:
         """The planner's answer: send, with the next variant of what she says for this kind."""
         if kind in self.proactive.decline:
             return {"send": False, "kind": kind, "messages": [], "reason": "现在发不合适"}
-        options = VARIANTS.get(kind, (("嗯",),))
+        options = self.on_her_own.get(kind) or VARIANTS.get(kind, (("嗯",),))
         lines = options[self._variant[kind] % len(options)]
         self._variant[kind] += 1
         return {
@@ -292,6 +297,13 @@ class LifeDeepSeek:
             return self._crisis(body)
         if kind == "correction":
             return self._plain('{"is_correction": false}')
+        if kind == "rules":
+            return self._plain(json.dumps({"rules": self.rules}, ensure_ascii=False))
+        if kind == "rules_check":
+            asked = str(body["messages"][-1]["content"])
+            numbered = re.findall(r"^(\d+)\. ", asked, re.MULTILINE)
+            verdicts = [{"index": int(n), "ok": True, "kind": "style"} for n in numbered]
+            return self._plain(json.dumps({"verdicts": verdicts}))
         if kind == "caption":
             return self._plain(self.caption)
         if kind == "sticker_tag":
@@ -316,7 +328,14 @@ class LifeDeepSeek:
         whole = str(body["messages"][-1]["content"])
         found = USER_WORDS.search(whole)
         words = found.group(1) if found else whole
-        return self._plain(self.book.answer(words, whole))
+        thinking = body.get("thinking", {}).get("type") == "enabled"
+        return ok(
+            content=self.book.answer(words, whole),
+            reasoning=self.book.reasoning if thinking else None,
+            prompt=self.prompt_tokens,
+            hit=self.cache_hit_tokens,
+            completion_tokens=self.completion_tokens,
+        )
 
     def _crisis(self, body: dict[str, Any]) -> httpx.Response:
         """The second judgement: it reads the newest line (the last of the list)."""
@@ -467,6 +486,7 @@ class LifeWorld:
             double = WeChatDouble(clock, window_h=platform_window_h, quota=platform_quota)
             double.mount(api)
             log_in_and_bind(services, clock)
+            double.last_user_at = clock.now_utc()  # the message that bound him was just now
             screen: TimedOutput | Phone = double.phone
             assembly = assemble(services, rng=random.Random(seed))
         else:
@@ -494,7 +514,15 @@ class LifeWorld:
 
     async def start(self) -> None:
         self.before_start = asyncio.all_tasks()
-        await self.assembly.application.start()
+        starting = asyncio.ensure_future(self.assembly.application.start())
+        while not starting.done():  # (the first tick of the schedule may send, and pause, on start)
+            await self.clock.settle()
+            wake = self.meaningful_wake_in()
+            if wake is None:
+                await asyncio.sleep(0.001)
+            else:
+                await self.clock.step(min(wake, 60.0))
+        await starting
         self.started = True
         await self.clock.settle()
 
@@ -708,9 +736,15 @@ class LifeWorld:
             return [(row.category, row.severity) for row in rows]
 
     def jobs(self) -> Counter[str]:
-        """The jobs by status (``queued``, ``running``, ``done`` ...)."""
+        """The jobs by status (``pending``, ``running``, ``done``, ``failed`` ...)."""
         with self.services.db.session() as session:
             return Counter(row.status for row in session.scalars(select(Job)))
+
+    def job_rows(self) -> list[tuple[str, str, int, str | None]]:
+        """``(type, status, attempts, last error)`` of every job, oldest first."""
+        with self.services.db.session() as session:
+            rows = session.scalars(select(Job).order_by(Job.created_at, Job.id))
+            return [(row.type, row.status, row.attempts, row.last_error) for row in rows]
 
     def plan(self, day: date | None = None) -> DailyPlan:
         zone = self.zone
@@ -741,7 +775,7 @@ class LifeWorld:
         step = 5.0
         while self.now < end:
             counts = self.jobs()
-            if not counts.get("queued") and not counts.get("running"):
+            if not counts.get("pending") and not counts.get("running"):
                 return
             await self.clock.step(step)
         raise AssertionError(f"jobs still waiting: {dict(self.jobs())}")

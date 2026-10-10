@@ -61,6 +61,7 @@ SLOW_HOUSEKEEPING: frozenset[str] = frozenset(
         "learning/component.py",
         "commands/import_report.py",
         "serving/component.py",
+        "probe/runner.py",  # the channel probe waits for a plan to be activated
     }
 )
 HOUSEKEEPING: frozenset[str] = FAST_HOUSEKEEPING | SLOW_HOUSEKEEPING
