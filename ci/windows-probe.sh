@@ -1,18 +1,15 @@
 #!/usr/bin/env bash
-# Temporary probe (D-623): why does life_sleep fail after life_one_day on Windows with the real window?
+# Temporary probe (D-623): the captured log of the evening wake-up test, passing and failing runs.
 set -u
 export PYTHONPATH="$PWD/ci"
 L=tests/integration/life
-OPTS=(-q -p no:cacheprovider -m "not live" -rf --tb=short --log-level=INFO
+OPTS=(-q -p no:cacheprovider -m "not live" -rA --tb=short --log-level=INFO
       --log-format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s" --log-date-format="%H:%M:%S")
 for i in 1 2 3 4; do
   echo "-- job $PROBE_INDEX run $i"
   uv run python -m pytest "${OPTS[@]}" -p probe_notoast -p probe_nowindow $L/test_life_one_day.py $L/test_life_sleep.py > "out-$i.txt" 2>&1
-  code=$?
   tail -n 1 "out-$i.txt"
-  if [ "$code" -ne 0 ]; then
-    echo "=== FAILED RUN $i: the report"
-    n=$(grep -a -n "= FAILURES =" "out-$i.txt" | head -1 | cut -d: -f1)
-    tail -n +"${n:-1}" "out-$i.txt" | grep -a -v "httpx" | head -n 260
-  fi
+  echo "=== the evening test, run $i"
+  awk '/^_+ test_a_wake_up_in_the_evening/ {on=1} /^_+ test_a_wake_up_after_midnight/ {on=0} on' "out-$i.txt" \
+    | grep -a -v "component_started\|component_stopped\|alembic\|sendtyping" | head -n 220
 done
