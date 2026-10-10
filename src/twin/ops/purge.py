@@ -30,10 +30,14 @@ The confirmation phrase is asked by the command and cannot be given on the comma
 
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
+import stat
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import delete
 
@@ -82,17 +86,25 @@ class PurgePlan:
 
 @dataclass
 class PurgeReport:
-    """What a purge deleted: counts only."""
+    """What a purge deleted: counts only.
+
+    ``failed`` names (file or folder names, never contents) what could not be deleted - on
+    Windows a file that another program has open cannot be removed.  The purge carries on with
+    everything else; the command reports them and ends with exit code 1.
+    """
 
     scope: str
     items: list[PurgeItem] = field(default_factory=list)
     keys_deleted: int = 0
     uncleaned_runs: int = 0
+    failed: list[str] = field(default_factory=list)
 
     def lines(self) -> list[str]:
         lines = [item.line() for item in self.items]
         if self.scope == "all":
             lines.append(f"凭据管理器里的数据库密钥：删除 {self.keys_deleted} 个")
+        if self.failed:
+            lines.append(f"没能删除：{len(self.failed)} 项（{'、'.join(self.failed)}）")
         return lines
 
 
@@ -212,53 +224,110 @@ def plan_training(paths: DataPaths, uncleaned: int) -> PurgePlan:
 # --------------------------------------------------------------------- deleting
 
 
-def _remove(path: Path) -> int:
-    """Delete a file or folder; returns how many files went."""
-    if path.is_dir():
-        count, _ = files_in(path)
-        shutil.rmtree(path, ignore_errors=False)
-        return count
-    if path.exists():
-        path.unlink()
-        return 1
-    return 0
+def _has_entries(folder: Path) -> bool:
+    try:
+        return any(folder.iterdir())
+    except OSError:
+        return False
 
 
-def _remove_files(files: list[Path]) -> int:
-    removed = 0
-    for path in files:
-        path.unlink(missing_ok=True)
-        removed += 1
-    pool_dirs = {path.parent for path in files if path.parent.name == POOL_DIRNAME}
-    for folder in pool_dirs:
-        shutil.rmtree(folder, ignore_errors=True)
-    return removed
+class Eraser:
+    """Deletes files and folders and remembers what refused to go (see :class:`PurgeReport`).
+
+    A read-only file is made writable and tried again (Windows refuses to delete it otherwise).
+    Any other :class:`OSError` - typically a sharing violation, a file some program still has
+    open - is noted by name and the deletion goes on with the rest.
+    """
+
+    def __init__(self) -> None:
+        self.failed: list[str] = []
+
+    def _note(self, path: Path) -> None:
+        if path.name not in self.failed:
+            self.failed.append(path.name)
+
+    def _retry_writable(self, action: Callable[[], object], path: Path) -> bool:
+        """Make a read-only file writable and do ``action`` again; whether that worked."""
+        try:
+            os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+            action()
+        except OSError:
+            return False
+        return True
+
+    def _on_rmtree_error(
+        self, function: Callable[..., Any], name: str, error: BaseException
+    ) -> None:
+        path = Path(name)
+        if isinstance(error, FileNotFoundError):
+            return  # already gone
+        if function is os.rmdir and _has_entries(path):
+            return  # a folder that cannot go because a file in it could not: that file is listed
+        if (
+            function in (os.unlink, os.rmdir)
+            and isinstance(error, PermissionError)
+            and self._retry_writable(lambda: function(name), path)
+        ):
+            return
+        self._note(path)
+
+    def file(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except PermissionError:
+            if not self._retry_writable(lambda: path.unlink(missing_ok=True), path):
+                self._note(path)
+        except OSError:
+            self._note(path)
+
+    def files(self, files: list[Path]) -> int:
+        for path in files:
+            self.file(path)
+        return len(files)
+
+    def tree(self, path: Path) -> int:
+        """Delete a file or a folder with everything in it; returns how many files it held."""
+        if path.is_dir():
+            count, _ = files_in(path)
+            shutil.rmtree(path, onexc=self._on_rmtree_error)
+            return count
+        if path.exists():
+            self.file(path)
+            return 1
+        return 0
 
 
 def purge_all(
     paths: DataPaths, mirror_dir: Path | None, keystore: KeyStore, *, close_logs: bool = True
 ) -> PurgeReport:
-    """Delete everything of ``--all`` (the caller has the confirmation and the stopped app)."""
+    """Delete everything of ``--all`` (the caller has the confirmation and the stopped app).
+
+    Everything that can be deleted is; what cannot (a file another program holds open) is listed
+    in ``failed``.  The keys are deleted in any case: the data that is left cannot be read
+    without them, and running the purge again removes the files once they are free.
+    """
     plan = plan_all(paths, mirror_dir, 0)
     report = PurgeReport("all", [item for item in plan.items if "密钥" not in item.category])
-    db_files = [paths.db_path, Path(f"{paths.db_path}-wal"), Path(f"{paths.db_path}-shm")]
-    for path in db_files:
-        path.unlink(missing_ok=True)
-    _remove(paths.media_dir)
-    _remove(paths.vectors_dir)
-    _remove_files(backup_files(paths.backups_dir))
+    eraser = Eraser()
+    eraser.files([paths.db_path, Path(f"{paths.db_path}-wal"), Path(f"{paths.db_path}-shm")])
+    eraser.tree(paths.media_dir)
+    eraser.tree(paths.vectors_dir)
+    eraser.files(backup_files(paths.backups_dir))
     if mirror_dir is not None:
-        _remove_files(backup_files(mirror_dir))
-    shutil.rmtree(paths.backups_dir / POOL_DIRNAME, ignore_errors=True)
-    _remove(paths.data_dir / TRAINING_DIRNAME)
+        eraser.files(backup_files(mirror_dir))
+    eraser.tree(paths.backups_dir / POOL_DIRNAME)
+    if mirror_dir is not None:
+        eraser.tree(mirror_dir / POOL_DIRNAME)
+    eraser.tree(paths.data_dir / TRAINING_DIRNAME)
     for entry in model_entries(paths.models_dir):
-        _remove(entry)
-    _remove(paths.reports_dir)
-    _remove(paths.tmp_dir)
+        eraser.tree(entry)
+    eraser.tree(paths.reports_dir)
+    eraser.tree(paths.tmp_dir)
     if close_logs:
         shutdown_logging()  # the log files must be closed before they can be deleted (Windows)
-    _remove(paths.logs_dir)
+    eraser.tree(paths.logs_dir)
     report.keys_deleted = keystore.delete_all()
+    report.failed = eraser.failed
     return report
 
 
@@ -274,9 +343,11 @@ def purge_training(paths: DataPaths, runs: int, db: Database | None = None) -> P
     """Delete the training data and local models of ``--training-only``."""
     plan = plan_training(paths, runs)
     report = PurgeReport("training", plan.items, uncleaned_runs=runs)
-    _remove(paths.data_dir / TRAINING_DIRNAME)
+    eraser = Eraser()
+    eraser.tree(paths.data_dir / TRAINING_DIRNAME)
     for entry in model_entries(paths.models_dir):
-        _remove(entry)
+        eraser.tree(entry)
+    report.failed = eraser.failed
     if db is not None:
         removed = delete_registry_rows(db)
         report.items.append(PurgeItem("模型登记", removed, "条"))

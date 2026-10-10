@@ -3,10 +3,11 @@
 # Pushing a change to this file runs exactly these tests on windows-latest
 # (a few minutes instead of the 50 minutes of the full job). Keep it empty
 # when not debugging: an empty selection runs nothing.
-tests/unit/test_doctor.py::test_all_checks_pass_on_a_healthy_setup
+tests/unit/test_doctor.py
+tests/unit/test_ops_doctor.py
 tests/unit/test_ops_backup_cli.py
-tests/unit/test_ops_purge.py::test_the_typed_phrase_deletes_everything_and_says_what_was_removed
-tests/unit/test_ops_service.py::test_the_options_before_the_command_are_repeated_for_the_child
-tests/unit/test_ops_service.py::test_install_can_print_the_definition_on_any_platform
+tests/unit/test_ops_restore.py
+tests/unit/test_ops_purge.py
+tests/unit/test_ops_service.py
 tests/unit/test_ops_supervise.py
 tests/unit/test_ops_windows.py

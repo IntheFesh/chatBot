@@ -6,6 +6,7 @@ import shutil
 import sqlite3
 import sys
 from collections import namedtuple
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,7 @@ import pytest
 import twin.ops.doctor as doctor
 from tests.support.credentials import BrokenCredentials, MemoryCredentials
 from tests.support.network import OfflineTransport
+from tests.support.ops import ScriptedRunner, healthy_machine_runner
 from twin.config.loader import load_settings
 from twin.config.secrets import BackendInfo, SecretStore
 from twin.ops.doctor import CheckResult, CheckStatus, DoctorContext, exit_code, run_checks
@@ -40,8 +42,40 @@ def result_of(check: doctor.DoctorCheck, ctx: DoctorContext) -> CheckResult:
     return check(ctx)
 
 
-def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
-    ctx = context(tmp_path)
+def healthy_network(request: httpx.Request) -> httpx.Response:
+    """Every host answers; DeepSeek says that the account has a balance."""
+    if request.url.path == doctor.DEEPSEEK_BALANCE_PATH:
+        return httpx.Response(
+            200,
+            json={
+                "is_available": True,
+                "balance_infos": [{"currency": "USD", "total_balance": "5.00"}],
+            },
+        )
+    return httpx.Response(404)
+
+
+def test_all_checks_pass_on_a_healthy_setup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever computer this runs on, the verdict is about the setup that is handed in.
+
+    The Windows checks (scheduled task, power plan) and the GPU check ask the machine; on Windows
+    they get a scripted runner instead of the CI computer's own task list and power plan.  The
+    holiday check depends on the date, the key and balance checks on a stored key and on the
+    network; the date, the key and the network are given too.  Nothing here may be only
+    advisory: every check must be OK.  (The Windows branches of the individual checks are
+    exercised on every platform in ``test_ops_doctor.py``.)
+    """
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2024, 3, 1, tzinfo=UTC))
+    secrets = SecretStore(MemoryCredentials())
+    secrets.set("deepseek_api_key", "synthetic-key-1")
+    ctx = context(
+        tmp_path,
+        secrets=secrets,
+        runner=healthy_machine_runner(),
+        http_transport=httpx.MockTransport(healthy_network),
+    )
     migrate.upgrade(ctx.paths().db_path)  # type: ignore[union-attr]
     results = run_checks(ctx)
     assert {r.name for r in results} >= {
@@ -66,14 +100,29 @@ def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
         "scheduled-task",
         "power-plan",
     }
-    # these depend on the day (does the holiday library know next year?), on a key the user has
-    # not stored yet and on the network (the test network is offline); they warn but never fail
-    advisory = {"holiday-calendar", "deepseek-key", "deepseek-net", "ilink-api", "ilink-cdn"}
-    assert all(r.status is CheckStatus.OK for r in results if r.name not in advisory), [
+    assert all(r.status is CheckStatus.OK for r in results), [
         r for r in results if r.status is not CheckStatus.OK
     ]
-    assert all(r.status is not CheckStatus.FAIL for r in results)
     assert exit_code(results) == 0
+    by_name = {r.name: r for r in results}
+    # the Windows checks really looked at the scripted machine on Windows, and stood aside elsewhere
+    on_windows = sys.platform == "win32"
+    expected = "registered, InteractiveToken" if on_windows else "Windows only"
+    assert expected in by_name["scheduled-task"].detail
+    assert ("sleep is set to never" if on_windows else "Windows only") in (
+        by_name["power-plan"].detail
+    )
+
+
+def test_a_machine_that_is_not_set_up_is_reported_by_the_same_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The healthy run above is only meaningful if the same inputs can also fail."""
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2040, 1, 1, tzinfo=UTC))
+    ctx = context(tmp_path, platform="win32", runner=ScriptedRunner({}))  # no schtasks, no powercfg
+    migrate.upgrade(ctx.paths().db_path)  # type: ignore[union-attr]
+    warned = {r.name for r in run_checks(ctx) if r.status is CheckStatus.WARN}
+    assert {"holiday-calendar", "scheduled-task", "power-plan", "deepseek-key"} <= warned
 
 
 def test_python_version_is_checked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

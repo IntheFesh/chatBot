@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -397,22 +398,49 @@ counter.write_text(str(runs + 1))
 sys.exit(3 if runs == 0 else 0)
 """
 
+# What the supervisor sends to ask a child to stop: CTRL_BREAK_EVENT on Windows (the child is
+# alone in its process group; Python reports it as SIGBREAK), SIGTERM elsewhere.  A Windows
+# process cannot be sent SIGTERM, and its SIGBREAK handler only runs while the main thread is
+# executing Python code (a long time.sleep() does not return for it), so these children wait
+# in short sleeps.
 TERM = """
 import pathlib, signal, sys, time
 marker = pathlib.Path(sys.argv[1])
 def stop(*_):
     marker.write_text("stopped")
     sys.exit(0)
-signal.signal(signal.SIGTERM, stop)
+signal.signal(getattr(signal, "SIGBREAK", signal.SIGTERM), stop)
 pathlib.Path(sys.argv[1] + ".ready").write_text("1")
-time.sleep(60)
+while True:
+    time.sleep(0.05)
 """
 
 STUBBORN = """
 import pathlib, signal, sys, time
 signal.signal(signal.SIGTERM, signal.SIG_IGN)
+if hasattr(signal, "SIGBREAK"):
+    signal.signal(signal.SIGBREAK, signal.SIG_IGN)
 pathlib.Path(sys.argv[1]).write_text("1")
-time.sleep(60)
+while True:
+    time.sleep(0.05)
+"""
+
+# the application's own shutdown handling (what `twin run` installs), in a real process
+APPLICATION = """
+import asyncio, pathlib, sys
+from twin.app import ShutdownSignals
+
+async def main():
+    stop = asyncio.Event()
+    signals = ShutdownSignals(asyncio.get_running_loop(), stop)
+    signals.install()
+    pathlib.Path(sys.argv[1] + ".ready").write_text("1")
+    await stop.wait()
+    pathlib.Path(sys.argv[1]).write_text(signals.reason or "?")
+    signals.uninstall()
+    signals.notify_done()
+
+asyncio.run(main())
 """
 
 ENVIRONMENT = """
@@ -438,7 +466,23 @@ async def test_a_real_child_that_crashes_once_is_started_again_and_then_ends_nor
     assert counter.read_text() == "2" and supervisor.restarts == 1 and supervisor.last_exit == 0
 
 
-@pytest.mark.parametrize("platform", ["linux", "win32"])
+WINDOWS = sys.platform == "win32"
+
+
+@pytest.mark.parametrize(
+    "platform",
+    [
+        pytest.param(
+            "linux",
+            marks=pytest.mark.skipif(
+                WINDOWS,
+                reason="the POSIX request is SIGTERM; a Windows child cannot be sent one "
+                "(terminate() is a hard kill there): the 'win32' case is its counterpart",
+            ),
+        ),
+        "win32",
+    ],
+)
 async def test_a_real_child_is_asked_to_stop_and_saves_its_state(
     tmp_path: Path, platform: str
 ) -> None:
@@ -462,7 +506,30 @@ async def test_a_real_child_that_ignores_the_request_is_killed(tmp_path: Path) -
     await wait_until(ready.exists, limit_s=20)
     stop.set()
     assert await asyncio.wait_for(task, 20) == 0
-    assert supervisor.last_exit == -9
+    # Killed, not stopped: a SIGKILL shows as -9.  Windows has no signals; TerminateProcess ends
+    # the process with the exit code Python passes to it, 1.  Neither is the 0 of a normal exit,
+    # and the child never got to write anything but its "ready" file.
+    assert supervisor.last_exit == (1 if WINDOWS else -9)
+
+
+async def test_a_real_application_process_stops_when_the_supervisor_asks(tmp_path: Path) -> None:
+    """The request the supervisor sends is the one the application's shutdown handler hears.
+
+    This is the production pairing - ``ShutdownSignals`` in the child, the platform's stop
+    request from ``SubprocessChild`` - with nothing replaced.
+    """
+    reason = tmp_path / "reason"
+    config = SuperviseConfig(stop_grace_s=30)
+    launcher = SubprocessLauncher([sys.executable, "-X", "utf8", "-c", APPLICATION, str(reason)])
+    supervisor = Supervisor(launcher, SystemClock(), config, env=dict(os.environ))
+    stop = asyncio.Event()
+    task = asyncio.ensure_future(supervisor.run(stop))
+    await wait_until(lambda: Path(f"{reason}.ready").exists(), limit_s=60)
+    stop.set()
+    assert await asyncio.wait_for(task, 60) == 0
+    assert supervisor.last_exit == 0  # it finished by itself, it was not killed
+    heard = {"SIGBREAK", "console_ctrl_1"} if WINDOWS else {"SIGTERM"}
+    assert reason.read_text() in heard
 
 
 async def test_a_real_child_sees_how_it_was_launched(tmp_path: Path) -> None:

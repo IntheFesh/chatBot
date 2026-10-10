@@ -18,10 +18,13 @@ from pathlib import Path
 
 import pytest
 
+from twin.config.loader import parse_overrides
 from twin.ops.doctor import CheckStatus, DoctorContext, check_power_plan, sleep_timeouts
 from twin.ops.jobobject import ProcessJob
+from twin.ops.service_cli import global_options, task_spec
 from twin.ops.taskscheduler import SubprocessRunner, TaskScheduler, TaskSpec, decode_output
 from twin.ops.winapi import load_win32
+from twin.services import CliContext
 
 pytestmark = pytest.mark.windows
 
@@ -64,6 +67,50 @@ def test_windows_accepts_the_task_definition_and_reads_back_what_was_registered(
     scheduler.install(spec())  # registering again replaces the task (/F)
     assert scheduler.uninstall() is True
     assert scheduler.uninstall() is False
+
+
+def windows_argv(command_line: str) -> list[str]:
+    """How Windows itself splits a command line into the arguments a program receives."""
+    import ctypes
+    from ctypes import wintypes
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(wintypes.LPWSTR)
+    shell32.CommandLineToArgvW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    count = ctypes.c_int()
+    argv = shell32.CommandLineToArgvW(command_line, ctypes.byref(count))
+    if not argv:
+        raise OSError(ctypes.get_last_error(), "CommandLineToArgvW failed")
+    try:
+        return [str(argv[i]) for i in range(count.value)]
+    finally:
+        kernel32.LocalFree(argv)
+
+
+def test_windows_splits_the_task_arguments_into_the_options_that_were_given(
+    tmp_path: Path,
+) -> None:
+    """The child of the supervisor must see the data folder and config the user chose.
+
+    The options go through JSON and ``list2cmdline`` into the task's arguments; Windows splits
+    them again when it starts the program (spaces, quotes and backslashes in the folder names).
+    """
+    config = tmp_path / "my config" / "twin.yaml"
+    data = tmp_path / '数据 & "备份" dir' / "data"
+    context = CliContext(
+        config_path=config,
+        overrides={"paths": {"data_dir": str(data)}},
+        log_level="DEBUG",
+    )
+    options = global_options(context)
+    spec = task_spec(tmp_path, options)
+    received = windows_argv(f"twin.exe {spec.arguments}")[1:]  # [0] is the program
+    assert received == [*options, "supervise", "--from-task"]
+    sets = [received[i + 1] for i, item in enumerate(received) if item == "--set"]
+    assert parse_overrides(sets) == {"paths": {"data_dir": str(data)}}
+    assert received[received.index("--config") + 1] == str(config)
 
 
 def test_the_task_can_be_started_by_hand(scheduler: TaskScheduler) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
@@ -129,6 +131,23 @@ def test_the_registered_definition_is_read_back_fact_by_fact() -> None:
     )
     assert info.interactive
     assert describe_task(info)[2] == "  logon type: InteractiveToken"
+
+
+def test_a_task_without_an_enabled_setting_is_an_enabled_task() -> None:
+    """Task Scheduler leaves out settings that have their default value when it exports a task."""
+    full = build_task_xml(SPEC)
+    exported = full.replace("    <Enabled>true</Enabled>\n    <Hidden>", "    <Hidden>")
+    assert exported != full and "<Enabled>false" not in exported
+    info = parse_task_xml(exported)
+    assert info.enabled is True
+    assert "disabled" not in "\n".join(describe_task(info))
+    disabled = parse_task_xml(
+        full.replace(
+            "<Enabled>true</Enabled>\n    <Hidden>", "<Enabled>false</Enabled>\n    <Hidden>"
+        )
+    )
+    assert disabled.enabled is False and "disabled" in "\n".join(describe_task(disabled))
+    assert TaskInfo(registered=False).enabled is None  # no task, no answer
 
 
 def test_a_byte_order_mark_and_a_utf16_declaration_do_not_matter() -> None:
@@ -259,14 +278,17 @@ def test_the_real_runner_runs_a_program_without_a_shell_and_reports_what_it_cann
 # --------------------------------------------------------- the command line of the child
 
 
-def test_the_options_before_the_command_are_repeated_for_the_child() -> None:
+def test_the_options_before_the_command_are_repeated_for_the_child(tmp_path: Path) -> None:
+    config = (
+        tmp_path / "twin.yaml"
+    )  # a path of this platform: "/etc/..." is "\\etc\\..." on Windows
     context = CliContext(
-        config_path=Path("/etc/twin.yaml"),
+        config_path=config,
         overrides={"paths": {"data_dir": "D:\\数据"}, "ops": {"supervise": {"backoff_start_s": 2}}},
         log_level="DEBUG",
     )
     options = global_options(context)
-    assert options[:2] == ["--config", "/etc/twin.yaml"] and options[-2:] == [
+    assert options[:2] == ["--config", str(config)] and options[-2:] == [
         "--log-level",
         "DEBUG",
     ]
@@ -459,7 +481,16 @@ def test_install_can_print_the_definition_on_any_platform(home: Services) -> Non
     code, out = twin(home, "service", "install", "--print-xml")
     assert code == 0 and "<LogonType>InteractiveToken</LogonType>" in out
     assert "supervise --from-task" in out and "paths.data_dir=" in out
-    assert str(home.paths.data_dir) in out  # the child gets the same data folder
+    # The child gets the same data folder.  The option value is JSON (a backslash is written
+    # twice) and the whole command line follows the Windows quoting rules (a quote is written
+    # \" ), so on Windows the folder does not appear letter for letter; what must hold is that the
+    # argument is the one the child parses back into this folder.
+    data_dir = str(home.paths.data_dir)
+    argument = f"paths.data_dir={json.dumps(data_dir, ensure_ascii=False)}"
+    root = ET.fromstring(out.split("?>", 1)[1])  # noqa: S314 - our own text
+    arguments = root.findtext(f"{tag('Actions')}/{tag('Exec')}/{tag('Arguments')}")
+    assert arguments is not None and subprocess.list2cmdline(["--set", argument]) in arguments
+    assert parse_overrides([argument]) == {"paths": {"data_dir": data_dir}}
     assert "uv sync" not in out
 
 

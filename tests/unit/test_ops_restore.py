@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 import shutil
 from datetime import UTC, datetime
@@ -212,6 +213,44 @@ def test_a_restore_that_fails_half_way_puts_everything_back(
     assert not list(services.paths.data_dir.glob("**/*.replaced-*"))
     pre = [name for name in archives_in(world) if name.startswith("pre-restore-")]
     assert len(pre) == 1  # the copy of the current data was made first and stays
+
+
+def test_a_file_that_another_program_holds_open_ends_the_restore_with_the_data_back(
+    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows refuses to replace a file that some program has open: say so, change nothing."""
+    services = world.services
+    view = world.backup.create("manual")
+    archive = world.backup.backups_dir / str(view.file_name)
+    services.db.dispose()
+    with services.db.transaction() as session:
+        session.add(Job(type="later", payload={"n": 1}))
+    before = table_counts(services.paths.db_path)
+    texts = fact_texts(services)
+    real_replace = os.replace
+    refused: list[str] = []
+
+    def busy(src: os.PathLike[str] | str, dst: os.PathLike[str] | str) -> None:
+        if Path(dst) == services.paths.db_path and not refused:  # the restored one moving in
+            refused.append(str(dst))
+            raise PermissionError(
+                13,
+                "The process cannot access the file because it is being used",
+                str(src),
+                None,
+                str(dst),
+            )
+        real_replace(src, dst)
+
+    monkeypatch.setattr(restore_module.os, "replace", busy)
+    with pytest.raises(RestoreError) as caught:
+        do_restore(world, archive)
+    message = str(caught.value)
+    assert refused and "twin.db could not be replaced (PermissionError)" in message
+    assert "another program" in message and "put back" in message
+    assert table_counts(services.paths.db_path) == before  # the old database is back
+    assert fact_texts(services) == texts
+    assert not list(services.paths.data_dir.glob("**/*.replaced-*"))
 
 
 def test_media_the_pool_lacks_is_reported_not_fatal(world: BackupWorld) -> None:

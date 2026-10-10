@@ -126,7 +126,7 @@ class TaskInfo:
     command: str | None = None
     arguments: str | None = None
     working_dir: str | None = None
-    enabled: bool | None = None
+    enabled: bool | None = None  # None: no task registered
     time_limit: str | None = None
     multiple_instances: str | None = None
     on_battery_allowed: bool | None = None
@@ -158,14 +158,17 @@ def parse_task_xml(text: str) -> TaskInfo:
     arguments = text_of("Actions", "Exec", "Arguments")
     program = PureWindowsPath(command or "").stem.lower()
     battery = text_of("Settings", "DisallowStartIfOnBatteries")
-    enabled = text_of("Settings", "Enabled")
+    # Task Scheduler leaves out settings that have their default value when it exports a task
+    # (``schtasks /Query /XML``): an enabled task has no ``<Enabled>`` element, which the task
+    # schema defines as "true".  Only an explicit false means disabled.
+    enabled = text_of("Settings", "Enabled") or "true"
     return TaskInfo(
         registered=True,
         logon_type=text_of("Principals", "Principal", "LogonType"),
         command=command,
         arguments=arguments,
         working_dir=text_of("Actions", "Exec", "WorkingDirectory"),
-        enabled=None if enabled is None else enabled.lower() == "true",
+        enabled=enabled.lower() == "true",
         time_limit=text_of("Settings", "ExecutionTimeLimit"),
         multiple_instances=text_of("Settings", "MultipleInstancesPolicy"),
         on_battery_allowed=None if battery is None else battery.lower() == "false",

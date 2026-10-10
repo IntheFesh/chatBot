@@ -256,6 +256,15 @@ def _swap(
             raise RestoreError("the restored database fails the integrity check")
         sampled = sample_decrypt(paths.db_path, ring)
         restored, missing = _restore_media(manifest, media, paths.backups_dir / POOL_DIRNAME)
+    except OSError as exc:
+        _put_back(aside, paths)
+        # on Windows a file that another program has open cannot be moved or replaced
+        culprit = Path(str(exc.filename2 or exc.filename or "")).name or "a file"
+        raise RestoreError(
+            f"{culprit} could not be replaced ({type(exc).__name__}): another program probably has "
+            "it open (a database viewer, a virus scan, a file preview); close it and restore "
+            "again.  The data that was there has been put back"
+        ) from None
     except BaseException:
         _put_back(aside, paths)
         raise

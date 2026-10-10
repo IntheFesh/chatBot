@@ -14,8 +14,8 @@ from tests.support.backup_world import (
     fact_texts,
     table_counts,
 )
+from tests.support.cli_runner import invoke
 from tests.support.embedding import HashingBackend
-from twin.cli import app
 from twin.config.secrets import SecretStore
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.process_model import ExitCode
@@ -33,9 +33,13 @@ def world(services: Services, embedder: HashingBackend, secret_store: SecretStor
 
 
 def twin(world: BackupWorld, *args: str, answer: str | None = None) -> tuple[int, str]:
+    if args[0] == "restore":
+        # Restoring replaces the database files, which the application must not be holding open
+        # (R-ARCH-006: it is stopped).  The fixture's own container stands in for it here, and
+        # Windows refuses to replace a file that a connection of this process still has open.
+        world.services.db.dispose()
     options = ["--set", f"paths.data_dir={world.services.paths.data_dir}"]
-    result = runner.invoke(app, [*options, "backup", *args], input=answer)
-    return result.exit_code, result.output
+    return invoke(runner, [*options, "backup", *args], answer=answer)
 
 
 def make(world: BackupWorld) -> str:

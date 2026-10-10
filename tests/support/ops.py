@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from twin.ops.mail import MailError, OutgoingMail
-from twin.ops.taskscheduler import CommandResult, TaskSchedulerError
+from twin.ops.taskscheduler import CommandResult, TaskSchedulerError, TaskSpec, build_task_xml
 
 
 class RecordingNotifier:
@@ -88,6 +88,36 @@ def ok(text: str = "", code: int = 0) -> CommandResult:
 
 def failed(text: str = "ERROR: The system cannot find the file specified.") -> CommandResult:
     return CommandResult(1, b"", text.encode("utf-8"))
+
+
+# the scheduled task and the power plan of a machine that is set up as the bot wants it
+TASK_SPEC = TaskSpec(
+    r"C:\repo\.venv\Scripts\twin.exe", "supervise --from-task", r"C:\repo", r"PC\me"
+)
+POWERCFG = """
+Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)
+    Power Setting GUID: 29f6c1db-86da-48c5-9fdb-f2b67b1f44da  (Sleep after)
+      Possible Setting Index: 0x00000000
+      Possible Settings Description: Never
+    Current AC Power Setting Index: 0x{ac:08x}
+    Current DC Power Setting Index: 0x{dc:08x}
+"""
+
+
+def healthy_machine_runner() -> ScriptedRunner:
+    """Answers of ``schtasks``, ``powercfg`` and ``nvidia-smi`` on a machine that is set up right.
+
+    The doctor's Windows checks ask the machine they run on; a test that wants a verdict about
+    its own subject, not about the CI computer, hands the context this runner.
+    """
+    return ScriptedRunner(
+        {
+            "schtasks.exe /Query": ok(build_task_xml(TASK_SPEC)),
+            "powercfg": ok(POWERCFG.format(ac=0, dc=0)),
+            "nvidia-smi": ok("NVIDIA GeForce RTX 5090, 570.86, 32607 MiB\n"),
+        }
+    )
 
 
 # ------------------------------------------------------------------ a real SMTP server

@@ -60,6 +60,17 @@ def _show(report: PurgeReport) -> None:
         typer.echo(f"  - {line}")
 
 
+def _fail_if_left_over(report: PurgeReport) -> None:
+    """A file that another program holds open cannot be deleted (Windows): say so, exit 1."""
+    if report.failed:
+        raise CliError(
+            "上面列出的文件没能删除，很可能被别的程序占用（数据库查看器、杀毒软件、资源管理器预览）；"
+            "关掉它们之后再运行一次同一条命令。密钥已经删除，剩下的文件已无法解密。"
+            if report.scope == "all"
+            else "上面列出的文件没能删除，很可能被别的程序占用；关掉它们之后再运行一次同一条命令。"
+        )
+
+
 @command(CommandKind.EXCLUSIVE, consent=False)
 def purge_command(
     all_data: Annotated[
@@ -89,9 +100,10 @@ def purge_command(
             keys = 0  # a damaged key store is deleted all the same
         _confirm(plan_all(paths, mirror, keys), CONFIRM_ALL)
         _still_stopped(paths.locks_dir)
+        context.reset()  # nothing of this process may keep the database or the log files open
         report = purge_all(paths, mirror, keystore)
-        context.reset()
         _show(report)
+        _fail_if_left_over(report)
         typer.echo("备份和任何残留的副本现在都无法解密。外部的导出目录（paths.export_dir）没有动，")
         typer.echo("需要的话请自己删除；AutoDL 上如果还有实例，请到控制台确认已释放。")
         return
@@ -101,6 +113,7 @@ def purge_command(
     _still_stopped(paths.locks_dir)
     report = purge_training(paths, runs, services.db)
     _show(report)
+    _fail_if_left_over(report)
     if runs:
         typer.echo(f"有 {runs} 次远程训练没有记录清理完成：请到 AutoDL 控制台确认实例已释放。")
     else:

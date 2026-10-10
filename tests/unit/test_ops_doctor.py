@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from tests.support.ops import ScriptedRunner, failed, ok
+from tests.support.ops import POWERCFG, TASK_SPEC, ScriptedRunner, failed, ok
 from twin.config.secrets import SecretStore
 from twin.config.settings import Settings
 from twin.ops import doctor
@@ -22,18 +22,9 @@ from twin.ops.doctor import (
     run_checks,
     sleep_timeouts,
 )
-from twin.ops.taskscheduler import TaskSpec, build_task_xml
+from twin.ops.taskscheduler import build_task_xml
 
-SPEC = TaskSpec(r"C:\repo\.venv\Scripts\twin.exe", "supervise --from-task", r"C:\repo", r"PC\me")
-POWERCFG = """
-Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
-  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)
-    Power Setting GUID: 29f6c1db-86da-48c5-9fdb-f2b67b1f44da  (Sleep after)
-      Possible Setting Index: 0x00000000
-      Possible Settings Description: Never
-    Current AC Power Setting Index: 0x{ac:08x}
-    Current DC Power Setting Index: 0x{dc:08x}
-"""
+SPEC = TASK_SPEC
 
 
 def settings() -> Settings:

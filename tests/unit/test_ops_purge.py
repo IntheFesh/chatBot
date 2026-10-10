@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import inspect
+import os
 import shutil
+import stat
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from sqlalchemy import select
 from typer.testing import CliRunner
 
 from tests.support.backup_world import MARKER, BackupWorld, build_backup_world, table_counts
+from tests.support.cli_runner import invoke
 from tests.support.embedding import HashingBackend
 from tests.support.training_history import MOMENT, record_training
 from twin.cli import app
@@ -210,6 +213,71 @@ def test_a_purge_of_an_installation_without_a_mirror_or_backups_works(
     assert report.keys_deleted == 1 and not services.paths.db_path.exists()
 
 
+def hold_files_open(monkeypatch: pytest.MonkeyPatch, *names: str) -> list[str]:
+    """Make deleting files with these names fail like a sharing violation on Windows."""
+    real_unlink = os.unlink
+    refused: list[str] = []
+
+    def unlink(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(path)).name in names:
+            refused.append(Path(os.fsdecode(path)).name)
+            raise PermissionError(13, "The process cannot access the file: it is in use")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    return refused
+
+
+def test_a_file_another_program_holds_open_is_reported_and_the_rest_still_goes(
+    installed: Installation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = installed.paths
+    installed.services.db.dispose()
+    refused = hold_files_open(monkeypatch, "twin.db", "bundle.tar.zst")
+    report = purge_all(paths, installed.mirror, installed.services.keystore, close_logs=False)
+    assert set(report.failed) == {"twin.db", "bundle.tar.zst"} and refused
+    assert paths.db_path.exists() and (paths.data_dir / "training" / "bundles").exists()
+    assert tree(paths.media_dir) == [] and tree(paths.vectors_dir) == []  # everything else went
+    assert backup_files(paths.backups_dir) == [] and backup_files(installed.mirror) == []
+    assert [p.name for p in paths.models_dir.iterdir()] == [
+        "embeddings"
+    ] and not paths.logs_dir.exists()
+    assert report.keys_deleted == 1 and not installed.services.keystore.exists()  # shredded anyway
+    assert "没能删除：2 项" in "\n".join(report.lines()) and MARKER not in "\n".join(report.lines())
+
+
+def test_the_command_says_what_could_not_be_deleted_and_ends_with_an_error(
+    cli: Installation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hold_files_open(monkeypatch, "twin.db")
+    code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)
+    assert code == 1 and "没能删除：1 项（twin.db）" in out and "再运行一次" in out
+    assert "已删除（只列数量）" in out and "备份和任何残留的副本" not in out  # no all-clear
+    assert cli.paths.db_path.exists() and not cli.services.keystore.exists()
+    monkeypatch.undo()
+    cli.services.secrets.set(DEEPSEEK_KEY, "synthetic-key-keep-me")
+    code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)  # the second run finishes the job
+    assert code == 0 and not cli.paths.db_path.exists()
+
+
+def test_a_read_only_file_is_made_writable_and_deleted(
+    installed: Installation, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows refuses to delete a read-only file; the purge clears the flag and goes on."""
+    weights = installed.paths.models_dir / "style-lora" / "adapter" / "weights.bin"
+    weights.chmod(stat.S_IREAD)
+    real_unlink = os.unlink
+
+    def windows_like(path: str | os.PathLike[str], *, dir_fd: int | None = None) -> None:
+        if not stat.S_IMODE(os.stat(path, dir_fd=dir_fd).st_mode) & stat.S_IWRITE:
+            raise PermissionError(13, "Access is denied")
+        real_unlink(path, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "unlink", windows_like)
+    report = purge_training(installed.paths, 0)
+    assert report.failed == [] and not weights.exists()
+
+
 # ----------------------------------------------------------------------------- --training-only
 
 
@@ -271,10 +339,14 @@ def run_purge(installed: Installation, *args: str, phrase: str | None = None) ->
         "--set",
         f"ops.backup_mirror_dir={installed.mirror}",
     ]
-    result = runner.invoke(
-        app, [*options, "purge", *args], input=None if phrase is None else phrase + "\n"
+    if "--all" in args:
+        # The application is stopped when a purge runs; the fixture's own container stands in
+        # for it, and Windows refuses to delete a database file that a connection of this
+        # process still has open.
+        installed.services.db.dispose()
+    return invoke(
+        runner, [*options, "purge", *args], answer=None if phrase is None else phrase + "\n"
     )
-    return result.exit_code, result.output
 
 
 def test_the_command_needs_exactly_one_scope(cli: Installation) -> None:
