@@ -1,0 +1,42 @@
+### LLaMA-Factory {{ llamafactory_version }} - one generated reply for every context of the test set ({{ profile.name }})
+### rendered by twin.training.yaml_render; do not edit by hand
+### eval.sh points adapter_name_or_path at the best adapter (output/dpo when it exists)
+
+### model
+model_name_or_path: {{ model_path }}
+adapter_name_or_path: {{ output_dir }}/sft
+trust_remote_code: false
+flash_attn: sdpa
+{% if profile.quantization_bit %}
+quantization_bit: {{ profile.quantization_bit }}
+quantization_method: bnb
+{% endif %}
+
+### method
+stage: sft
+do_train: false
+do_predict: true
+predict_with_generate: true
+finetuning_type: lora
+
+### dataset
+eval_dataset: {{ dataset_test }}
+dataset_dir: {{ data_dir }}
+template: {{ template }}
+cutoff_len: {{ cutoff_len }}
+mask_history: true
+preprocessing_num_workers: 8
+seed: 42
+
+### generation: fixed sampling and seed, one reply per context
+do_sample: true
+temperature: {{ temperature }}
+top_p: {{ top_p }}
+max_new_tokens: {{ max_new_tokens }}
+
+### output
+output_dir: {{ output_dir }}/eval_generate
+per_device_eval_batch_size: 4
+overwrite_output_dir: true
+report_to: none
+bf16: true

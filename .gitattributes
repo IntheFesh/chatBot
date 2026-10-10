@@ -1,0 +1,7 @@
+# The AutoDL scripts, the pinned versions and the YAML templates run on Linux: keep LF line endings
+# in every checkout (a CRLF in a shell script breaks it).
+training/** text eol=lf
+*.sh text eol=lf
+*.env text eol=lf
+*.j2 text eol=lf
+*.jsonl text eol=lf

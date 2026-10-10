@@ -1,0 +1,234 @@
+name: ci
+
+# Quality gates, split so that a Windows problem is visible in minutes instead of an hour:
+#
+#   lint (<os>)               static checks, privacy scan, traceability, CLI smoke test
+#   tests (<os>, <i>/<n>)     the test suite in shards of whole test files, one VM per shard,
+#                             sequential inside (named mutexes and fixed ports are per machine)
+#   coverage (<os>)           merges the coverage data of the shards of one OS and applies the
+#                             unchanged gate (total >= 85 %, each package >= 75 %)
+#   ci gate                   one check that is green only if everything above is
+#
+# Which files a shard runs is computed by scripts/shard_tests.py from the files on disk, never
+# from a list (docs/CI.md, D-490..D-497).  The weights in ci/test_weights.json only balance the
+# shards; they cannot make a test file go missing.
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+
+      - name: ruff (lint)
+        run: uv run ruff check .
+
+      - name: ruff (format)
+        run: uv run ruff format --check .
+
+      - name: mypy --strict (all of src/twin)
+        run: uv run mypy src/twin
+
+      # The Windows-only branches are type-checked natively by the windows-latest job; checking
+      # them here as well shows a typing error in them minutes earlier.
+      - name: mypy --strict (all of src/twin) as seen on win32
+        if: runner.os == 'Linux'
+        run: uv run mypy src/twin --platform win32
+
+      - name: privacy scan
+        run: uv run python scripts/privacy_scan.py
+
+      - name: traceability (global consistency)
+        run: uv run python scripts/trace_check.py
+
+      # round 16: nothing in src/ stands in for real code (keywords, bodies that are only pass or a
+      # constant, imports of tests), and docs/DECISIONS.md agrees with itself and with the tests
+      - name: stub scan (no stand-ins or toy code in src/)
+        run: uv run python scripts/stub_scan.py
+
+      - name: decisions (numbers, trade-off table, cited tests)
+        run: uv run python scripts/decisions_check.py
+
+      - name: every test file pytest collects is covered by the sharding
+        run: uv run python scripts/shard_tests.py --check-collection
+
+      - name: smoke test of the CLI
+        run: |
+          uv run twin --help
+          uv run twin doctor
+
+  tests:
+    name: tests (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # `shards` is the number handed to scripts/shard_tests.py --of; keep it equal for all
+        # entries of one OS (the coverage job checks that every shard 1..n arrived).
+        include:
+          - { os: ubuntu-latest, shard: 1, shards: 3 }
+          - { os: ubuntu-latest, shard: 2, shards: 3 }
+          - { os: ubuntu-latest, shard: 3, shards: 3 }
+          - { os: windows-latest, shard: 1, shards: 5 }
+          - { os: windows-latest, shard: 2, shards: 5 }
+          - { os: windows-latest, shard: 3, shards: 5 }
+          - { os: windows-latest, shard: 4, shards: 5 }
+          - { os: windows-latest, shard: 5, shards: 5 }
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      COVERAGE_FILE: .coverage.${{ matrix.os }}.${{ matrix.shard }}-of-${{ matrix.shards }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+
+      - name: Select the test files of this shard
+        run: |
+          uv run python scripts/shard_tests.py --shard "${{ matrix.shard }}" --of "${{ matrix.shards }}" > shard-files.txt
+          echo "test files of shard ${{ matrix.shard }}/${{ matrix.shards }}: $(wc -l < shard-files.txt)"
+          cat shard-files.txt
+
+      - name: pytest with coverage (live tests are skipped)
+        run: |
+          mapfile -t files < <(tr -d '\r' < shard-files.txt)
+          uv run pytest -q -m "not live" --cov=src/twin --cov-report= -p no:cacheprovider --junitxml=junit.xml "${files[@]}"
+
+      - name: Seconds per test file of this shard
+        if: ${{ !cancelled() && hashFiles('junit.xml') != '' }}
+        run: |
+          {
+            echo '### Seconds per test file (${{ matrix.os }}, shard ${{ matrix.shard }}/${{ matrix.shards }})'
+            echo '```'
+            uv run python scripts/shard_tests.py --timings junit.xml
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the junit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.os }}-${{ matrix.shard }}-of-${{ matrix.shards }}
+          path: junit.xml
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Keep the coverage data of this shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.shard }}-of-${{ matrix.shards }}
+          path: ${{ env.COVERAGE_FILE }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage:
+    name: coverage (${{ matrix.os }})
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only coverage and the standard-library gate script are needed: no project dependencies,
+      # hence no uv cache either.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+
+      - name: Install Python and the development tools
+        run: |
+          uv python install 3.12
+          uv sync --frozen --only-group dev
+
+      - name: Download the coverage data of every shard of this OS
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-${{ matrix.os }}-*
+          merge-multiple: true
+          path: .
+
+      - name: All shards arrived
+        run: uv run --no-sync python scripts/shard_tests.py --check-shard-set .coverage.*
+
+      - name: Combine the shards
+        run: |
+          uv run --no-sync coverage combine
+          uv run --no-sync coverage json -o coverage.json
+
+      - name: coverage gate (total >= 85%, each package >= 75%)
+        run: uv run --no-sync python scripts/coverage_gate.py
+
+      - name: Keep the combined report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ matrix.os }}
+          path: coverage.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+  gate:
+    name: ci gate
+    if: ${{ always() }}
+    needs: [lint, tests, coverage]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Every job succeeded
+        run: |
+          echo "lint: ${{ needs.lint.result }}"
+          echo "tests: ${{ needs.tests.result }}"
+          echo "coverage: ${{ needs.coverage.result }}"
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.tests.result }}" = success
+          test "${{ needs.coverage.result }}" = success

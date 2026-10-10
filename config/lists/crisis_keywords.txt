@@ -1,0 +1,238 @@
+# Keywords that route a user message to the crisis check (R-SAFE-001).
+# One literal substring per line (matched case-insensitively), UTF-8; '#' starts a comment line.
+# A hit does not by itself end the role play: it triggers a second judgement by the model
+# (is_crisis / severity) and only a confirmed crisis makes the bot step out of character.
+# So this list is intentionally broad (high recall); add phrases freely.
+
+# --- suicide and wanting to die
+自杀
+想自杀
+去自杀
+要自杀
+准备自杀
+自尽
+自我了断
+了结自己
+了断自己
+结束自己的生命
+结束生命
+结束我的生命
+结束这一切
+想死
+好想死
+真想死
+想去死
+我想死
+去死吧
+死了算了
+死了就好了
+死了一了百了
+不如死了
+不想活
+不想活了
+不想再活
+活不下去
+活不下去了
+活着没意思
+活着没有意思
+活着没意义
+活着没有意义
+活着好累
+活够了
+活腻了
+不想醒来
+不想再醒来
+一睡不醒
+希望一睡不醒
+想长眠
+想永远睡去
+想离开这个世界
+想从这个世界消失
+想消失
+想永远消失
+我消失就好了
+我不在了
+没有我会更好
+没有我世界会更好
+没有我大家会更好
+我是个累赘
+我是负担
+遗书
+写遗书
+留遗书
+交代后事
+安排后事
+轻生
+萌生轻生
+寻死
+寻短见
+走极端
+想不开
+
+# --- methods and plans
+跳楼
+跳河
+跳海
+跳桥
+跳下去
+从楼上跳
+从阳台跳
+割腕
+割脉
+割自己
+上吊
+吊死
+勒死自己
+烧炭
+一氧化碳
+吞药
+吃药自杀
+吃安眠药
+吃了很多药
+吃了一整瓶药
+过量服药
+药吃多了
+服毒
+喝农药
+喝药自杀
+开煤气
+卧轨
+撞车自杀
+买了刀
+买了绳子
+买了药
+准备好了药
+准备好了绳子
+买了炭
+
+# --- self-harm
+自残
+自伤
+伤害自己
+想伤害自己
+划自己
+划手臂
+划手腕
+割手
+割伤自己
+烫自己
+撞墙
+打自己
+掐自己
+拿刀划
+用刀划
+用刀割
+犯贱想割
+忍不住想伤害自己
+
+# --- extreme despair and hopelessness
+绝望
+好绝望
+彻底绝望
+万念俱灰
+心如死灰
+没有希望了
+看不到希望
+看不到未来
+没有未来
+没有出路
+走投无路
+无路可走
+撑不下去
+撑不下去了
+撑不住了
+熬不下去
+熬不住了
+坚持不下去
+坚持不下去了
+受不了了
+再也受不了
+我真的受不了
+崩溃到想死
+崩溃了想死
+抑郁症
+重度抑郁
+抑郁发作
+中度抑郁
+严重抑郁
+想放弃一切
+想放弃生命
+放弃生命
+没有人在乎我
+没人会在乎我
+没有人需要我
+没有人爱我
+全世界都抛弃我
+所有人都抛弃了我
+
+# --- harming others
+想杀人
+杀人
+杀了他
+杀了她
+杀了你
+杀了我自己
+弄死他
+弄死她
+弄死你
+弄死我自己
+打死他
+打死她
+捅死
+捅他
+捅你
+砍死
+砍他
+砍你
+同归于尽
+一起死
+带你一起死
+拉着他一起死
+报复社会
+报复他们
+伤害别人
+伤害他人
+伤害你
+想伤人
+想打人
+想放火
+放火烧
+炸了
+投毒
+下毒
+绑架
+勒死
+
+# --- English and mixed-language phrases
+suicide
+suicidal
+kill myself
+kill me
+killing myself
+end my life
+end it all
+want to die
+wanna die
+wish i was dead
+wish i were dead
+better off dead
+better off without me
+no reason to live
+don't want to live
+dont want to live
+can't go on
+cant go on
+self harm
+self-harm
+hurt myself
+cut myself
+cutting myself
+overdose
+hang myself
+jump off
+kill him
+kill her
+kill you
+kill someone
+hurt someone
+hurt you

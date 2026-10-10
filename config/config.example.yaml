@@ -1,0 +1,114 @@
+# wechat-twin example configuration (no secrets; secrets live in the credential store).
+# Copy to config/config.yaml and edit.  This file must stay identical to the YAML block in
+# docs/SPEC.md R-CFG-004 and to the defaults of twin.config.Settings (R-CFG-005).
+consent: { confirmed_at: "2026-10-08" }
+paths: { data_dir: "./data", export_dir: null }       # export_dir 指向用户本地的全部导出
+target: { username: null }                            # 目标会话 wxid，首次导入时确认
+time:
+  bot_timezone: "America/Chicago"
+  source_timezone: "America/Chicago"
+  source_timezone_ranges: []          # 例 [{from: "2025-01-01", to: "2025-08-31", tz: "Asia/Shanghai"}]；未覆盖的日期用 source_timezone
+deepseek:
+  base_url: "https://api.deepseek.com"
+  chat_model: "deepseek-flash"
+  offline_model: "deepseek-flash"      # 可改 deepseek-v4-pro
+  vision_model: "deepseek-flash"
+  timeout_s: { non_thinking: 60, thinking: 180 }
+  max_concurrency: 4
+  reasoning_effort: "high"             # low|high|max，只在思考开启时发送
+pricing_usd_per_mtok:                  # 2026-10 官方价格页，高峰价
+  deepseek-flash: { cache_hit: 0.006, cache_miss: 0.30, output: 1.20 }
+  deepseek-v4-pro: { cache_hit: 0.044, cache_miss: 1.32, output: 3.96 }
+pricing:
+  offpeak_multiplier: 0.5              # 官方取消非高峰优惠时改为 1.0
+  extra_offpeak_dates: []              # 额外按非工作日处理的北京日期
+  extra_peak_dates: []                 # 额外按工作日处理的北京日期
+budget: { daily_usd: 1.00, monthly_usd: 15.00, alert_ratio: 0.8, one_time_usd: 30.00,
+          degrade_ratios: [1.0, 1.25, 1.5, 2.0] }   # 进入降级级别 1/2/3/4 时的花费占预算比例（R-LLM-008）
+thinking: { chat: "off", proactive_planner: "on", auto_rules: true }   # off|on|auto
+backend: { active: "deepseek", health_check_s: 30, fallback_violations: 3,
+           recover_after_min: 10 }   # deepseek|style|hybrid；第 09 轮新增：后端回退的 3 个键（R-SRV-004）
+jobs: { concurrency: 2 }                # 离线任务 Worker 并发上限（第 00 轮新增，R-ARCH-003）
+ingest:                                 # 第 03 轮新增，R-IMP-004/008/012
+  batch_size: 2000                     # 导入时每批事务写入的消息条数
+  caption_recent_days: 90              # 图片描述只为最近 N 天的图片排队
+  caption_wait_timeout_s: 30           # 用户刚发来的图片在线同步描述的超时（秒）
+  sticker_download: { concurrency: 4, per_second: 4, retries: 3, timeout_s: 30 }   # 表情包下载
+engine:
+  quiet_window_s: 15
+  quiet_window_adaptive: false         # true 时按用户连发间隔 p75 自适应，上限 quiet_window_max_s
+  quiet_window_max_s: 45
+  max_wait_s: 90
+  history_turns_min: 30
+  history_turns_max: 40                # 超过时一次后移 10 轮（缓存友好）
+  examples_k: 8
+  max_bubbles: 8
+  ai_phrases_file: "config/lists/ai_phrases.txt"
+  commitment_patterns_file: "config/lists/commitment_patterns.txt"
+profile: { burst_gap_s: 120, segment_gap_min: 60, recent_days: 90, recency_weight: 0.6,
+           rules_file: "config/lists/style_rules.yaml", emoji_codes_file: "config/lists/wechat_emoji_codes.txt" }
+activity: { sleep_min_hours: 3.0, edge_minutes: 30, smoothing_sigma_slots: 2, min_valid_days: 14,
+            sleep_rate_ratio: 0.25, busy_rate_ratio: 0.5, busy_latency_ratio: 3.0 }
+proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
+             edge_of_sleep_weekly_max: 2, tick_minutes: 5, user_active_min: 10,
+             unanswered_after_min: 30, meal_window_min: 30,
+             bedtime_lead_min: [15, 60] }   # 第 10 轮新增：proactive 的 4 个键
+schedule: { plan_minute: 5, tick_s: 30, greeting_min_gap_h: 18, greeting_window_min: [5, 40],
+            min_awake_h: 6, meal_jitter_min: 15, summary_lead_min: 60,
+            summary_latest_after_wake_h: 2, power_tick_s: 5, power_jump_ticks: 2 }   # 第 08 轮新增：schedule 的 10 个键
+channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
+retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10,
+             context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,
+             slot_sigma_slots: 8, recency_weight: 0.04, recency_half_life_days: 180,
+             dedup_similarity: 0.9, event_only_factor: 0.6, batch_size: 64 }   # 第 05 轮新增：除 model/device/holdout_ratio 外的 10 个键
+persona: { sample_segments: 60, batch_segments: 10, segment_max_messages: 40, regen_ratio: 0.10,
+           full_max_tokens: 1500, compact_max_tokens: 400 }   # 第 06 轮新增：persona 的 6 个键与 stickers 的 11 个键
+stickers: { tags_file: "config/lists/sticker_tags.txt", neighbors_file: "config/lists/sticker_tag_neighbors.yaml",
+            tag_job_size: 20, context_min_uses: 3, context_max_samples: 5, no_repeat_window: 10,
+            repeat_rate_threshold: 0.30, recency_half_life_days: 90, rate_window: 200,
+            rate_tolerance: 0.20, describe_timeout_s: 15 }
+memory: { daily_summary: true, fact_extraction: true, block_tokens: 800, recall_facts: 12,
+          recent_summary_days: 3, recall_summaries: 2, followup_lookahead_h: 36,
+          recall_min_similarity: 0.35, conflict_candidates: 6, conflict_min_similarity: 0.45,
+          recency_half_life_days: 90,
+          quiet_minutes: 30, replay_job_days: 7, replay_chunk_lines: 400,
+          replay_auto_approve_ratio: 0.10,
+          weights: { similarity: 0.45, importance: 0.15, recency: 0.10, source: 0.10, date: 0.20 } }
+ops:
+  backup_hour_local: 4
+  backup_keep_daily: 14
+  backup_keep_weekly: 8
+  backup_mirror_dir: null              # 可选：外接盘等异地副本目录
+  backup_postpone_max_h: 2             # 第 12 轮新增：备份遇到正在发送的会话时最多顺延多久
+  smtp: { host: null, port: 465, user: null, to: null, security: "auto" }   # auto|ssl|starttls；auto：465 端口用 SSL，其余端口用 STARTTLS
+  alert_cooldown_min: 60               # 第 12 轮新增：同类告警最短间隔（分钟）
+  health: { interval_s: 60, poll_stale_min: 5, disk_min_gb: 5, queue_max: 500, queue_oldest_h: 24,
+            backup_stale_h: 36, keep_days: 30, llm_window_min: 15, llm_error_rate: 0.5,
+            llm_min_calls: 10, remind_h: 6 }   # 第 12 轮新增：健康检查的阈值
+  supervise: { backoff_start_s: 5, backoff_max_s: 300, stable_after_min: 30, stop_grace_s: 40 }   # 第 12 轮新增：twin supervise 的重启退避
+style_model:
+  mode: "llamacpp_completion"          # llamacpp_completion|vllm_completion
+  endpoint: "http://127.0.0.1:8081"
+  model_id: null                       # vllm_completion: "twin-style", the LoRA name serve_vllm.sh serves
+  tunnel: { local_port: 8082, remote_port: 8000, backoff_start_s: 2.0, backoff_max_s: 60.0,
+            remind_remote: true }      # 第 14 轮新增：隧道断线重连的退避与每天一次的计费提醒
+  serve: { binary: null, context: 4096, gpu_layers: 999, parallel: 1, start_timeout_s: 180.0,
+           backoff_start_s: 2.0, backoff_max_s: 60.0, stable_after_s: 120.0, warm_standby: true,
+           eval_port: 8083 }           # 第 14 轮新增：本机 llama-server（只监听本机）
+  memory_tokens: 300                   # 第 09 轮新增：风格模型提示词里记忆块的 token 预算，与训练集导出共用
+  n_predict: 200                       # 一次生成最多多少 token
+  temperature: 0.7
+  top_p: 0.9
+autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
+training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
+eval: { blind_n: 50, memory_questions: 20, consistency_days: 7, consistency_reply_chars: 12000,
+        consistency_facts: 40 }   # 第 15 轮新增：一致性审计的回看天数、交给模型的回复字数与事实条数
+commands: { confirm_window_min: 60, pause_max_h: 168, morning_hour: 8, import_poll_s: 5.0 }
+learning: { rules_max: 30, rules_interval_days: 7, rule_max_chars: 40, detect_corrections: true,
+            check_interval_s: 3600.0 }   # 第 11 轮新增：commands 的 4 个键与 learning 的 5 个键
+safety:
+  crisis_keywords_file: "config/lists/crisis_keywords.txt"
+  hotlines: { US: "988（美国心理危机热线，电话或短信）", CN: "12356（全国心理援助热线）" }
+  timezone_country: { "America/Chicago": "US", "America/New_York": "US", "America/Denver": "US",
+                      "America/Los_Angeles": "US", "Asia/Shanghai": "CN" }
+  emergency_contact: { enabled: false, email: null }   # 显式开启才生效；邮件不含任何聊天内容

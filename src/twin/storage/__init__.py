@@ -1,0 +1,40 @@
+"""Encrypted SQLite storage, migrations and the media store.
+
+Importing the package loads every table module, so ``Base.metadata`` always holds the
+complete schema (migrations, key rotation and the schema checks rely on that).  A round
+that adds tables in its own module lists the module here.
+"""
+
+from twin.storage import (
+    chat_models,
+    engine_models,
+    eval_models,
+    learning_models,
+    memory_models,
+    models,
+    ops_models,
+    persona_models,
+    proactive_models,
+    profile_models,
+    retrieval_models,
+    schedule_models,
+    training_models,
+    training_plan_models,
+)
+
+__all__ = [
+    "chat_models",
+    "engine_models",
+    "eval_models",
+    "learning_models",
+    "memory_models",
+    "models",
+    "ops_models",
+    "persona_models",
+    "proactive_models",
+    "profile_models",
+    "retrieval_models",
+    "schedule_models",
+    "training_models",
+    "training_plan_models",
+]

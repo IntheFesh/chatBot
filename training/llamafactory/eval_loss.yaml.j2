@@ -1,0 +1,35 @@
+### LLaMA-Factory {{ llamafactory_version }} - loss on the validation set ({{ profile.name }})
+### rendered by twin.training.yaml_render; do not edit by hand
+### eval.sh points adapter_name_or_path at the best adapter (output/dpo when it exists)
+
+### model
+model_name_or_path: {{ model_path }}
+adapter_name_or_path: {{ output_dir }}/sft
+trust_remote_code: false
+flash_attn: sdpa
+{% if profile.quantization_bit %}
+quantization_bit: {{ profile.quantization_bit }}
+quantization_method: bnb
+{% endif %}
+
+### method
+stage: sft
+do_train: false
+do_eval: true
+finetuning_type: lora
+
+### dataset
+eval_dataset: {{ dataset_val }}
+dataset_dir: {{ data_dir }}
+template: {{ template }}
+cutoff_len: {{ cutoff_len }}
+mask_history: true
+preprocessing_num_workers: 8
+seed: 42
+
+### output
+output_dir: {{ output_dir }}/eval_loss
+per_device_eval_batch_size: {{ profile.per_device_train_batch_size }}
+overwrite_output_dir: true
+report_to: none
+bf16: true

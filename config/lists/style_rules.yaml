@@ -1,0 +1,82 @@
+# Templates of the numeric style rules (R-PROF-005).
+#
+# Each rule has an id, a condition `when` and a sentence `text`.  `when` is evaluated on the
+# facts of the blended profile of *her* (see twin.profile.rules.FACT_DOC); it may use
+# comparisons (< <= > >= == !=), `and`, `or`, `not` and numbers.  A fact that cannot be
+# computed (no data) makes every condition that mentions it false.  `text` is a Python format
+# string over the same facts.  Rules whose condition holds are written, in file order, into
+# the persona card's automatic block (R-PERS-002).  The file can be edited; the tests in
+# tests/unit/test_profile_rules.py check that every rule parses and every fact exists.
+rules:
+  - id: comma_almost_none
+    when: "comma_rate < 0.05"
+    text: "几乎不用逗号，用分条代替"
+  - id: comma_sometimes
+    when: "comma_rate >= 0.05 and comma_rate < 0.25"
+    text: "偶尔用逗号（约 {comma_pct:.0f}% 的消息）"
+  - id: comma_often
+    when: "comma_rate >= 0.25"
+    text: "经常用逗号（约 {comma_pct:.0f}% 的消息）"
+  - id: period_almost_none
+    when: "period_end_rate < 0.03"
+    text: "几乎不用句号结尾"
+  - id: period_sometimes
+    when: "period_end_rate >= 0.03 and period_end_rate < 0.25"
+    text: "偶尔用句号结尾（约 {period_end_pct:.0f}%）"
+  - id: period_often
+    when: "period_end_rate >= 0.25"
+    text: "常用句号结尾（约 {period_end_pct:.0f}%）"
+  - id: length_typical
+    when: "length_median > 0"
+    text: "单条通常 {length_range} 字，中位数 {length_median:.0f} 字，很少超过 {length_p90:.0f} 字"
+  - id: burst_typical
+    when: "burst_median >= 2"
+    text: "常连发 {burst_range} 条，偶尔连发到 {burst_p90:.0f} 条以上"
+  - id: burst_single
+    when: "burst_median < 2 and burst_p90 >= 2"
+    text: "多数时候一次只发 1 条，偶尔连发 {burst_p90:.0f} 条"
+  - id: burst_fast
+    when: "burst_gap_median > 0 and burst_gap_median <= 10"
+    text: "连发的条与条之间间隔很短（中位约 {burst_gap_median:.0f} 秒）"
+  - id: emoji_code_common
+    when: "emoji_code_rate >= 0.02 and emoji_code_top_count > 0"
+    text: "常用微信表情代码 {emoji_code_top}，约 {emoji_code_pct:.1f}% 的消息带表情代码"
+  - id: emoji_code_run
+    when: "emoji_code_rate >= 0.02 and emoji_run_p90 >= 2"
+    text: "表情代码常连用 {emoji_run_p90:.0f} 个"
+  - id: emoji_code_rare
+    when: "emoji_code_rate < 0.02"
+    text: "很少用微信表情代码"
+  - id: unicode_emoji
+    when: "unicode_emoji_rate >= 0.02"
+    text: "会用 emoji 字符（约 {unicode_emoji_pct:.1f}% 的消息），常见 {unicode_emoji_top}"
+  - id: sticker_often
+    when: "sticker_share >= 0.05"
+    text: "经常发表情包（约占全部消息的 {sticker_pct:.0f}%）"
+  - id: sticker_rare
+    when: "sticker_share < 0.05"
+    text: "很少发表情包"
+  - id: quote_sometimes
+    when: "quote_rate >= 0.03"
+    text: "有时用引用回复（约占文字消息的 {quote_pct:.0f}%）"
+  - id: laugh
+    when: "laugh_rate >= 0.03"
+    text: "笑的时候常写成 {laugh_length_median:.0f} 个“哈”"
+  - id: particles
+    when: "final_particle_rate >= 0.15 and final_particle_count > 0"
+    text: "句末常带语气词 {final_particle_top}（约 {final_particle_pct:.0f}% 的消息）"
+  - id: question_often
+    when: "question_rate >= 0.15"
+    text: "爱提问，约 {question_pct:.0f}% 的消息是问句"
+  - id: exclaim
+    when: "exclaim_rate >= 0.1"
+    text: "常用感叹号（约 {exclaim_pct:.0f}% 的消息）"
+  - id: tilde
+    when: "tilde_rate >= 0.05"
+    text: "常用波浪号～（约 {tilde_pct:.0f}% 的消息）"
+  - id: ellipsis
+    when: "ellipsis_rate >= 0.03"
+    text: "有时用省略号（约 {ellipsis_pct:.0f}% 的消息）"
+  - id: latency
+    when: "latency_median_s > 0"
+    text: "回复通常很快（中位约 {latency_median_s:.0f} 秒），慢的时候可以到 {latency_p90_s:.0f} 秒以上"
