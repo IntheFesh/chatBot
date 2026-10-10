@@ -20,7 +20,7 @@ from twin.config.loader import DataPaths, load_settings, resolve_paths
 from twin.config.runtime import RuntimeSettings
 from twin.config.secrets import SecretStore
 from twin.config.settings import Settings
-from twin.ops.alerts import AlertSink, DbAlertSink
+from twin.ops.alerts import AlertService
 from twin.storage.crypto import KeyRing, set_active_keyring
 from twin.storage.db import Database
 from twin.storage.keystore import KeyStore
@@ -42,7 +42,7 @@ class Services:
     keyring: KeyRing
     runtime: RuntimeSettings
     media: MediaStore
-    alerts: AlertSink
+    alerts: AlertService
     # objects built on first use that belong to one container (the schedule kit, ...)
     extras: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -99,7 +99,7 @@ def build_services(
         keyring=ring,
         runtime=RuntimeSettings(db, settings, the_clock),
         media=MediaStore(paths.media_dir, paths.tmp_dir),
-        alerts=DbAlertSink(db, the_clock),
+        alerts=AlertService(db, the_clock, cooldown_min=settings.ops.alert_cooldown_min),
     )
 
 

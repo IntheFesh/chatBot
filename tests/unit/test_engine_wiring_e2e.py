@@ -560,7 +560,7 @@ async def test_a_style_model_that_dies_falls_back_to_deepseek_and_comes_back_whe
     assert (
         fallback is not None and fallback["requested"] == "style" and fallback["reason"] == "error"
     )
-    assert ("style_fallback", "warning") in world.alerts()
+    assert ("style_model_down", "warning") in world.alerts()
     report = await world.command("/状态", count=3, answers=2)
     assert "风格模型不可用，眼下由 deepseek 回复" in report
     calls = len(client.prompts)
@@ -580,7 +580,7 @@ async def test_a_style_model_that_dies_falls_back_to_deepseek_and_comes_back_whe
     await run_to_idle(world.engine, world.clock)
     assert world.services.runtime.get(BACKEND_FALLBACK) is None
     assert world.bot_lines[-1] == "bot: 好呀"
-    assert ("style_recovered", "info") in world.alerts()
+    assert ("style_model_down", "info") in world.alerts()
     out = [r for r in world.rows() if r.direction == "out" and not r.is_command]
     assert [r.backend for r in out] == ["deepseek", "deepseek", "style"]
     again = await world.command("/状态", count=6, answers=3)
@@ -655,7 +655,7 @@ async def test_the_engine_reaches_the_configured_style_server_and_falls_back_whe
         await run_to_idle(built.engine, built.clock)
         assert built.bot_lines[-1] == "bot: 换我来回"
         assert built.services.runtime.get(BACKEND_FALLBACK) is not None
-        assert ("style_fallback", "warning") in built.alerts()
+        assert ("style_model_down", "warning") in built.alerts()
     finally:
         await close(built)
 

@@ -24,6 +24,10 @@ class FakeWin32:
         self.closed: list[int] = []
         self._loop_ends = threading.Event()
         self._window_ready = threading.Event()
+        self.job_fails = False
+        self.jobs: dict[int, list[int]] = {}
+        self.open_processes: list[int] = []
+        self.assign_fails = False
 
     def create_mutex(self, name: str) -> tuple[int | None, int]:
         if self.mutex_fails:
@@ -35,7 +39,10 @@ class FakeWin32:
         return self._next_handle, ERROR_ALREADY_EXISTS if existed else 0
 
     def close_handle(self, handle: int) -> None:
-        name = self._handles.pop(handle)
+        name = self._handles.pop(handle, None)
+        if name is None:  # a process or job handle
+            self.closed.append(handle)
+            return
         self.registry[name] -= 1
 
     def set_thread_execution_state(self, flags: int) -> int:
@@ -76,6 +83,28 @@ class FakeWin32:
             return 0
         handler = self.windows.get(hwnd)
         return 1 if handler is not None and handler(message, wparam, lparam) else 0
+
+    # -- job objects --------------------------------------------------------------
+
+    def create_kill_on_close_job(self) -> int | None:
+        if self.job_fails:
+            return None
+        handle = 7000 + len(self.jobs)
+        self.jobs[handle] = []
+        return handle
+
+    def current_process_handle(self) -> int:
+        return -1
+
+    def open_process(self, pid: int) -> int | None:
+        self.open_processes.append(pid)
+        return 9000 + pid
+
+    def assign_to_job(self, job: int, process: int) -> bool:
+        if self.assign_fails or job not in self.jobs:
+            return False
+        self.jobs[job].append(process)
+        return True
 
     def wait_for_window(self, timeout: float = 5.0) -> bool:
         return self._window_ready.wait(timeout)

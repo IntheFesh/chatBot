@@ -79,7 +79,13 @@ ops:
   backup_keep_daily: 14
   backup_keep_weekly: 8
   backup_mirror_dir: null              # 可选：外接盘等异地副本目录
-  smtp: { host: null, port: 465, user: null, to: null }
+  backup_postpone_max_h: 2             # 第 12 轮新增：备份遇到正在发送的会话时最多顺延多久
+  smtp: { host: null, port: 465, user: null, to: null, security: "auto" }   # auto|ssl|starttls；auto：465 端口用 SSL，其余端口用 STARTTLS
+  alert_cooldown_min: 60               # 第 12 轮新增：同类告警最短间隔（分钟）
+  health: { interval_s: 60, poll_stale_min: 5, disk_min_gb: 5, queue_max: 500, queue_oldest_h: 24,
+            backup_stale_h: 36, keep_days: 30, llm_window_min: 15, llm_error_rate: 0.5,
+            llm_min_calls: 10, remind_h: 6 }   # 第 12 轮新增：健康检查的阈值
+  supervise: { backoff_start_s: 5, backoff_max_s: 300, stable_after_min: 30, stop_grace_s: 40 }   # 第 12 轮新增：twin supervise 的重启退避
 style_model:
   mode: "llamacpp_completion"          # llamacpp_completion|vllm_completion
   endpoint: "http://127.0.0.1:8081"

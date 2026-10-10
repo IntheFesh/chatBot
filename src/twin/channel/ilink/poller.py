@@ -159,6 +159,8 @@ class IlinkPoller:
             if exc.timeout and exc.request_sent:  # the server had nothing to say
                 if probing:  # it accepted the old token without answering -14
                     await self._guard.on_recovered()
+                # a poll that waited out its time is a working connection (R-OPS-003)
+                await asyncio.to_thread(self._store.record_poll_success)
                 return PollOutcome.TIMEOUT
             return await self._failed("network", None, exc.reason)
         except IlinkHttpError as exc:

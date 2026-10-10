@@ -342,10 +342,11 @@ def test_a_milestone_without_a_judge_is_not_reached_and_names_the_round(
         )
     assert GATE_ROUNDS == {"M3": 10, "M4": 12, "M5": 14}
     # until the rounds register theirs, the real registry has the same state (M3 is wired by
-    # round 10: its judge is tested in test_proactive_gate)
-    for milestone in ("M4", "M5"):
+    # round 10, its judge is tested in test_proactive_gate; M4 by round 12)
+    for milestone in ("M5",):
         assert default_registry.get(milestone) is None
         assert run_gate(services, milestone).exit_code == EXIT_NOT_REACHED
+    assert default_registry.get("M3") is not None and default_registry.get("M4") is not None
     assert "第 10 轮" in not_reached_message("M3") and "后续轮次" in not_reached_message("M1")
     assert EvalStore(services.db, services.clock).list_runs("gate") == []  # nothing was stored
 
@@ -416,4 +417,4 @@ def test_a_later_round_registers_its_judge_and_the_gate_then_runs(services: Serv
 def test_the_default_registry_holds_exactly_the_judges_of_the_rounds_so_far() -> None:
     registry = load_judges()
     assert registry is default_registry
-    assert registry.milestones() == {"M0", "M1", "M2", "M3"}  # M3 joined in round 10
+    assert registry.milestones() == {"M0", "M1", "M2", "M3", "M4"}  # M3: round 10, M4: round 12

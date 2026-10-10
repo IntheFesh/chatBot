@@ -53,6 +53,7 @@ INBOX_MAX = 500
 QUOTE_INDEX_MAX = 300
 QUOTE_TEXT_MAX = 200
 QUOTE_KEEP = timedelta(days=30)
+POLL_OK_WRITE_INTERVAL = timedelta(seconds=60)
 STATS_RECENT_MAX = 100
 
 
@@ -369,13 +370,18 @@ class IlinkStore:
             return failures
 
     def record_poll_success(self) -> None:
-        """A poll worked.  Writes only when recovering from failures or never recorded."""
+        """A poll worked.
+
+        Writes when recovering from failures, when never recorded and otherwise at most once a
+        minute: the health check (R-OPS-003) treats a last success older than five minutes as a
+        broken channel, so the stored time must stay fresher than that while polling works.
+        """
         now = self._clock.now_utc()
         with self._state.transaction() as tx:
             data = dict(tx.get(KEY_POLL) or {})
             last_ok = _parse(data.get("last_ok_at"))
             recovering = int(data.get("consecutive_failures", 0)) > 0
-            stale = last_ok is None or now - last_ok >= timedelta(minutes=10)
+            stale = last_ok is None or now - last_ok >= POLL_OK_WRITE_INTERVAL
             if not (recovering or stale):
                 return
             data["consecutive_failures"] = 0

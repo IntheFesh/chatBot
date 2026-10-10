@@ -532,7 +532,7 @@
 
 沙箱里没有真实微信、真实 DeepSeek 和真实的七天，下面这些都要你来做。M3 的两个条件（连续七天的主动消息审计合规、`/评分` 平均 ≥4）只能靠真实使用达成，没有办法在测试里“造”出来。
 
-0. **升级数据库，并先确认 ClawBot 允许主动推送（R-CH-010）** `uv run twin db upgrade`（迁移 `0014_proactive_tables`：`proactive_candidates`、`proactive_log`、`ratings` 三张表，`lifeline_events` 加“已说过”标记，`eval_runs.kind` 增加 `proactive_audit`；降级一步可回到 `0013_preference_pairs`）。主动消息能不能真的送达，取决于真实 M0 探针的结果：`uv run twin channel probe` 要先在你的 ClawBot 会话里做完，`docs/CHANNEL_REPORT.md` 里“窗口”和“条数”两项有实测数字，`uv run twin eval gate M0` 通过。**如果探针说你发完消息后，主动消息一小段时间后就送不出去（窗口过短或条数不够），这一轮的调度器照常运行，但 M3 在 ClawBot 上达不成**——按 R-CH-010 要停下来告诉我，企业微信通道要另开一轮，不要自己去试“激活过期会话”之类的办法。
+0. **升级数据库，并先确认 ClawBot 允许主动推送（R-CH-010）** `uv run twin db upgrade`（迁移 `0016_proactive_tables`：`proactive_candidates`、`proactive_log`、`ratings` 三张表，`lifeline_events` 加“已说过”标记，`eval_runs.kind` 增加 `proactive_audit`；降级一步可回到 `0015_ops_tables`）。主动消息能不能真的送达，取决于真实 M0 探针的结果：`uv run twin channel probe` 要先在你的 ClawBot 会话里做完，`docs/CHANNEL_REPORT.md` 里“窗口”和“条数”两项有实测数字，`uv run twin eval gate M0` 通过。**如果探针说你发完消息后，主动消息一小段时间后就送不出去（窗口过短或条数不够），这一轮的调度器照常运行，但 M3 在 ClawBot 上达不成**——按 R-CH-010 要停下来告诉我，企业微信通道要另开一轮，不要自己去试“激活过期会话”之类的办法。
 
 1. **真实跑七天（M3 的观察期）** `uv run twin run`（微信已绑定：`uv run twin channel login`），电脑保持开着、关掉自动休眠（睡眠醒来不会补发，见 R-SCH-005）。每天开着的那天，日志里会有一条“当日开始”，没开的那天不算“被监测”，会让连续观察的天数重新数。
    - **每天至少给她发一条消息**：平台只允许在你最近一条消息之后约 22 小时内主动发，过了窗口她就不发（日志里是“被窗口抑制”），这一天算免责，但发不满。
@@ -554,7 +554,7 @@
 
 6. **（不需要做什么）配置键与设置键** 配置键：`proactive.user_active_min`（10，你和她刚聊完这么久内她不会冒出来）、`proactive.unanswered_after_min`（30，主动消息发出多久没回算“没回”）、`proactive.meal_window_min`（30，饭点消息在计划饭点前后多少分钟内）、`proactive.bedtime_lead_min`（[15, 60]，睡前晚安在入睡前多少分钟之间）。运行时设置：`proactive.enabled`、`proactive.daily_min`、`proactive.daily_max`、`engine.paused_until`（微信里的 `/主动 开|关`、`/主动 2-5`、`/暂停 <时长>`、`/恢复` 写这些，调度器每个 tick 重新读；也可以用 `uv run twin settings set proactive.enabled false` 关掉主动消息）。
 
-7. **已知的、等你反馈的限制（DECISIONS D-391）** 风格模型的训练数据没有“她先开口”的样例，用 `/后端 hybrid` 或 `style` 时开场的语气主要靠规划；觉得不像时先用 `/后端 deepseek` 对比。`twin chat --local`（终端）不启动调度器，主动消息只在 `twin run` 里有。
+7. **已知的、等你反馈的限制（DECISIONS D-431）** 风格模型的训练数据没有“她先开口”的样例，用 `/后端 hybrid` 或 `style` 时开场的语气主要靠规划；觉得不像时先用 `/后端 deepseek` 对比。`twin chat --local`（终端）不启动调度器，主动消息只在 `twin run` 里有。
 
 ## 第 11 轮 —— 微信里的指令全集、从聊天里学习（偏好对、纠正、每周整理 `[不要这样]`）与 DPO 导出
 
@@ -593,3 +593,49 @@
    - 请告诉我：得分、哪类题（真实记录 / 机器人对话 / `/记住` 的）错得多。
 
 6. **没有做、也不属于这一步的**：风格模型上的 DPO 训练与效果（第 14 轮）、M3 门槛（第 10 轮的主动消息评分）、`/评分`（第 10 轮）。
+
+## 第 12 轮 —— Windows 常驻、健康检查、告警、费用报告、加密备份与恢复、一键删除、回滚、稳定性与 M4 判定器
+
+> 沙箱是 Linux，没有 Windows、没有真实 SMTP 账号、没有 DeepSeek Key，也没有 7 天：监督进程、告警送达、备份与恢复、purge、稳定性报告和 M4 判定器都用合成数据、真实的本地 SMTP 服务器（aiosmtpd）、真实子进程和注入时钟验证（DECISIONS D-440 至 D-461）。**因此计划任务是否被真实的 Windows 接受、Job Object、Windows 通知、Tk 二维码窗口、真实邮箱、7 天无人值守观察、断网演练和 M4 的盲测都没有在沙箱里发生；`twin eval gate M4` 没有运行过，没有任何一条评估记录或门槛记录是伪造的。**
+
+1. **升级数据库并同步依赖**
+   - `uv sync --frozen`（新增依赖：`windows-toasts`，仅 Windows 安装；开发依赖 `aiosmtpd`）。
+   - `uv run twin db upgrade`（迁移 `0015_ops_tables`：新增 `health_snapshots`、`backup_records`，扩展 `alerts`，`eval_runs.kind` 增加 `stability`）。
+   - 新增配置键都有默认值，不改也能用：`ops.backup_postpone_max_h`（2）、`ops.smtp.security`（`auto`：端口 465 用隐式 TLS，其他用 STARTTLS）、`ops.alert_cooldown_min`（60）、`ops.health.*`（`interval_s` 60、`poll_stale_min` 5、`disk_min_gb` 5、`queue_max` 500、`queue_oldest_h` 24、`backup_stale_h` 36、`keep_days` 30、`llm_window_min` 15、`llm_error_rate` 0.5、`llm_min_calls` 10、`remind_h` 6）、`ops.supervise.*`（`backoff_start_s` 5、`backoff_max_s` 300、`stable_after_min` 30、`stop_grace_s` 40）。
+
+2. **在你的 Windows 电脑上安装（必须在真机上做，沙箱里没有 Windows）**
+   - PowerShell：`powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1`（会装 uv（若没有）、`uv sync --frozen`、运行 `twin setup` 向导、`twin db upgrade`、`twin service install`）。想马上启动加 `-StartNow`；已经配置过可加 `-SkipSetup`。
+   - `twin setup` 依次问：她同意的日期、DeepSeek Key（存凭据管理器）、告警邮件的 SMTP（服务器、端口、发件地址、收件地址、应用专用密码，并可发测试邮件）、她的 wxid、时区、紧急联系人（默认关；开启前屏幕上会原样显示将要发出的固定邮件）。
+   - 安装完成后看 `uv run twin service status`：应显示 `logon type: InteractiveToken`、`time limit: PT0S`、`runs on battery: yes`、`second instance: IgnoreNew`。**如果 `schtasks` 拒绝了任务定义，把完整的错误发给我**（任务 XML 由 `twin service install --print-xml` 可以看到）——这是沙箱里没法验证的一步。
+   - 想让断电或系统更新重启后无人值守恢复：需要 Windows 自动登录（`netplwiz` 或 Sysinternals Autologon）。风险：开机后任何接触这台电脑的人都直接进入你的账户，只在电脑放在可信的地方并开了 BitLocker 时才这么做；否则重启后要你手动登录一次（计划任务只在你登录后运行，因为凭据管理器、通知和二维码窗口都需要你的会话）。
+   - 电源计划：`uv run twin doctor` 的 `power-plan` 一行如果是警告，到“设置 → 系统 → 电源”把“睡眠”设成“从不”（程序运行时也会请求 Windows 不要睡眠）。
+
+3. **核对 Windows 上才有的东西（请告诉我结果）**
+   - `uv run twin doctor`：新增检查 `deepseek-net`（用已存的 Key 请求 `GET https://api.deepseek.com/user/balance`，看是否可达、Key 是否被接受、余额是否可用——**这个接口的返回形状是按官方文档写的，没有真实调用过**，如果显示奇怪请把原话发给我）、`gpu`（`nvidia-smi`）、`scheduled-task`、`power-plan`（`powercfg` 的输出在中文 Windows 上只取末尾两个十六进制数，没有在中文系统上验证）。
+   - Windows 通知：`uv run python -c "from twin.ops.notify import WindowsToastNotifier as T; T().notify('wechat-twin', '测试通知')"` 应在右下角弹出一条通知。`windows-toasts` 的调用方式（`WindowsToaster(...).show_toast(Toast([标题, 正文]))`）在沙箱里只用一个按该库形状写的替身模块测过，没有在真机上弹过；如果报错或没有弹出，把错误发给我。
+   - 登录失效的二维码窗口：应用在计划任务里运行时，让微信登录失效（例如在手机上把 ClawBot 退出登录，等下一次长轮询返回 -14）。电脑上应在几十秒内弹出一个置顶的小窗口显示新的二维码（需要验证数字时窗口里有输入框），手机扫码后应自动恢复，并收到“已恢复”的通知；二维码不会出现在邮件或通知里。`TkQrWindow` 没有在真机上跑过。
+   - `uv run twin health`、`uv run twin service status`：应用运行时 `twin health` 的 `process` 一行应是 `ok (supervised)`，`channel` 一行 `polling works`。
+
+4. **邮件**
+   - 用真实邮箱（Gmail 要“应用专用密码”，QQ/163 要授权码）跑一遍 `twin setup` 的测试邮件。端口 465 是隐式 TLS，587 是 STARTTLS，其他端口默认 STARTTLS（可用 `ops.smtp.security` 强制）。
+   - 登录失效、DeepSeek 连续失败、备份失败等告警的邮件里没有任何聊天内容、没有二维码；如果你在邮件里看到了任何不该有的内容，请告诉我。
+   - 紧急联系人：`twin setup` 的最后一步默认关闭。开启后只有 `crisis_detected` 才会给那个邮箱发一封固定模板的邮件（只有时间），同一次危机 12 小时内只发一封。请自己决定要不要开、告诉对方这封邮件是什么。
+
+5. **备份与恢复（先在一份无关紧要的数据上演练一遍）**
+   - `uv run twin backup now`、`uv run twin backup list`、`uv run twin backup verify <文件>`；备份在 `data\backups\`，每天当地 `ops.backup_hour_local` 点（默认 4 点）自动做，引擎正在发送时最多顺延 2 小时。
+   - 异地副本：把 `ops.backup_mirror_dir` 设成一个**已存在**的文件夹（外接盘或网络位置）。拔掉盘再 `twin backup now`：本地备份照常成功，并收到“异地备份目录不可用”的告警；插回后下一次备份恢复。
+   - 恢复：`uv run twin service stop`，然后 `uv run twin backup restore <文件>`（先问一遍，会先把现有数据备份成 `pre-restore-*.bak.enc`），再 `uv run twin service start`。恢复后向量库可能和数据库差一点点，命令会列出问题和修复命令（`twin retrieval rebuild` 等）。
+   - 密钥轮换后（`uv run twin secrets rotate-db-key`）旧备份仍能恢复；退役的旧密钥在没有任何保留备份和数据引用它之后才会自动从凭据管理器删除。
+
+6. **一键删除（`twin purge`）——只在确实要删的时候做**
+   - 先 `uv run twin service stop`。`uv run twin purge --all` 先列出将删除的内容与数量，再要你**键入**“删除她的全部数据”；没有跳过确认的参数。它不碰你的导出目录（`paths.export_dir`）和配置文件，AutoDL 上如果还有实例请到控制台确认已释放。`--training-only` 只删训练集、训练包、本地风格模型文件，确认短语是“删除训练数据”。
+   - 删除之后任何残留的备份都无法解密（所有数据库密钥都已删除）。
+
+7. **7 天无人值守观察、断网演练、新的盲测，然后判 M4（只有这样 M4 才可能通过）**
+   - 安装完成后让它在计划任务里连续跑 7 天，不要手动 `twin run`（手动启动的进程会让“全部由计划任务启动”这一条不过）；中途只靠监督进程自己重启。
+   - 观察期内做一次断网演练：`uv run twin ops drill network` 会打印步骤——拔网线或关 Wi-Fi 15 分钟再恢复；断网后 5–6 分钟应弹出“微信长轮询中断”的 Windows 通知（邮件会在网络恢复后补发）。
+   - 观察期内让学习和增量导入各成功一次：给机器人几次 `/不像`，等每周整理（或 `twin persona rules consolidate --foreground`）；用 `/导入 <目录>` 或 `twin import` 导入新记录。
+   - 观察期末做一次**新的**盲测（新的上下文，有效判断 ≥ 50 对，默认后端）：`uv run twin eval blind`（见第 09b 轮的步骤），猜对率点估计要 ≤ 60%。
+   - 然后：`uv run twin eval stability --days 7`（看每一项：连续运行时长、重启次数与原因、长轮询中断、告警延迟），再 `uv run twin eval gate M4`。没过就留在这一轮改进，不要降门槛；请把输出发给我。
+
+8. **没有做、也不属于这一步的**：llama.cpp 的 CUDA 运行库检查与 `llama-server` 的健康检查（第 14 轮，已留好 `HealthCollector.register_probe`）；M3 门槛（第 10 轮）；M5（第 14 轮）。

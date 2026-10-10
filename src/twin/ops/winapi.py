@@ -30,6 +30,11 @@ PBT_APMRESUMESUSPEND = 0x0007
 PBT_APMRESUMEAUTOMATIC = 0x0012
 TRUE = 1
 
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
+PROCESS_SET_QUOTA = 0x0100
+PROCESS_TERMINATE = 0x0001
+
 CtrlHandler = Callable[[int], bool]
 WindowHandler = Callable[[int, int, int], bool]
 
@@ -71,6 +76,25 @@ class Win32(Protocol):
         """``SendMessageW``: deliver a message to a window and wait for its handler."""
         ...
 
+    def create_kill_on_close_job(self) -> int | None:
+        """A job object whose processes are all ended when its last handle is closed.
+
+        ``None`` if the job could not be made or configured.
+        """
+        ...
+
+    def current_process_handle(self) -> int:
+        """The pseudo handle of this process (usable with :meth:`assign_to_job`)."""
+        ...
+
+    def open_process(self, pid: int) -> int | None:
+        """A handle of process ``pid`` that may be put in a job; ``None`` if it cannot be opened."""
+        ...
+
+    def assign_to_job(self, job: int, process: int) -> bool:
+        """``AssignProcessToJobObject``."""
+        ...
+
 
 if sys.platform == "win32":  # pragma: win32-only
     import ctypes
@@ -93,6 +117,45 @@ if sys.platform == "win32":  # pragma: win32-only
             ("lpszClassName", wintypes.LPCWSTR),
         )
 
+    class _IoCounters(ctypes.Structure):
+        """``IO_COUNTERS``."""
+
+        _fields_ = (
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        )
+
+    class _BasicLimits(ctypes.Structure):
+        """``JOBOBJECT_BASIC_LIMIT_INFORMATION``."""
+
+        _fields_ = (
+            ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+            ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.c_size_t),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        )
+
+    class _ExtendedLimits(ctypes.Structure):
+        """``JOBOBJECT_EXTENDED_LIMIT_INFORMATION``."""
+
+        _fields_ = (
+            ("BasicLimitInformation", _BasicLimits),
+            ("IoInfo", _IoCounters),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        )
+
     class RealWin32:
         """ctypes implementation backed by kernel32."""
 
@@ -109,6 +172,21 @@ if sys.platform == "win32":  # pragma: win32-only
             self._handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
             self._k32.SetConsoleCtrlHandler.argtypes = [self._handler_type, wintypes.BOOL]
             self._k32.SetConsoleCtrlHandler.restype = wintypes.BOOL
+            self._k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+            self._k32.CreateJobObjectW.restype = wintypes.HANDLE
+            self._k32.SetInformationJobObject.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+            ]
+            self._k32.SetInformationJobObject.restype = wintypes.BOOL
+            self._k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+            self._k32.AssignProcessToJobObject.restype = wintypes.BOOL
+            self._k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            self._k32.OpenProcess.restype = wintypes.HANDLE
+            self._k32.GetCurrentProcess.argtypes = []
+            self._k32.GetCurrentProcess.restype = wintypes.HANDLE
             self._callbacks: dict[object, object] = {}  # keep ctypes callbacks alive
             self._u32: ctypes.WinDLL | None = None
             self._wndproc_type: Any = None
@@ -258,6 +336,35 @@ if sys.platform == "win32":  # pragma: win32-only
 
         def send_message(self, hwnd: int, message: int, wparam: int, lparam: int) -> int:
             return int(self._user32().SendMessageW(hwnd, message, wparam, lparam))
+
+        # ------------------------------------------------------------- job objects
+
+        def create_kill_on_close_job(self) -> int | None:
+            job = self._k32.CreateJobObjectW(None, None)
+            if not job:
+                return None
+            limits = _ExtendedLimits()
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            ok = self._k32.SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                ctypes.byref(limits),
+                ctypes.sizeof(limits),
+            )
+            if not ok:
+                self._k32.CloseHandle(job)
+                return None
+            return int(job)
+
+        def current_process_handle(self) -> int:
+            return int(self._k32.GetCurrentProcess())
+
+        def open_process(self, pid: int) -> int | None:
+            handle = self._k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+            return int(handle) if handle else None
+
+        def assign_to_job(self, job: int, process: int) -> bool:
+            return bool(self._k32.AssignProcessToJobObject(job, process))
 
     def load_win32() -> Win32:
         """The real Win32 binding."""

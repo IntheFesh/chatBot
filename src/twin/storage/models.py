@@ -46,6 +46,8 @@ NAMING_CONVENTION = {
 
 JOB_STATUSES = ("pending", "running", "done", "failed", "cancelled")
 ALERT_SEVERITIES = ("info", "warning", "critical")
+ALERT_KINDS = ("alert", "recovery")
+DELIVERY_STATES = ("none", "pending", "sent", "failed")
 LEDGER_PROVIDERS = ("deepseek", "style_model", "other")
 LEDGER_ACCOUNTS = ("daily", "one_time")
 
@@ -184,9 +186,36 @@ class Alert(TimestampMixin, Base):
     dedup_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notified_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # round 12 (migration 0015): what became of the notification (R-OPS-004).  ``kind`` is the
+    # alert itself or the "recovered" notice that closes it; ``suppressed`` marks a repeat that
+    # the cooldown held back; ``toast_state`` / ``mail_state`` say whether a channel still has to
+    # deliver (``pending``), did (``sent``), gave up (``failed``) or is not wanted (``none``).
+    kind: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="alert", server_default="alert"
+    )
+    suppressed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    toast_state: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="none", server_default="none"
+    )
+    mail_state: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="none", server_default="none"
+    )
+    toast_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    mail_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    mail_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    mail_next_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    mail_error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
 
     __table_args__ = (
         CheckConstraint("severity IN ('info', 'warning', 'critical')", name="severity"),
+        CheckConstraint("kind IN ('alert', 'recovery')", name="kind"),
+        CheckConstraint("toast_state IN ('none', 'pending', 'sent', 'failed')", name="toast_state"),
+        CheckConstraint("mail_state IN ('none', 'pending', 'sent', 'failed')", name="mail_state"),
         Index("ix_alerts_category", "category", "created_at"),
         Index("ix_alerts_dedup_key", "dedup_key"),
     )

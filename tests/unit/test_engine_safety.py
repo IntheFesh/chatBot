@@ -84,7 +84,7 @@ class Raised:
 def alerts(services: Services) -> list[Raised]:
     with services.db.session() as session:
         found = session.scalars(
-            select(Alert).where(Alert.category.in_(("crisis", "emergency_contact")))
+            select(Alert).where(Alert.category.in_(("crisis_detected", "emergency_contact")))
         )
         return [Raised(a.category, a.severity, a.title, a.detail) for a in found]
 
@@ -182,7 +182,7 @@ async def test_the_alert_says_that_it_happened_and_never_what_was_said(
     api.post(API).mock(return_value=ok(content=VERDICT))
     await handler(services, runtime).handle([SAID])
     (alert,) = alerts(services)
-    assert alert.category == "crisis" and alert.severity == "critical"
+    assert alert.category == "crisis_detected" and alert.severity == "critical"
     assert alert.detail is not None and alert.detail["severity"] == "high"
     assert alert.detail["judged"] is True and alert.detail["contact_notified"] is False
     blob = f"{alert.title} {alert.detail}"
@@ -276,7 +276,7 @@ async def test_a_mail_problem_never_stops_the_answer_to_the_user(
     broken = await handler(services, runtime, RecordingNotifier(fail=True)).handle([SAID])
     assert broken is not None and broken.bubbles and not broken.contact_notified
     categories = sorted(a.category for a in alerts(services))
-    assert categories == ["crisis", "emergency_contact"]
+    assert categories == ["crisis_detected", "emergency_contact"]
     nobody = await handler(services, runtime, None).handle([SAID])
     assert nobody is not None and not nobody.contact_notified
     assert sorted(a.category for a in alerts(services)).count("emergency_contact") == 2

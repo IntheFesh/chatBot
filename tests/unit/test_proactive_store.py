@@ -231,7 +231,7 @@ def test_ratings_are_scores_of_one_to_five_with_a_sealed_note(
 
 def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_path: Path) -> None:
     path = tmp_path / "m.db"
-    migrate.upgrade(path, "0013_preference_pairs")
+    migrate.upgrade(path, "0015_ops_tables")
     connection = sqlite3.connect(path)
     try:
         before = {
@@ -239,8 +239,8 @@ def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_p
         }
     finally:
         connection.close()
-    migrate.upgrade(path, "0014_proactive_tables")
-    assert "0014_proactive_tables" in migrate.revision_history()
+    migrate.upgrade(path, "0016_proactive_tables")
+    assert "0016_proactive_tables" in migrate.revision_history()
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -274,7 +274,7 @@ def test_round_10_migration_adds_the_tables_the_columns_and_the_audit_kind(tmp_p
 def test_the_migration_keeps_the_evaluation_items_of_the_runs_it_rebuilds(tmp_path: Path) -> None:
     """The ``eval_runs`` table is made again; its children must not go with the old one."""
     path = tmp_path / "m.db"
-    migrate.upgrade(path, "0013_preference_pairs")
+    migrate.upgrade(path, "0015_ops_tables")
     connection = sqlite3.connect(path)
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -306,11 +306,51 @@ def test_the_migration_keeps_the_evaluation_items_of_the_runs_it_rebuilds(tmp_pa
         assert "REFERENCES eval_runs" in sql  # the children still point at the new table
     finally:
         connection.close()
-    migrate.downgrade(path, "0013_preference_pairs")
+    migrate.downgrade(path, "0015_ops_tables")
     connection = sqlite3.connect(path)
     try:
         assert connection.execute("SELECT id FROM eval_items").fetchall() == [("i1",)]
         columns = {row[1] for row in connection.execute("PRAGMA table_info(lifeline_events)")}
         assert not {"shared_at", "shared_reply_id"} & columns
+    finally:
+        connection.close()
+
+
+def test_the_migration_keeps_the_kind_that_round_12_added_both_ways(tmp_path: Path) -> None:
+    """``stability`` is in the constraint before this migration: it stays, up and down."""
+    path = tmp_path / "m.db"
+    migrate.upgrade(path, "0015_ops_tables")
+    stamps = "'2026-03-08', '2026-03-08'"
+
+    def insert(connection: sqlite3.Connection, run_id: str, kind: str) -> None:
+        connection.execute(
+            "INSERT INTO eval_runs (id, kind, status, mode, milestone, verdict, backends, "
+            f"batch_ids, params, summary, created_at, updated_at) VALUES ('{run_id}', '{kind}', "
+            f"'done', NULL, NULL, NULL, '[]', '[]', '{{}}', '{{}}', {stamps})"
+        )
+
+    connection = sqlite3.connect(path)
+    try:
+        insert(connection, "s1", "stability")
+        connection.commit()
+    finally:
+        connection.close()
+    migrate.upgrade(path)
+    connection = sqlite3.connect(path)
+    try:
+        insert(connection, "a1", "proactive_audit")
+        insert(connection, "s2", "stability")  # still accepted
+        connection.commit()
+        kinds = {row[0] for row in connection.execute("SELECT kind FROM eval_runs")}
+        assert kinds == {"stability", "proactive_audit"}
+    finally:
+        connection.close()
+    migrate.downgrade(path, "0015_ops_tables")
+    connection = sqlite3.connect(path)
+    try:
+        assert {row[0] for row in connection.execute("SELECT id FROM eval_runs")} == {"s1", "s2"}
+        with pytest.raises(sqlite3.IntegrityError):
+            insert(connection, "a2", "proactive_audit")
+        insert(connection, "s3", "stability")
     finally:
         connection.close()

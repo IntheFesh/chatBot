@@ -12,7 +12,7 @@ import pytest
 from tests.support.clock import ManualClock
 from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
-from twin.ops.alerts import DbAlertSink
+from twin.ops.alerts import AlertService
 from twin.ops.jobs import (
     BatchNotFoundError,
     BatchTooLargeError,
@@ -66,7 +66,7 @@ def make_worker(
     **options: Any,
 ) -> Worker:
     options.setdefault("offpeak", AlwaysOffPeak())
-    options.setdefault("alerts", DbAlertSink(db, clock))
+    options.setdefault("alerts", AlertService(db, clock))
     return Worker(queue, registry, clock, **options)
 
 

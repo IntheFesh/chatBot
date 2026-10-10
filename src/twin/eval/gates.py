@@ -149,7 +149,11 @@ class GateRegistry:
 default_registry = GateRegistry()
 
 # Modules that register judges on import; each round that owns a milestone appends its module.
-JUDGE_MODULES: tuple[str, ...] = ("twin.eval.gates", "twin.eval.proactive_gate")
+JUDGE_MODULES: tuple[str, ...] = (
+    "twin.eval.gates",
+    "twin.eval.proactive_gate",
+    "twin.ops.gate_m4",
+)
 
 
 def gate_judge(milestone: str) -> Callable[[GateJudge], GateJudge]:

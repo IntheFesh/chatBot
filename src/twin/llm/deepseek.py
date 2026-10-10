@@ -49,6 +49,7 @@ from twin.llm.errors import (
     RetriesExhaustedError,
     StructuredOutputError,
 )
+from twin.llm.health import LlmHealth
 from twin.llm.images import (
     ImageInput,
     PreparedImage,
@@ -306,6 +307,7 @@ class DeepSeekClient:
         redactor: Redactor = redact,
         save_calibration: Callable[[TokenEstimator], None] | None = None,
         deadline_slack_s: float = DEADLINE_SLACK_S,
+        health: LlmHealth | None = None,
     ) -> None:
         self._config = config
         self._pricing = pricing
@@ -315,7 +317,11 @@ class DeepSeekClient:
         self._alerts = alerts
         self._capabilities = capabilities or (lambda: DOCUMENTED)
         self._breaker = breaker or CircuitBreaker(clock)
+        self._health = health
         self._breaker.listen(on_open=self._on_circuit_open)
+        if health is not None:
+            self._breaker.listen(on_open=lambda _failures: health.breaker_opened())
+            self._breaker.listen(on_close=health.breaker_closed)
         self._estimator = estimator or TokenEstimator()
         self._cache = cache_monitor
         self._budget = budget
@@ -575,8 +581,10 @@ class DeepSeekClient:
                     raise
                 if not failure.retryable:
                     self._breaker.record_success()  # the service answered
+                    self._note_attempt(failure.kind not in (FailureKind.AUTH, FailureKind.BALANCE))
                     self._raise_for(failure)
                 self._breaker.record_failure()
+                self._note_attempt(False)
                 log.warning(
                     "llm_attempt_failed",
                     purpose=purpose.value,
@@ -595,6 +603,7 @@ class DeepSeekClient:
                 )
                 continue
             self._breaker.record_success()
+            self._note_attempt(True)
             latency_ms = max(0, round((self._clock.monotonic() - started) * 1000))
             return await self._finish(
                 response=response,
@@ -609,6 +618,11 @@ class DeepSeekClient:
                 layout=layout,
                 image_count=image_count,
             )
+
+    def _note_attempt(self, ok: bool) -> None:
+        """Tell the health record how an attempt ended (R-OPS-003)."""
+        if self._health is not None:
+            self._health.record(ok)
 
     def _failure_of(self, exc: BaseException) -> Failure | None:
         secrets = (self._secret,) if self._secret else ()

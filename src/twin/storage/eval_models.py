@@ -2,8 +2,9 @@
 
 ``eval_runs``
     one row per evaluation: a blind test (``blind``), a memory test (``memory``), a style
-    report that was kept (``style``), the audit of the proactive messages
-    (``proactive_audit``, round 10) or the verdict of a milestone gate (``gate``).  Plain
+    report that was kept (``style``), a stability report (``stability``, round 12), the audit of
+    the proactive messages (``proactive_audit``, round 10) or the verdict of a milestone gate
+    (``gate``).  Plain
     columns only - names, counts, numbers and ids, never message text: the backends compared,
     the batch ids of the one-time batches that generate the replies (R-LLM-014), the parameters
     the run was drawn with (seed, size, hold-out cut-off) and the summary numbers.  A gate row
@@ -45,7 +46,7 @@ from twin.storage.crypto import SealedBlob
 from twin.storage.models import Base, TimestampMixin
 from twin.storage.types import UTCDateTime, encrypted_column, sealed_json
 
-RUN_KINDS = ("blind", "style", "memory", "gate", "proactive_audit")
+RUN_KINDS = ("blind", "style", "memory", "gate", "stability", "proactive_audit")
 RUN_STATUSES = ("planned", "running", "done", "cancelled", "failed")
 RUN_MODES = ("holdout", "live")
 VERDICTS = ("passed", "failed", "insufficient")

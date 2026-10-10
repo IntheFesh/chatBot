@@ -222,7 +222,7 @@ def test_the_memory_test_is_planned_asked_reviewed_and_decides_m2(
 def test_the_gate_commands_exit_with_0_1_and_2(cli_world: World) -> None:
     code, out, screen = run("gate", "M3")  # wired by round 10: no observed days yet
     assert code == 1 and "还差 7 天" in screen and "未通过（样本不足）" in screen
-    assert run("gate", "M4")[0] == 2 and run("gate", "M5")[0] == 2
+    assert run("gate", "M4")[0] == 1 and run("gate", "M5")[0] == 2  # M4 is judged since round 12
     assert run("gate", "M5", "--check")[0] == 2  # the stage is not reached: --check says so too
     code, _, screen = run("gate", "M1")
     assert (

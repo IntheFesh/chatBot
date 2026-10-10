@@ -322,6 +322,35 @@ class SmtpConfig(_Section):
     port: int = Field(default=465, ge=1, le=65535)
     user: str | None = None
     to: str | None = None
+    # auto: implicit TLS on port 465, STARTTLS on every other port (round 12, R-OPS-004)
+    security: Literal["auto", "ssl", "starttls"] = "auto"
+
+
+class HealthConfig(_Section):
+    """Thresholds of the health check that runs every minute (round 12, R-OPS-003)."""
+
+    interval_s: float = Field(default=60, gt=0)  # how often the monitor looks
+    poll_stale_min: float = Field(default=5, gt=0)  # no successful long poll for this long: bad
+    disk_min_gb: float = Field(default=5, gt=0)  # free disk space below this: alert
+    queue_max: int = Field(default=500, ge=1)  # waiting jobs above this: alert
+    queue_oldest_h: float = Field(default=24, gt=0)  # a waiting job older than this: alert
+    backup_stale_h: float = Field(default=36, gt=0)  # newest backup older than this: alert
+    keep_days: int = Field(default=30, ge=1)  # how long health snapshots are kept
+    llm_window_min: float = Field(default=15, gt=0)  # the span DeepSeek errors are counted over
+    llm_error_rate: float = Field(default=0.5, gt=0, le=1)  # failed share of calls that is bad
+    llm_min_calls: int = Field(default=10, ge=1)  # fewer calls than this say nothing
+    remind_h: float = Field(default=6, gt=0)  # a problem that goes on is announced again after this
+
+
+class SuperviseConfig(_Section):
+    """``twin supervise``: restarting ``twin run`` (round 12, R-OPS-001)."""
+
+    backoff_start_s: float = Field(default=5, gt=0)  # first wait before a restart
+    backoff_max_s: float = Field(default=300, gt=0)  # the wait doubles up to this
+    stable_after_min: float = Field(default=30, gt=0)  # running this long resets the wait
+    stop_grace_s: float = Field(
+        default=40, gt=0
+    )  # time `twin run` gets to stop before it is killed
 
 
 class OpsConfig(_Section):
@@ -329,7 +358,11 @@ class OpsConfig(_Section):
     backup_keep_daily: int = Field(default=14, ge=0)
     backup_keep_weekly: int = Field(default=8, ge=0)
     backup_mirror_dir: str | None = None
+    backup_postpone_max_h: float = Field(default=2, ge=0)  # waiting for a quiet moment, at most
     smtp: SmtpConfig = Field(default_factory=SmtpConfig)
+    alert_cooldown_min: float = Field(default=60, ge=0)  # at most one notice per kind in this time
+    health: HealthConfig = Field(default_factory=HealthConfig)
+    supervise: SuperviseConfig = Field(default_factory=SuperviseConfig)
 
 
 class TunnelConfig(_Section):

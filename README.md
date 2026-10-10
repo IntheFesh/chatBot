@@ -55,6 +55,29 @@ uv run twin run              # Ctrl+C 优雅退出
 
 全局选项：`--config <文件>`、`--set 键.路径=值`（可重复）、`--log-level`。配置优先级：命令行 > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config/config.yaml` > 默认值。
 
+## 开机自启与运维（Windows，第 12 轮）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1    # uv、依赖、twin setup 向导、迁移、计划任务
+powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall.ps1  # 停止并移除计划任务（数据不动）
+```
+
+计划任务在你登录 Windows 时启动 `twin supervise`（登录类型 `InteractiveToken`：凭据管理器、通知和二维码窗口都需要你的会话），它把 `twin run` 作为子进程，崩溃后按 5 秒到 5 分钟的退避重启。断电或系统更新重启后想无人值守恢复需要开启 Windows 自动登录（有风险，`twin service install` 会说明）。
+
+| 命令 | 作用 | 进程类别 |
+| --- | --- | --- |
+| `twin setup` | 首次配置向导：她的同意日期、DeepSeek Key、告警邮件（SMTP）、wxid、时区、紧急联系人（默认关） | 轻量修改 |
+| `twin service install\|uninstall\|start\|stop\|status` | 计划任务的注册、移除、启动、优雅停止（先请它们结束，宽限后才强制）与状态 | 独占 / 轻量修改 / 只读 |
+| `twin supervise` | 监督进程本体（计划任务运行它） | 独占（持有 `supervisor` 锁） |
+| `twin health [--json]` | 通道、DeepSeek、风格模型、磁盘、任务队列、备份、预算 | 只读 |
+| `twin cost report [--month YYYY-MM] [--json]` | 按日、用途、模型的费用，缓存命中率，高峰占比，与预算对比 | 只读 |
+| `twin backup now\|list\|verify <文件>\|restore <文件>` | 加密备份（每天自动，14 日 + 8 周）、校验、恢复（恢复前先备份现有数据） | 轻量修改 / 只读 / 独占 |
+| `twin purge --all\|--training-only` | 她要求时一键彻底删除（要键入确认短语；没有跳过确认的参数） | 独占 |
+| `twin rollback profile\|persona\|prompt-template\|style-model` | 回到旧版本，并写审计记录 | 轻量修改 |
+| `twin eval stability --days 7`、`twin ops drill network`、`twin eval gate M4` | 稳定性报告、断网演练步骤、M4 门槛 | 轻量修改 / 只读 |
+
+告警（登录失效、DeepSeek 连续失败、预算、备份失败、磁盘不足……）同时走 Windows 通知和邮件，邮件里没有任何聊天内容，二维码只在本机弹窗里出现。
+
 ## 开发
 
 ```powershell

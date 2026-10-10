@@ -11,6 +11,7 @@ from tests.support.ingest import make_export, run_import
 from tests.support.synth_chat import ChatSpec, append_texts, build_chat
 from twin.ingest.hooks import HookContext, load_hooks
 from twin.ingest.runs import get_run
+from twin.ops.alerts import canonical_category
 from twin.ops.jobs import HandlerRegistry, JobQueue, Worker
 from twin.profile.api import load_profile
 from twin.profile.builder import rebuild
@@ -190,7 +191,7 @@ def alerts(services: Services) -> list[tuple[str, str | None]]:
 def test_a_daytime_sleep_raises_an_alert_without_chat_content(services: Services) -> None:
     build_chat(services, ChatSpec(zone="Asia/Shanghai", days=30))
     run_rebuild(services, "live", "manual", False)
-    assert alerts(services) == [(TIMEZONE_ALERT, f"{TIMEZONE_ALERT}-live")]
+    assert alerts(services) == [(canonical_category(TIMEZONE_ALERT), f"{TIMEZONE_ALERT}-live")]
     with services.db.session() as session:
         detail = session.scalars(select(Alert)).one().detail
     assert detail is not None and "source_timezone" in detail["warnings"][0]

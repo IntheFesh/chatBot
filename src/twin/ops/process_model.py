@@ -118,7 +118,10 @@ def _fail(message: str, code: ExitCode) -> typer.Exit:
 
 
 def stop_hint() -> str:
-    return "stop the application first (Ctrl+C in its window; `twin service stop` once installed)"
+    return (
+        "stop the application first: run `twin service stop` "
+        "(or press Ctrl+C in the window where `twin run` is open)"
+    )
 
 
 def _guard_locks(

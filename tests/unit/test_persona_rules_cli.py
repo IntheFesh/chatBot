@@ -35,6 +35,9 @@ runner = CliRunner()
 def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: ManualClock) -> Path:
     path = tmp_path / "cli-data"
     monkeypatch.setenv("TWIN_PATHS__DATA_DIR", str(path))
+    # The CLI runs on the real clock and the consolidation is an off-peak job: without the
+    # discount there is nothing to wait for, so the test does not depend on the time of day.
+    monkeypatch.setenv("TWIN_PRICING__OFFPEAK_MULTIPLIER", "1.0")
     result = runner.invoke(app, ["db", "upgrade"])
     assert result.exit_code == 0, result.output
     return path

@@ -1,28 +1,33 @@
 """Round 10: proactive_candidates, proactive_log, ratings and the "shared" mark of the life line.
 
-Also widens ``eval_runs.kind`` by ``proactive_audit`` (the audit of ``twin eval proactive``).  A
-CHECK constraint cannot be changed in SQLite, so the table is made again; its children
-(``eval_items``, which reference it with ``ON DELETE CASCADE``) would be deleted with the old
-table while foreign keys are on, so their rows are kept aside and put back.
+Also widens ``eval_runs.kind`` by ``proactive_audit`` (the audit of ``twin eval proactive``; the
+column was 12 wide since round 12's ``stability``, now 16).  A CHECK constraint cannot be changed
+in SQLite, so the table is made again; its children (``eval_items``, which reference it with
+``ON DELETE CASCADE``) would be deleted with the old table while foreign keys are on, so their rows
+are kept aside and put back.  The kinds the constraint holds are read from the table itself, so a
+kind another round added is kept (as round 12's migration does).
 
-Revision ID: 0014_proactive_tables
-Revises: 0013_preference_pairs
+Revision ID: 0016_proactive_tables
+Revises: 0015_ops_tables
 Create Date: 2026-10-09
 """
 
+import re
 from collections.abc import Sequence
 from datetime import datetime
 
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0014_proactive_tables"
-down_revision: str | None = "0013_preference_pairs"
+revision: str = "0016_proactive_tables"
+down_revision: str | None = "0015_ops_tables"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-OLD_KINDS = ("blind", "style", "memory", "gate")
-NEW_KINDS = (*OLD_KINDS, "proactive_audit")
+NEW_KIND = "proactive_audit"
+KIND_WIDTH = 16
+OLD_KIND_WIDTH = 12  # what round 12 left (``stability``); the table is narrowed back to it
+_KIND_LIST = re.compile(r"kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE)
 CANDIDATE_KINDS = ("followup", "greeting", "meal", "bedtime", "silence", "share", "edge")
 CANDIDATE_STATUSES = ("pending", "sent", "expired", "dropped", "declined", "superseded")
 LOG_KINDS = (*CANDIDATE_KINDS, "day")
@@ -40,11 +45,26 @@ def _timestamps() -> list[sa.Column[datetime]]:
     ]
 
 
-def _in_list(column: str, values: tuple[str, ...]) -> str:
+def _in_list(column: str, values: Sequence[str]) -> str:
     return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
 
-def _make_eval_runs(name: str, kinds: tuple[str, ...], kind_length: int) -> None:
+def _eval_kinds() -> list[str]:
+    """The kinds ``eval_runs`` accepts now, read from its table definition."""
+    row = (
+        op.get_bind()
+        .exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'eval_runs'"
+        )
+        .fetchone()
+    )
+    found = _KIND_LIST.search(str(row[0])) if row else None
+    if found is None:
+        raise RuntimeError("cannot read the kinds of eval_runs from its table definition")
+    return re.findall(r"'([^']+)'", found.group(1))
+
+
+def _make_eval_runs(name: str, kinds: Sequence[str], kind_length: int) -> None:
     op.create_table(
         name,
         sa.Column("id", sa.String(length=26), nullable=False),
@@ -75,7 +95,7 @@ def _make_eval_runs(name: str, kinds: tuple[str, ...], kind_length: int) -> None
     )
 
 
-def _rebuild_eval_runs(kinds: tuple[str, ...], kind_length: int) -> None:
+def _rebuild_eval_runs(kinds: Sequence[str], kind_length: int) -> None:
     """Make ``eval_runs`` again with another ``kind`` constraint, keeping rows and children."""
     bind = op.get_bind()
     bind.exec_driver_sql("CREATE TEMP TABLE _kept_eval_items AS SELECT * FROM eval_items")
@@ -185,12 +205,15 @@ def upgrade() -> None:
     op.add_column(
         "lifeline_events", sa.Column("shared_reply_id", sa.String(length=26), nullable=True)
     )
-    _rebuild_eval_runs(NEW_KINDS, 16)
+    kinds = _eval_kinds()
+    if NEW_KIND not in kinds:
+        kinds.append(NEW_KIND)
+    _rebuild_eval_runs(kinds, KIND_WIDTH)
 
 
 def downgrade() -> None:
     op.execute("DELETE FROM eval_runs WHERE kind = 'proactive_audit'")
-    _rebuild_eval_runs(OLD_KINDS, 8)
+    _rebuild_eval_runs([kind for kind in _eval_kinds() if kind != NEW_KIND], OLD_KIND_WIDTH)
     with op.batch_alter_table("lifeline_events") as batch:
         batch.drop_column("shared_reply_id")
         batch.drop_column("shared_at")
