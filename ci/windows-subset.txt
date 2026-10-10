@@ -3,13 +3,3 @@
 # Pushing a change to this file runs exactly these tests on windows-latest
 # (a few minutes instead of the 50 minutes of the full job). Keep it empty
 # when not debugging: an empty selection runs nothing.
-tests/unit/test_doctor.py
-tests/unit/test_ops_doctor.py
-tests/unit/test_ops_backup_cli.py
-tests/unit/test_ops_restore.py
-tests/unit/test_ops_purge.py
-tests/unit/test_ops_service.py
-tests/unit/test_ops_supervise.py
-tests/unit/test_ops_windows.py
-tests/unit/test_llm_pricing.py
-tests/unit/test_ops_cli.py

@@ -95,9 +95,8 @@ class DoctorContext:
     platform: str = field(default_factory=lambda: sys.platform)
     http_transport: httpx.BaseTransport | None = None  # network checks use it when given
     runner: CommandRunner | None = None  # nvidia-smi, powercfg and schtasks go through it
-    calendar: PeakCalendar | None = (
-        None  # the holiday library to check (default: the installed one)
-    )
+    # the holiday library whose year coverage is checked (default: the installed one)
+    calendar: PeakCalendar | None = None
 
     def run(self, args: list[str]) -> CommandResult | None:
         """Run a program (no shell); ``None`` if it is not installed or does not answer."""
