@@ -270,7 +270,10 @@ class LlamaServerManager:
             raise ServeError(f"cannot start {self._spec.prefix[0]}: {exc}") from exc
         finally:
             stream.close()  # the child has its own handle; ours would lock the file on Windows
-        if self._job is not None and self._job.active:
+        if self._job is not None:
+            # ``assign`` opens a job that nobody has opened yet; off Windows it does nothing.  Not
+            # asking ``job.active`` first: a job handed over unopened would silently never
+            # protect the child (D-600).
             self._job.assign(process.pid)
         return process
 

@@ -261,6 +261,41 @@ async def test_a_local_port_taken_by_another_program_is_an_error_and_not_a_tunne
             )
 
 
+async def test_a_listener_is_noticed_before_the_bind_which_windows_would_let_through(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """asyncssh binds with SO_REUSEADDR; on Windows that lets a second listener share the port, so
+    the tunnel asks first whether something listens (the other process' tunnel, or a program)."""
+    asked: list[tuple[object, ...]] = []
+    original = asyncssh.SSHClientConnection.forward_local_port
+
+    async def spy(self: asyncssh.SSHClientConnection, *args: object, **kwargs: object) -> object:
+        asked.append(args)
+        return await original(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(asyncssh.SSHClientConnection, "forward_local_port", spy)
+    with socket.socket() as occupied:
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen(1)
+        port = int(occupied.getsockname()[1])
+
+        async def healthy() -> StyleHealth:
+            return StyleHealth(True, "ok")
+
+        manager = TunnelManager(
+            world.target,
+            local_port=port,
+            remote_port=world.remote.port,
+            clock=SystemClock(),
+            timings=FAST,
+            local_health=healthy,
+        )
+        async with running(manager):
+            await until(manager, TunnelState.EXTERNAL)
+        assert asked == []  # nothing was forwarded: the port was left alone
+
+
 async def test_a_tunnel_of_another_process_is_used_and_taken_over_when_it_goes(
     world: World,
 ) -> None:

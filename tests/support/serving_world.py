@@ -11,6 +11,7 @@ import dataclasses
 import hashlib
 import shlex
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.clock import SystemClock
 from twin.config.runtime import BACKEND_ACTIVE, BackendName
 from twin.services import Services
+from twin.serving.llamacpp import WINDOWS_BASE_FILES
 from twin.serving.runtime import LocalProgram, TokenizerSource
 from twin.serving.server import ServerTimings
 from twin.storage.training_models import ModelRegistryEntry
@@ -71,6 +73,13 @@ def install_wrapper(directory: Path, *options: str, tokenizer_json: Path | None 
     path = directory / "llama-server"
     path.write_text(f'#!/bin/sh\nexec {command} "$@"\n', encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    if sys.platform == "win32":
+        # The commands check the folder of the program for the files of a real Windows
+        # installation before they look at anything else.  The script cannot run there (the
+        # tests that start it are POSIX-only), but the ones that stop earlier, at the model file,
+        # must get past that check as they do on Linux.
+        for name in (*WINDOWS_BASE_FILES, "ggml-cpu-x64.dll"):
+            (directory / name).write_bytes(b"")
     return path
 
 

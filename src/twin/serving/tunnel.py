@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -53,6 +54,7 @@ UPTIME_COMMAND: Final = "cat /proc/uptime"
 STABLE_AFTER_S: Final = 60.0
 WATCH_S: Final = 5.0
 CLOSE_LIMIT_S: Final = 10.0
+PROBE_LIMIT_S: Final = 2.0
 
 
 class TunnelState(StrEnum):
@@ -207,6 +209,11 @@ class TunnelManager:
     async def _hold(self, connection: asyncssh.SSHClientConnection) -> str:
         """Hold a forward on ``connection`` until it breaks or the manager is stopped."""
         try:
+            if self._local_port and await _listening(LISTEN_HOST, self._local_port):
+                # Asked first and not left to ``bind``: asyncssh binds with SO_REUSEADDR, which on
+                # Windows lets a second listener share the port with the first (on Linux the bind
+                # fails), and two tunnels on one port is not "another process holds the tunnel".
+                raise OSError(errno.EADDRINUSE, f"{LISTEN_HOST}:{self._local_port} is listening")
             self._listener = await connection.forward_local_port(
                 LISTEN_HOST, self._local_port, REMOTE_HOST, self._remote_port
             )
@@ -288,6 +295,18 @@ class TunnelManager:
         except RemoteError:
             return None
         return parse_uptime(done.stdout) if done.ok else None
+
+
+async def _listening(host: str, port: int) -> bool:
+    """Does something accept connections on ``host:port``?"""
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), PROBE_LIMIT_S)
+    except (OSError, TimeoutError):
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
 
 
 async def _bounded(waiting: Awaitable[object]) -> None:

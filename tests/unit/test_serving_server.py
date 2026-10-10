@@ -393,6 +393,29 @@ async def test_the_child_is_put_in_the_job_object_when_there_is_one(tmp_path: Pa
         assert api.jobs[next(iter(api.jobs))] == [9000 + pid]
 
 
+async def test_a_job_nobody_has_opened_yet_is_opened_for_the_child(tmp_path: Path) -> None:
+    """The manager must not skip the job because ``job.active`` is still false: ``assign`` opens
+    it, and a skipped assignment would leave the child alive when the application is killed."""
+    api = FakeWin32()
+    job = ProcessJob(api, platform="win32")
+    assert not job.active
+    manager, _, _ = make_manager(tmp_path, job=job)
+    async with running(manager):
+        await until_state(manager, ServerState.READY)
+        pid = manager.snapshot().pid
+        assert pid is not None and job.active and api.open_processes == [pid]
+        assert api.jobs[next(iter(api.jobs))] == [9000 + pid]
+
+
+async def test_a_job_off_windows_leaves_the_child_alone(tmp_path: Path) -> None:
+    api = FakeWin32()
+    job = ProcessJob(api, platform="linux")
+    manager, _, _ = make_manager(tmp_path, job=job)
+    async with running(manager):
+        await until_state(manager, ServerState.READY)
+        assert not job.active and api.open_processes == [] and api.jobs == {}
+
+
 async def test_stop_before_the_first_start_ends_the_loop(tmp_path: Path) -> None:
     manager, _, _ = make_manager(tmp_path)
     await manager.stop()
