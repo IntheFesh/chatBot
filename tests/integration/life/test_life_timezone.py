@@ -22,6 +22,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -99,4 +100,5 @@ async def test_the_zone_switch_at_noon_neither_greets_twice_nor_wakes_her(
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

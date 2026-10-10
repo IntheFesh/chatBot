@@ -36,6 +36,7 @@ from tests.integration.life.conftest import WorldFactory
 from tests.support.embedding import HashingBackend
 from tests.support.ingest import make_export
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_bot_text_stays_out,
     assert_clean_screen,
     assert_never_in_deep_sleep,
@@ -60,7 +61,7 @@ pytestmark = pytest.mark.integration
 FRIDAY = date(2026, 10, 9)
 CHICAGO, SHANGHAI = "America/Chicago", "Asia/Shanghai"
 SOON = 2.0  # the state watcher looks every two seconds (R-ARCH-006)
-WIFE = "wxid_synthetic_her"
+WIFE = "synthetic-her"
 
 
 def state_version(services: Services) -> int:
@@ -147,6 +148,7 @@ async def test_a_persona_edit_in_another_process_is_in_the_next_reply_within_two
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -201,6 +203,7 @@ async def test_a_zone_switched_in_another_process_is_noticed_and_the_chat_switch
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -389,4 +392,5 @@ async def test_an_exclusive_command_is_refused_while_a_lock_is_held_and_nothing_
     assert database.is_file() and count_messages(world.services) == messages
     assert_clean_screen(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

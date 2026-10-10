@@ -32,7 +32,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest import mock
 from zoneinfo import ZoneInfo
 
@@ -84,6 +84,9 @@ from twin.storage.media import MediaKind
 from twin.storage.models import Alert, Job
 from twin.storage.profile_models import ActivityModelVersion
 from twin.storage.settings_store import put_setting
+
+if TYPE_CHECKING:  # life_checks imports this module
+    from tests.support.life_checks import IsolationSnapshot
 
 USER_WORDS = re.compile(r"对方这一轮说的话：\s*(.*)\Z", re.DOTALL)
 CHICAGO = "America/Chicago"
@@ -451,6 +454,7 @@ class LifeWorld:
     pictures: int = 0
     before_start: set[asyncio.Task[Any]] = field(default_factory=set)
     retired: list[Services] = field(default_factory=list)
+    real_data: IsolationSnapshot | None = None  # her real messages as the story begins (fixture)
 
     # ---- building it ------------------------------------------------------------------
 

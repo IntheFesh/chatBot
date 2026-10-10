@@ -23,6 +23,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_proactive_rules,
@@ -94,4 +95,5 @@ async def test_the_window_closes_suppresses_her_and_opens_again(make_world: Worl
     assert_proactive_rules(world, FRIDAY, FRIDAY)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

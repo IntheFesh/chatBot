@@ -23,6 +23,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -101,6 +102,7 @@ async def test_a_wake_up_in_the_evening_voids_what_was_planned_and_answers_with_
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -141,3 +143,4 @@ async def test_a_wake_up_after_midnight_makes_the_plan_of_the_new_day(
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)

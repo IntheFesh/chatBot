@@ -19,6 +19,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -102,4 +103,5 @@ async def test_a_short_count_merges_bubbles_and_closes_the_door_on_her_own_messa
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

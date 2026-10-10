@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_proactive_rules,
@@ -101,4 +102,5 @@ async def test_the_25_hour_day(make_world: WorldFactory) -> None:
     assert_never_in_deep_sleep(world)
     assert_screen_matches_records(world)
     assert_within_quota(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

@@ -25,6 +25,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -123,6 +124,7 @@ async def test_event_text_is_cut_out_of_a_reply_and_the_rest_is_said(
     nothing_forbidden_went_out(world)
     assert_screen_matches_records(world)
     assert_clean_screen(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -145,6 +147,7 @@ async def test_a_reply_of_event_text_alone_is_asked_for_again_with_a_note(
     assert row.backend == "deepseek"
     nothing_forbidden_went_out(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -164,6 +167,7 @@ async def test_a_promise_she_cannot_keep_is_rewritten_and_no_photo_is_sent(
     assert steps(world.out_rows()[0])["regenerated"] == 1
     nothing_forbidden_went_out(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -181,6 +185,7 @@ async def test_a_promise_that_stays_on_the_last_attempt_is_cut_out_and_the_rest_
     assert performed["regenerated"] == 1 and performed["commitment_removed"] == 1
     nothing_forbidden_went_out(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -204,4 +209,5 @@ async def test_a_reply_that_is_only_a_promise_ends_in_one_short_natural_answer(
     assert_screen_matches_records(world)
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

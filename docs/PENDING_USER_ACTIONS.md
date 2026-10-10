@@ -678,3 +678,26 @@
    - Windows 上才跑的测试：`uv run pytest tests/unit/test_serving_windows.py -q`（作业对象：杀掉父进程后服务器也会消失）。
 
 6. **没有做、也不属于这一步的**：用风格模型回复真实用户的长期稳定性观察（第 15 轮）、月度成本与最终验收（第 15、16 轮）；M3 门槛（第 10 轮）。
+
+## 第 16 轮 A —— 端到端场景、长时间运行（soak）与非功能核对
+
+沙箱（Linux、假模型）里测到的数字在 `docs/PERFORMANCE.md` 第 3、4 节。下面这些**在你的 Windows 电脑上、用真实的 DeepSeek 才有意义**，数字在你实测之前一律写"待实测"，沙箱的数字不能代替它们。
+
+1. **Windows 上的运行时数字（R-NFR-001 的引擎部分、R-NFR-002、R-NFR-003）**
+   - `uv run python scripts/bench_runtime.py --json bench-windows.json`（约 2 分钟：100 条回复的引擎耗时、从启动进程到 `application_running` 的秒数、静止 30 秒的 CPU 占用与常驻内存）。
+   - 预期：引擎 p95 < 2 秒；启动 < 30 秒；静止 CPU < 2 %；内存 < 1.5 GB（沙箱里分别是 0.09 秒、3 秒、0.4 %、203 MB）。请把终端输出贴给我，我补进 `docs/PERFORMANCE.md` 第 3 节的"Windows 实测"列。
+   - 杀毒软件的实时扫描可能让启动慢几倍；如果超过 30 秒，请把 `data/logs/twin.log` 里 `application_running` 之前的时间线发给我，不要先去改门槛。
+
+2. **Windows 上的长时间运行（R-NFR-002 的内存趋势、R-ARCH-004）**
+   - `uv run python scripts/soak.py --days 14 --accelerated --output soak-windows.txt`（沙箱约 3 分钟）；想看内存趋势再跑 `--days 28`（约 6 分钟）。快进时钟，假模型，用你机器的 Python 与 SQLite。
+   - 预期：报告最后一行 `result: PASSED`。`memory growth` 一行在 14 天时写"not judged"是正常的（进程大约要三周才到稳定大小，见 D-558）；28 天时它判最后一周的斜率 ≤ 3 MB/天。
+   - 失败时把整份报告发给我；`--trace-memory`（慢）和 `--trim-heap`（只在 Linux）是查内存用的。
+
+3. **真实 DeepSeek 的生成耗时（R-NFR-001 的模型部分）**
+   - PowerShell：`$env:TWIN_LIVE=1; $env:TWIN_LIVE_DEEPSEEK_KEY="<key>"; $env:TWIN_LIVE_REPORT="live-latency.json"; uv run pytest tests/integration/test_nfr_live.py -s`
+   - 它向真实 API 要 20 条不思考的回复和 5 条思考的回复（内容是合成的，没有真实聊天），费用远低于 0.05 美元，打印并写出 p50/p95/最大值。预期：不思考 p95 < 20 秒，思考 p95 < 60 秒。耗时取决于你的网络位置（芝加哥或国内），所以请在**实际运行机器**上测。
+   - 没有设 Key 或 `TWIN_LIVE=1` 时这个测试会被跳过，不会编造数字。
+
+4. **Windows 上跑场景测试与网络守卫**
+   - `uv run pytest -q -m integration tests/integration/life`（14 个端到端场景，约 4 分钟）和 `uv run pytest -q tests/unit/test_network_guard.py tests/unit/test_time_coverage_scan.py`。预期全部通过。场景里"进程被杀"用的是取消全部任务，并不依赖 POSIX 信号；网络守卫在 Windows 上同时补了事件循环的 `sock_connect`（Proactor 不调用 `socket.connect`）。
+   - 如果哪个失败，请把测试名和输出发给我。

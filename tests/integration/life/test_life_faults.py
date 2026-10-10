@@ -31,6 +31,7 @@ from sqlalchemy import select
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -44,7 +45,7 @@ from twin.storage.models import Alert
 pytestmark = pytest.mark.integration
 
 HER_ANSWERS = ("好的呀", "嗯嗯嗯", "知道啦")
-SECRET = "13800138000 /home/user/secret.db"  # what an exception message could carry
+SECRET = "LEAK-MARKER-4711 /home/user/secret.db"  # what an exception message could carry
 
 
 async def faulty_world(make_world: WorldFactory, **options: Any) -> LifeWorld:
@@ -66,12 +67,13 @@ def alerts_of(world: LifeWorld, category: str) -> list[Alert]:
 def nothing_of_the_trouble_is_shown(world: LifeWorld) -> None:
     assert_clean_screen(world)
     for item in world.said:
-        assert SECRET not in item.text and "13800138000" not in item.text
+        assert SECRET not in item.text and "LEAK-MARKER-4711" not in item.text
     for row in world.rows():
-        assert "13800138000" not in row.text
+        assert "LEAK-MARKER-4711" not in row.text
     with world.services.db.session() as session:
         for alert in session.scalars(select(Alert)):
-            assert "13800138000" not in f"{alert.title} {alert.detail}"  # the class, not the text
+            # the class of the error is in an alert, not its text
+            assert "LEAK-MARKER-4711" not in f"{alert.title} {alert.detail}"
 
 
 async def test_the_model_down_ends_in_one_natural_answer_and_then_all_is_well(
@@ -101,6 +103,7 @@ async def test_the_model_down_ends_in_one_natural_answer_and_then_all_is_well(
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -130,6 +133,7 @@ async def test_a_generation_that_raises_is_a_late_reply_not_a_dead_loop(
     assert not alerts_of(world, "engine_error")  # and the loop did not even notice
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -164,6 +168,7 @@ async def test_a_generation_that_always_raises_ends_in_one_short_word_and_an_ale
     assert world.persona_said[-1].text == "在呀"
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -193,6 +198,7 @@ async def test_a_step_of_the_loop_that_raises_is_done_again(
     assert world.assembly.engine.health().status.name == "OK"
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -228,6 +234,7 @@ async def test_a_step_that_always_raises_gives_the_round_up_and_the_loop_lives_o
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -260,4 +267,5 @@ async def test_the_planner_down_means_silence_and_the_schedule_goes_on(
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

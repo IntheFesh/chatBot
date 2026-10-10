@@ -21,6 +21,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_screen_matches_records,
     her_kind_at,
@@ -98,4 +99,5 @@ async def test_a_crisis_is_answered_at_once_and_out_of_the_role(make_world: Worl
 
     assert_clean_screen(world)
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []

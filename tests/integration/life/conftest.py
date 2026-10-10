@@ -11,6 +11,7 @@ import pytest
 import respx
 
 from tests.support.embedding import HashingBackend
+from tests.support.life_checks import snapshot_isolation
 from tests.support.life_clock import LifeClock
 from tests.support.life_world import LifeWorld
 from twin.clock import set_active_clock
@@ -50,6 +51,7 @@ async def make_world(
         world = await LifeWorld.create(
             services, clock, embedder, api, workdir=workdir, start=start, **options
         )
+        world.real_data = snapshot_isolation(world)  # what rule 7 compares with at the end
         made.append(world)
         return world
 

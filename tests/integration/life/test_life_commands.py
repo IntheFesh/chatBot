@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -216,6 +217,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert_clean_screen(world)
     assert_screen_matches_records(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
     with world.services.db.session() as session:
         assert not [a for a in session.scalars(select(Alert)) if a.category == "engine_error"]

@@ -13,9 +13,10 @@ story of the application are asserted here, and a scenario calls the ones that f
   spacing, chase, range (R-PRO-003, R-EVAL-005), the production audit itself;
 * :func:`assert_within_quota` - the messages between two messages of the user fit the platform's
   count (R-CH-008, R-ENG-009);
-* :func:`snapshot_isolation` / :func:`assert_bot_text_stays_out` - nothing the bot said, or the
-  user said to it, reached the real messages, her profile or the retrieval library (CLAUDE.md
-  rule 7, R-STO-007, R-RET-004, R-LRN-004).
+* :func:`snapshot_isolation` / :func:`assert_bot_text_not_in_her_data` /
+  :func:`assert_bot_text_stays_out` - nothing the bot said, or the user said to it, reached the
+  real messages, her profile or the retrieval library (CLAUDE.md rule 7, R-STO-007, R-RET-004,
+  R-LRN-004); the first two are cheap and close every story, the last one is heavy.
 """
 
 from __future__ import annotations
@@ -164,6 +165,27 @@ def conversation_texts(world: LifeWorld) -> set[str]:
         for row in world.rows()
         if len(row.text.strip()) >= 2 and not row.text.startswith("[")
     }
+
+
+def assert_bot_text_not_in_her_data(
+    world: LifeWorld, before: IsolationSnapshot | None = None
+) -> None:
+    """The cheap form, for any story: the real messages and the library are as they were.
+
+    The real messages are the same rows (a line of the conversation with the bot that became a
+    message would be one more; her short answers repeat her own words, so the text alone says
+    nothing), and the example library has no window it did not have.  ``before`` is what the world
+    held when the story began (``world.real_data``, taken by the ``make_world`` fixture) unless the
+    story changed the real data itself (an import) and took its own.  The heavy form below also
+    rebuilds the profile and asks the retriever; the long stories do that.
+    """
+    before = before or world.real_data
+    assert before is not None, "the world was not built by the make_world fixture"
+    with world.services.db.session() as session:
+        now_ids = frozenset(session.scalars(select(Message.id)))
+        windows = frozenset(session.scalars(select(ExampleWindow.id)))
+    assert now_ids == before.message_ids, "the conversation with the bot wrote real messages"
+    assert windows == before.window_ids, "the conversation with the bot entered the library"
 
 
 async def assert_bot_text_stays_out(

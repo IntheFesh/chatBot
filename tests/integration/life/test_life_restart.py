@@ -25,6 +25,7 @@ import pytest
 
 from tests.integration.life.conftest import WorldFactory
 from tests.support.life_checks import (
+    assert_bot_text_not_in_her_data,
     assert_clean_screen,
     assert_never_in_deep_sleep,
     assert_screen_matches_records,
@@ -89,6 +90,7 @@ async def test_killed_between_two_bubbles_the_rest_follows_once_and_in_order(
     assert_screen_matches_records(world)
     assert_clean_screen(world)
     assert_never_in_deep_sleep(world)
+    assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
 
 
@@ -120,6 +122,7 @@ async def test_killed_inside_a_send_the_bubble_is_not_said_twice(make_world: Wor
     assert any(a["step"] == "bubble_in_doubt" for a in first.actions or [])
     assert world.deepseek.calls["reply"] == 1 and world.double.refused == 0
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert_clean_screen(world)
 
 
@@ -141,6 +144,7 @@ async def test_a_message_that_came_while_the_process_was_dead_interrupts_the_res
     assert "一" in prompt and "二" in prompt and "别数了" in prompt  # she knows what she said
     assert world.deepseek.calls["reply"] == 2
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
     assert_clean_screen(world)
 
 
@@ -168,3 +172,4 @@ async def test_a_message_is_answered_once_whatever_stage_it_had_reached(
     assert world.deepseek.calls["reply"] == 1
     assert [r.text for r in world.in_rows()] == ["在吗"]
     assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
