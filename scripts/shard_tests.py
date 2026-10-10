@@ -22,6 +22,7 @@ Usage::
     python scripts/shard_tests.py --of 4 --plan                 # all shards with their weights
     python scripts/shard_tests.py --timings junit.xml           # seconds per test file
     python scripts/shard_tests.py --update-weights junit.xml    # refresh ci/test_weights.json
+    python scripts/shard_tests.py --update-weights junit.xml --blend 0.5   # average with the old
     python scripts/shard_tests.py --check-collection            # pytest collects no unknown file
     python scripts/shard_tests.py --check-shard-set NAME-1-of-3 NAME-2-of-3 NAME-3-of-3
 
@@ -326,14 +327,27 @@ def updated_weights(
     timings: Mapping[str, tuple[float, int]],
     platform: str,
     root: Path = ROOT,
+    blend: float = 1.0,
 ) -> dict[str, dict[str, float]]:
-    """``table`` with the measured files replaced for ``platform`` and vanished files dropped."""
+    """``table`` with the measured files updated for ``platform`` and vanished files dropped.
+
+    A measured file gets ``(1 - blend) * recorded + blend * measured`` seconds (just the measurement
+    if it was not recorded yet).  One run of a file varies by a few ten percent between runners, so
+    ``blend`` below 1 keeps a moving average over the runs.
+    """
+    if not 0.0 < blend <= 1.0:
+        raise ShardError("--blend must be in (0, 1]")
     present = set(discover_test_files(root))
     merged = {name: dict(files) for name, files in table.items()}
     merged.setdefault(platform, {})
     for name in merged:
         merged[name] = {file: sec for file, sec in merged[name].items() if file in present}
-    merged[platform].update({file: sec for file, (sec, _) in timings.items() if file in present})
+    recorded = merged[platform]
+    for file, (seconds, _) in timings.items():
+        if file in present:
+            recorded[file] = (
+                (1.0 - blend) * recorded[file] + blend * seconds if file in recorded else seconds
+            )
     return merged
 
 
@@ -469,6 +483,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="merge junit reports / --timings logs into the weights file",
     )
     parser.add_argument(
+        "--blend",
+        type=float,
+        default=1.0,
+        help="with --update-weights: share of the new measurement in (0, 1]; default 1 replaces",
+    )
+    parser.add_argument(
         "--check-collection", action="store_true", help="pytest collects no unknown file"
     )
     parser.add_argument(
@@ -524,7 +544,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.update_weights is not None:
             merged = updated_weights(
-                load_weights(weights_file), read_timings(args.update_weights, root), platform, root
+                load_weights(weights_file),
+                read_timings(args.update_weights, root),
+                platform,
+                root,
+                args.blend,
             )
             save_weights(merged, weights_file)
             emit([f"{weights_file}: {len(merged[platform])} {platform} weights"])

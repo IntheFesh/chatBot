@@ -48,6 +48,10 @@ uv run python scripts/shard_tests.py --update-weights timings-windows.log --plat
 
 只更新被测量的文件和该平台，其余保持；磁盘上已不存在的文件会被清除。提交 `ci/test_weights.json` 即可。每次大改测试后顺手更新一次；偏差不大时不必更新。
 
+同一个文件在不同虚拟机上的耗时相差可达两成（第一个用到某个重依赖的测试还要承担进程里一次性的导入成本），所以第二次起建议加 `--blend 0.5`：新权重 = 一半旧权重 + 一半新测量，相当于对多次运行取滑动平均。
+
+`gh api repos/<owner>/<repo>/actions/artifacts/<id>/zip > junit.zip` 可以直接下载某个 junit 产物（`gh api repos/<owner>/<repo>/actions/runs/<run>/artifacts` 列出 id）。
+
 ## 本地用法
 
 ```
@@ -61,3 +65,12 @@ uv run pytest -q -m "not live" $(uv run python scripts/shard_tests.py --shard 1 
 - **某一片失败而全量顺序跑能过**：说明某个测试依赖了同文件之外的测试遗留的状态。修测试使其自洽（见 `docs/EXECUTION_NOTES.md` 的测试约定），不要把依赖的文件钉在同一片里。复现：`uv run pytest <失败的文件>` 单独跑。
 - **覆盖率门槛失败而各片都绿**：看 `coverage (<os>)` 作业打印的各子包表，与旧的单进程结果等价；合并后的 `coverage.json` 作为产物 `coverage-report-<os>` 保留 7 天。
 - **要在 Windows 上快速验证修复**：编辑 `ci/windows-subset.txt` 推送，`windows-subset` 作业只跑列出的测试。
+
+## 实测（提交 5c02d9b 与 4fc485a 两次运行）
+
+| 运行 | 分片依据 | Windows 各片 pytest 用时 | Linux 各片 pytest 用时 | 整条流水线 |
+| --- | --- | --- | --- | --- |
+| 第 1 次（run 89） | 测试数（权重文件为空） | 4 片：14:14、16:53、18:08、19:07 | 3 片：7:00、13:01、13:50 | 20 分 55 秒 |
+| 第 2 次（run 91） | 第 1 次的每文件耗时 | 5 片：约 10.5、12.0、12.7、14.1、14.5 分 | 3 片：约 8.6、12.6、13.0 分 | 15 分 43 秒 |
+
+旧的单作业全量：Windows 约 58 分钟、Linux 约 25 分钟。固定开销很小：缓存命中时 Windows 的 `uv sync --frozen` 约 16 秒，检出、选择文件、上传产物合计不到 1 分钟，所以多分一片几乎不增加总运行分钟数；`lint (windows-latest)` 约 3 分钟，`coverage` 作业约 30 秒，都不在关键路径上。顺序跑的测试时间合计：Windows 约 65 分钟、Linux 约 32 分钟；理想情况下每片：Windows 4 片 16.4 分、5 片 13.1 分、6 片 10.9 分；Linux 3 片 10.8 分。同一文件在不同机器上的耗时波动是各片之间仍有 ±15 % 差别的主要原因。
