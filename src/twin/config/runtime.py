@@ -120,6 +120,14 @@ BACKEND_FALLBACK = register_setting(
         "Why the style model is not in use although backend.active asks for it (R-SRV-004)",
     )
 )
+TUNNEL_WANTED = register_setting(
+    SettingSpec(
+        "style.tunnel_wanted",
+        TypeAdapter(bool),
+        lambda s: False,
+        "The SSH tunnel to the rented instance should be up (twin model tunnel start|stop)",
+    )
+)
 PROACTIVE_DAILY_MIN = register_setting(
     SettingSpec(
         "proactive.daily_min",

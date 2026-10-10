@@ -14,7 +14,12 @@
   ``lora``).  Registering the same files again changes nothing; a different file under the same
   run and quantisation is refused.
 
-Enabling, activating and the release gate belong to round 14; the flags exist and start false.
+Enabling, activating and the release gate belong to round 14 (:mod:`twin.serving.activation`);
+this module owns the table and the few writes to it: :func:`activate_row`, :func:`deactivate_row`
+and :func:`record_eval`.  The flags start false; ``gate_passed`` starts empty (never judged).
+The ``eval`` document of a row keeps what was learnt about the model since it was registered:
+``activation_log`` (every activation and deactivation: when, what, forced or not), ``gate`` (the
+last verdict of the release gate) and ``tokenize_check`` (the last tokenizer comparison).
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from twin.storage.db import Database
 from twin.storage.training_models import ModelRegistryEntry, TrainingRun
@@ -36,6 +42,10 @@ from twin.training.profiles import PROFILES
 SCHEMA: Final = 1
 HASH_BLOCK = 1 << 20
 LOCKED_FIELDS: Final = ("template_version", "persona_version", "profile_version", "dataset_version")
+EVAL_ACTIVATION_LOG: Final = "activation_log"
+EVAL_GATE: Final = "gate"
+EVAL_TOKENIZE_CHECK: Final = "tokenize_check"
+ACTIVATION_LOG_KEEP: Final = 50
 
 
 class RegistryError(ValueError):
@@ -301,3 +311,77 @@ def resolve_model_path(models_dir: Path, view: ModelView) -> Path:
     """The file of a registered model (stored relative to the models directory when inside it)."""
     stored = Path(view.path)
     return stored if stored.is_absolute() else models_dir / stored
+
+
+def _row(session: Session, model_id: str) -> ModelRegistryEntry:
+    row = session.get(ModelRegistryEntry, model_id)
+    if row is None:
+        raise RegistryError(f"no model {model_id!r} in the registry; see `twin model list`")
+    return row
+
+
+def _logged(document: Mapping[str, Any], entry: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The ``eval`` document with ``entry`` appended to its activation log."""
+    updated = dict(document)
+    if entry is not None:
+        history = [*list(updated.get(EVAL_ACTIVATION_LOG) or []), dict(entry)]
+        updated[EVAL_ACTIVATION_LOG] = history[-ACTIVATION_LOG_KEEP:]
+    return updated
+
+
+def activate_row(
+    db: Database,
+    model_id: str,
+    *,
+    gate_passed: bool,
+    entry: Mapping[str, Any],
+    eval_updates: Mapping[str, Any] | None = None,
+) -> tuple[ModelView | None, ModelView]:
+    """Make a model the one in use for its kind of file (``twin model activate``).
+
+    In one transaction: every other model of the same kind stops being active, this one becomes
+    enabled and active, ``gate_passed`` is set to the verdict (``False`` for a forced activation:
+    it never counts as passed), and ``entry`` is appended to the activation log.  Returns
+    ``(the model that was active before, this model)``.
+    """
+    with db.transaction() as session:
+        chosen = _row(session, model_id)
+        previous: ModelView | None = None
+        for row in session.scalars(
+            select(ModelRegistryEntry).where(ModelRegistryEntry.kind == chosen.kind)
+        ):
+            if row.active and row.id != chosen.id:
+                previous = _view(row)
+            row.active = row.id == chosen.id
+        chosen.enabled = True
+        chosen.gate_passed = gate_passed
+        chosen.eval = _logged({**chosen.eval, **dict(eval_updates or {})}, entry)
+        session.flush()
+        return previous, _view(chosen)
+
+
+def deactivate_row(db: Database, model_id: str, *, entry: Mapping[str, Any]) -> ModelView:
+    """Stop using a model (``twin model disable``): not active, not enabled; the verdict stays."""
+    with db.transaction() as session:
+        row = _row(session, model_id)
+        row.active = False
+        row.enabled = False
+        row.eval = _logged(row.eval, entry)
+        session.flush()
+        return _view(row)
+
+
+def record_eval(
+    db: Database, model_id: str, updates: Mapping[str, Any], *, bump_state: bool | None = False
+) -> ModelView:
+    """Merge ``updates`` into the ``eval`` document of a model (a tokenizer check, a verdict).
+
+    The running application records the comparison it makes itself and must not wake itself up
+    with it (``bump_state=False``); a command that changes what the application should do passes
+    ``None`` to follow the write policy of the command (a LIGHT command bumps ``state_version``).
+    """
+    with db.transaction(bump_state=bump_state) as session:
+        row = _row(session, model_id)
+        row.eval = {**row.eval, **dict(updates)}
+        session.flush()
+        return _view(row)

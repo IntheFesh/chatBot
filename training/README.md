@@ -30,7 +30,7 @@ Everything the instance installs is pinned in `src/twin/training/versions.py`
 | bitsandbytes | 0.49.2 | wheel contains `libbitsandbytes_cuda128.so`; CMake targets compute capability 120 for CUDA >= 12.8 |
 | modelscope | 1.39.1 | wheel; its `download` command moved to the `modelscope-hub` package, so `setup.sh` uses `snapshot_download()` |
 | llama.cpp | tag **b11177** (2026-09-25) | `conversion/qwen.py` registers `Qwen3ForCausalLM`; `llama-quantize` is a CMake target |
-| vLLM | 0.26.0 in its own venv (requires `torch==2.11.0`) | PyPI metadata, its Docker build lists compute capability 12.0 |
+| vLLM | 0.26.0 in its own venv, the `+cu129` wheel of the GitHub release with torch 2.11.0 / torchvision 0.26.0 / torchaudio 2.11.0 from `https://download.pytorch.org/whl/cu129` (round 14) | HTTP status of the release assets (`+cu129` 200, `+cu128` and `+cu130` 404); the metadata of the `+cu129` wheel read with range requests; the cu129 index listing |
 
 ### `qwen3_nothink` (R-TRN-011)
 
@@ -114,15 +114,12 @@ selects the adapter with its `model` field; `/v1/completions` and `/tokenize` ex
 
 ### Could not be checked
 
-* github.com web pages answer 403 in the development sandbox (`raw.githubusercontent.com` and `git`
-  work), so the GitHub **release download** of the vLLM `+cu128` wheel could not be tried;
-  `serve_vllm.sh` falls back to `pip install vllm==0.26.0` with the `cu128` extra index.
+* (Round 14, 2026-10-10) The vLLM release assets could be checked: `vllm-0.26.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl` exists, `+cu128` and `+cu130` do not, and PyPI's default wheel is a CUDA 13 build.  `serve_vllm.sh` now installs the `+cu129` wheel (no fall-back to PyPI).  See `docs/DECISIONS.md` D-512 and `docs/SERVING_NOTES.md`.
 * Neither bitsandbytes 4-bit nor vLLM 0.26.0 was run on a real RTX 5090 or RTX PRO 6000 (no GPU in
   the sandbox); the CUDA 12.8 binaries and the `12.0` architecture entries were read from the sources
   above.  The first real run will show whether they work; `setup.sh` and `serve_vllm.sh` print the
   versions they ended up with.
-* The request fields of vLLM's `/tokenize` are not listed on the documentation page; round 14 builds the
-  tokenizer comparison against the actual responses.
+* The request fields of vLLM's `/tokenize` (`prompt`, `add_special_tokens`; the reply has `tokens`, `count`, `max_model_len`) are what round 14's tokenizer comparison sends (`twin.serving.tokencheck`); the comparison against a real vLLM server could not be run in the sandbox.
 * AutoDL's image list for the two GPUs and the size of the system disk (their pages did not state it).
 
 ## Contracts used by round 13b and later rounds

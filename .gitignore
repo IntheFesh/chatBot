@@ -13,6 +13,7 @@ backups/
 .env.*
 config/config.yaml
 *.gguf
+tools/
 *.safetensors
 *.bin.enc
 

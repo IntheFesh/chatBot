@@ -16,8 +16,12 @@ Why these versions:
 * bitsandbytes 0.49.2 ships ``libbitsandbytes_cuda128.so``, built for compute capability 12.0.
 * llama.cpp tag ``b11177`` (2026-09-25): ``convert_hf_to_gguf.py`` registers ``Qwen3ForCausalLM``
   (``conversion/qwen.py``) and ``llama-quantize`` is a CMake target of the tree.
-* vLLM 0.26.0 requires ``torch==2.11.0`` and is installed into its own virtual environment from
-  the ``cu128`` index, so the training environment never changes.
+* vLLM 0.26.0 requires ``torch==2.11.0``, ``torchvision==0.26.0`` and ``torchaudio==2.11.0`` and is
+  installed into its own virtual environment, so the training environment never changes.  Checked
+  2026-10-10: the GitHub release has the wheel ``vllm-0.26.0+cu129`` (``+cu128`` and ``+cu130`` do
+  not exist) whose metadata asks for exactly those three and for ``nvidia-cutlass-dsl==4.6.0`` and
+  ``humming-kernels[cu12]`` (no CUDA 13 extras); PyPI's default wheel is the CUDA 13 build.  The
+  three PyTorch wheels come from the ``cu129`` index, which has all of them for CPython 3.12.
 """
 
 from __future__ import annotations
@@ -50,7 +54,14 @@ LLAMA_CPP_TAG: Final = "b11177"
 GGUF_QUANTS: Final = ("Q4_K_M", "Q5_K_M", "Q8_0")
 
 VLLM: Final = "0.26.0"
+LORA_NAME: Final = "twin-style"
+"""The name vLLM serves the LoRA adapter under (``serve_vllm.sh``); the ``model`` of a request."""
 VLLM_TORCH: Final = "2.11.0"
+VLLM_TORCHVISION: Final = "0.26.0"
+VLLM_TORCHAUDIO: Final = "2.11.0"
+VLLM_CUDA_TAG: Final = "cu129"
+"""The local version tag of the vLLM wheel on the GitHub release page (``vllm-0.26.0+cu129``)."""
+VLLM_TORCH_INDEX_URL: Final = "https://download.pytorch.org/whl/cu129"
 
 # The tokenizer of the Qwen3 family (8B, 14B and 32B ship the same ``tokenizer.json``: checked
 # 2026-10-09, identical bytes on Hugging Face and on ModelScope).  The training export counts
@@ -91,5 +102,9 @@ def versions_env() -> str:
         "TWIN_GGUF_QUANTS": ",".join(GGUF_QUANTS),
         "TWIN_VLLM": VLLM,
         "TWIN_VLLM_TORCH": VLLM_TORCH,
+        "TWIN_VLLM_TORCHVISION": VLLM_TORCHVISION,
+        "TWIN_VLLM_TORCHAUDIO": VLLM_TORCHAUDIO,
+        "TWIN_VLLM_CUDA_TAG": VLLM_CUDA_TAG,
+        "TWIN_VLLM_TORCH_INDEX": VLLM_TORCH_INDEX_URL,
     }
     return "".join(f"{key}={value}\n" for key, value in values.items())

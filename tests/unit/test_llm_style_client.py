@@ -120,11 +120,12 @@ async def test_llama_health_distinguishes_ready_loading_and_down(
     )
     loading = await llama.health()
     assert not loading.ok and "loading" in loading.detail
+    assert loading.loading  # the engine does not treat this as a failure (round 14)
     server.set("GET", "/health", body={"status": "no slot available"})
     assert not (await llama.health()).ok
     server.set("GET", "/health", status=500, body={})
     failing = await llama.health()
-    assert not failing.ok and "500" in failing.detail
+    assert not failing.ok and "500" in failing.detail and not failing.loading
 
 
 async def test_llama_health_never_raises_when_the_server_is_gone(clock: ManualClock) -> None:
@@ -132,16 +133,54 @@ async def test_llama_health_never_raises_when_the_server_is_gone(clock: ManualCl
         url = gone.url
     client = LlamaCppCompletionClient(url, clock=clock, timeout_s=2)
     health = await client.health()
-    assert not health.ok and "unreachable" in health.detail
+    assert not health.ok and "unreachable" in health.detail and not health.loading
     await client.aclose()
 
 
-async def test_llama_tokenize_asks_for_parsed_special_tokens_without_bos(
+async def test_llama_reports_the_timings_of_the_server_for_the_warm_up(
     server: StyleServer, llama: LlamaCppCompletionClient
 ) -> None:
+    server.set(
+        "POST",
+        "/completion",
+        body={
+            "content": "好呀",
+            "stop_type": "eos",
+            "tokens_evaluated": 5,
+            "tokens_predicted": 9,
+            "timings": {
+                "prompt_n": 5,
+                "prompt_ms": 31.5,
+                "predicted_n": 9,
+                "predicted_ms": 120,
+                "predicted_per_second": 75.0,
+                "cache_n": True,  # a flag is not a number
+                "other": "x",
+            },
+        },
+    )
+    output = await llama.generate(PROMPT, StyleParams())
+    assert output.timings == {
+        "prompt_n": 5.0,
+        "prompt_ms": 31.5,
+        "predicted_n": 9.0,
+        "predicted_ms": 120.0,
+        "predicted_per_second": 75.0,
+    }
+    server.set("POST", "/completion", body={"content": "好", "timings": "broken"})
+    assert (await llama.generate(PROMPT, StyleParams())).timings is None
+    server.set("POST", "/completion", body={"content": "好", "timings": {"x": 1}})
+    assert (await llama.generate(PROMPT, StyleParams())).timings is None
+
+
+async def test_llama_tokenize_asks_the_way_completion_tokenizes_a_string_prompt(
+    server: StyleServer, llama: LlamaCppCompletionClient
+) -> None:
+    # /completion tokenizes a string prompt with add_special=true and parse_special=true, so a
+    # GGUF that asks for a BOS gets one there; the comparison has to see exactly that (round 14)
     tokens = await llama.tokenize("<|im_start|>你")
     sent = server.last("/tokenize").json
-    assert sent == {"content": "<|im_start|>你", "add_special": False, "parse_special": True}
+    assert sent == {"content": "<|im_start|>你", "add_special": True, "parse_special": True}
     assert tokens == [ord(c) for c in "<|im_start|>你"]
 
 
@@ -261,6 +300,16 @@ async def test_vllm_tokenize_uses_the_documented_fields(
     server.set("POST", "/tokenize", body={"count": 1})
     with pytest.raises(StyleModelError, match="tokens"):
         await vllm.tokenize("x")
+
+
+async def test_vllm_tokenize_sends_the_same_redacted_text_as_a_prompt(
+    server: StyleServer, vllm: VllmCompletionClient
+) -> None:
+    """What is compared is what generate() would send: the instance never sees a phone number."""
+    text = f"<|im_start|>user\n我的号码 {mobile()}<|im_end|>\n<|im_start|>assistant\n"
+    await vllm.tokenize(text)
+    sent = server.last("/tokenize").json["prompt"]
+    assert mobile() not in sent and "[手机号]" in sent
 
 
 async def test_vllm_errors_and_authentication(server: StyleServer, clock: ManualClock) -> None:

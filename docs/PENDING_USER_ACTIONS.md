@@ -611,4 +611,43 @@
    - 观察期末做一次**新的**盲测（新的上下文，有效判断 ≥ 50 对，默认后端）：`uv run twin eval blind`（见第 09b 轮的步骤），猜对率点估计要 ≤ 60%。
    - 然后：`uv run twin eval stability --days 7`（看每一项：连续运行时长、重启次数与原因、长轮询中断、告警延迟），再 `uv run twin eval gate M4`。没过就留在这一轮改进，不要降门槛；请把输出发给我。
 
-8. **没有做、也不属于这一步的**：llama.cpp 的 CUDA 运行库检查与 `llama-server` 的健康检查（第 14 轮，已留好 `HealthCollector.register_probe`）；M3 门槛（第 10 轮）；M5（第 14 轮）。
+8. **没有做、也不属于这一步的**：llama.cpp 的 CUDA 运行库检查与 `llama-server` 的健康检查（第 14 轮已做：`twin doctor` 的 `llamacpp` 一行，`twin health` 的 `style_serving` 一行）；M3 门槛（第 10 轮）；M5（第 14 轮）。
+
+## 第 14 轮 —— 风格模型的服务：本机 llama.cpp、远程 vLLM、激活与 M5 门槛、自动回退
+
+> 沙箱是 Linux，没有 Windows、没有 NVIDIA 显卡、没有 AutoDL 实例，也没有训练好的模型：服务进程、隧道、分词核对、激活、评估和回退都用模拟的 `llama-server`（真实子进程、同样的命令行和 HTTP）、本地 SSH 服务器和合成数据验证（DECISIONS D-500 至 D-521）。联网核对到的事实和**没能核对的事**写在 `docs/SERVING_NOTES.md`。**下面每一步都要在你的电脑或 AutoDL 上做**；在有训练好的模型、并且通过 M5 之前，默认后端仍是 DeepSeek，这一轮的东西不会被用到。
+
+1. **同步**
+   - 没有新依赖，没有新迁移（`uv run twin db upgrade` 照常即可）。新增配置键都有默认值：`style_model.tunnel.{backoff_start_s,backoff_max_s,remind_remote}`、`style_model.serve.{binary,context,gpu_layers,parallel,start_timeout_s,backoff_start_s,backoff_max_s,stable_after_s,warm_standby,eval_port}`。
+   - 想用远程推理的话，在配置里加 `style_model.model_id: twin-style`（`serve_vllm.sh` 服务的 LoRA 名）；本机推理不用它。
+
+2. **本机推理（Windows 电脑，有 NVIDIA 显卡最好）**
+   - 下载 llama.cpp：`powershell -ExecutionPolicy Bypass -File scripts\windows\get_llamacpp.ps1`。它自己选构建（CUDA 13.4、CUDA 12.4 或 CPU）、同时下载匹配的 cudart、校验 sha256、解到 `tools\llama.cpp\b11177\`。`-Build cpu` 可以强制 CPU 构建，`-Force` 重装。**这个脚本没有在真实的 Windows 上跑过**；报错或哈希对不上时把完整输出发给我，不要改锁文件。
+   - `uv run twin doctor`：看 `llamacpp` 一行（装了没有、文件齐不齐、构建合不合这台电脑）。
+   - `uv run twin model recommend`：读你的显卡，给出 Q8_0 / Q5_K_M / Q4_K_M 里放得下的最大一档（留 20% 余量）；没有显卡会推荐 Q4_K_M 并说速度会慢。
+   - 登记模型（第 13 轮）：`uv run twin model register <产物目录>`，`uv run twin model list` 看 id。
+   - `uv run twin model verify <id>`：启动模型的服务器、做分词核对。通过会打印 `tokenization matches`；有差异（最常见的是 GGUF 带了 BOS）会指出每个提示词第一个差异的位置，**把输出发给我**。
+   - `uv run twin model serve <id>`：前台运行服务器，打印预热的“首词元延迟”和“每秒词元数”，Ctrl+C 结束。**这两个数字请告诉我**（沙箱里没有真实的）。正式运行时 `twin run` 会自己启动和监视它，不需要这个命令。
+
+3. **远程推理（没有合适的显卡时）**
+   - 在 AutoDL 实例上：`bash training/autodl/serve_vllm.sh <档位>`（第 13 轮的脚本，这一轮改成 CUDA 12.9 的 vLLM 轮子，见 D-512）。第一次会打印实际装上的 vLLM / torch / CUDA 版本和架构列表；**如果起不来，把报错发给我，不要自己换版本号**。
+   - 配置里 `style_model.mode: vllm_completion` 和 `style_model.model_id: twin-style`；`uv run twin train remote connect` 存好主机密钥。
+   - `uv run twin model tunnel start`（没有应用时在本窗口里保持隧道）、`uv run twin model tunnel status`（状态、重连次数、实例已运行多久、端口答不答）。**请告诉我隧道的延迟**，以及 AutoDL 的 sshd 是否允许端口转发（沙箱里只试过本地 SSH 服务器）。
+   - 用完：在微信里发 `/后端 deepseek`，`uv run twin model tunnel stop`，**再到 AutoDL 控制台关机**——实例按小时计费。隧道在线时每天（当地 `commands.morning_hour` 之后）会收到一条系统消息提醒这件事，`/状态` 也会显示；不想要就设 `style_model.tunnel.remind_remote: false`。
+
+4. **评估、门槛、上线（只有这样 M5 才可能通过）**
+   - `uv run twin model evaluate <id> --n 80`：从留出集抽 80 个**新的**上下文（以前盲测用过的不会再抽），三种方式（deepseek、style、hybrid）各生成一遍，估价后等你批准：`uv run twin jobs approve <批次号>`（批次号命令会打印）。每种方式和 deepseek 都要有 ≥ 50 对**有效**判断，跳过的不算，所以 `--n` 要留余量。
+   - `uv run twin model evaluate <id> --resume <运行号> --foreground`：在本窗口里生成（这时才启动模型的服务器）并让你判“哪条是她”；判完给出三种方式的风格指标和 M5 预览。样本不够会说还差多少对，再做一次 `twin model evaluate` 累积即可。
+   - `uv run twin eval gate M5`：写下判定。**没过就留在这里改进，不要降门槛或改统计口径**；不过的话保留 DeepSeek，不阻塞第 15、16 轮。请把输出发给我。
+   - 通过后 `uv run twin model activate <id>`：把 `backend.active` 设成猜对率更低的那种方式。想指定另一种用 `--backend style|hybrid`（那种方式也要过了）。
+   - `--force`：门槛没过也要用的话才加。后果：模型被标成“未通过门槛”，`/状态` 会写出来，预算最后一级不会切到它，这次激活在审计里有记录。分词核对没过的模型即使 `--force` 也不能激活。
+   - 停用：`uv run twin model disable <id>`；运行中的应用几秒内跟上（启动或停掉服务器）。
+
+5. **请核对并告诉我**（沙箱里没法验证，细节见 `docs/SERVING_NOTES.md` 第 3 节）
+   - `llama-server.exe` 在你的显卡上加载 GGUF 成功、速度如何；`twin run` 退出或被强杀后任务管理器里没有残留的 `llama-server.exe`（作业对象）。
+   - 把模型停掉（任务管理器结束 `llama-server.exe`）：应用应在几秒内重启它；服务器没好之前的回复由 DeepSeek 出，片刻后自动换回。连续崩溃时 `/状态` 会写“崩溃后等待重启”和重启次数，`twin health` 的 `style_serving` 一行会变色。
+   - 回退的通知：把服务器弄坏（比如把 GGUF 改名）后启动，应收到 `style_model_down` 告警（风格模型不可用，回复改由 DeepSeek 出）；修好后健康满 10 分钟，应收到一条“风格模型恢复”的提示（同一类别、级别 info），回复自动切回。
+   - 有真实的 `llama-server` 和 GGUF 时可以跑集成测试：设环境变量 `TWIN_LLAMA_SERVER`（`llama-server.exe` 的路径）和 `TWIN_LLAMA_GGUF`，`uv run pytest tests/integration/test_style_serving_e2e.py -q`；数字写在测试目录的 `serving_report.json` 里。
+   - Windows 上才跑的测试：`uv run pytest tests/unit/test_serving_windows.py -q`（作业对象：杀掉父进程后服务器也会消失）。
+
+6. **没有做、也不属于这一步的**：用风格模型回复真实用户的长期稳定性观察（第 15 轮）、月度成本与最终验收（第 15、16 轮）；M3 门槛（第 10 轮）。

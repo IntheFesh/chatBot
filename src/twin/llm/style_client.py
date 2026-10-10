@@ -29,7 +29,7 @@ The vLLM client talks to AutoDL through an SSH tunnel and therefore redacts the 
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -111,6 +111,9 @@ class StyleOutput:
     prompt_tokens: int | None
     completion_tokens: int | None
     latency_ms: int
+    timings: Mapping[str, float] | None = None
+    """The server's own timings when it reports them (llama.cpp: ``prompt_ms``, ``prompt_n``,
+    ``predicted_ms``, ``predicted_n``, ``predicted_per_second``)."""
 
     @property
     def truncated(self) -> bool:
@@ -123,6 +126,8 @@ class StyleHealth:
     ok: bool
     detail: str
     latency_ms: int = 0
+    loading: bool = False
+    """True while the server is up but still loading the model (llama.cpp answers 503)."""
 
 
 class StyleModelClient(Protocol):
@@ -215,6 +220,21 @@ def _optional_int(value: Any) -> int | None:
     return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+TIMING_KEYS = ("prompt_n", "prompt_ms", "predicted_n", "predicted_ms", "predicted_per_second")
+
+
+def _timings(value: Any) -> dict[str, float] | None:
+    """The numbers of llama.cpp's ``timings`` object that the warm-up reports."""
+    if not isinstance(value, dict):
+        return None
+    found = {
+        key: float(value[key])
+        for key in TIMING_KEYS
+        if isinstance(value.get(key), int | float) and not isinstance(value.get(key), bool)
+    }
+    return found or None
+
+
 class LlamaCppCompletionClient(_HttpStyleClient):
     """llama.cpp ``llama-server`` on this computer, through ``/completion``."""
 
@@ -245,6 +265,7 @@ class LlamaCppCompletionClient(_HttpStyleClient):
             prompt_tokens=_optional_int(data.get("tokens_evaluated")),
             completion_tokens=_optional_int(data.get("tokens_predicted")),
             latency_ms=self._elapsed_ms(started),
+            timings=_timings(data.get("timings")),
         )
 
     async def health(self) -> StyleHealth:
@@ -252,18 +273,25 @@ class LlamaCppCompletionClient(_HttpStyleClient):
         try:
             data = await self._call("GET", "/health", timeout_s=HEALTH_TIMEOUT_S)
         except StyleModelError as exc:
-            detail = "model is still loading" if exc.status == 503 else str(exc)
-            return StyleHealth(False, detail, self._elapsed_ms(started))
+            loading = exc.status == 503
+            detail = "model is still loading" if loading else str(exc)
+            return StyleHealth(False, detail, self._elapsed_ms(started), loading=loading)
         if isinstance(data, dict) and data.get("status") == "ok":
             return StyleHealth(True, "ok", self._elapsed_ms(started))
         return StyleHealth(False, "unexpected health reply", self._elapsed_ms(started))
 
     async def tokenize(self, text: str) -> list[int]:
-        """Token ids exactly as the server sees ``text`` (special tokens parsed, no BOS added)."""
+        """Token ids exactly as ``/completion`` will see ``text`` as a string prompt.
+
+        ``/completion`` tokenizes a string prompt with ``add_special=true`` and
+        ``parse_special=true`` (``tools/server/server-context.cpp``), so a GGUF that asks for a
+        BOS token gets one in front of the prompt.  The comparison must see that BOS, hence the
+        same flags here; ``/tokenize`` itself defaults to ``add_special=false``.
+        """
         data = await self._call(
             "POST",
             "/tokenize",
-            payload={"content": text, "add_special": False, "parse_special": True},
+            payload={"content": text, "add_special": True, "parse_special": True},
             timeout_s=TOKENIZE_TIMEOUT_S,
         )
         return _token_ids(_field(data, "tokens", list))
@@ -344,11 +372,16 @@ class VllmCompletionClient(_HttpStyleClient):
         return StyleHealth(True, "ok", self._elapsed_ms(started))
 
     async def tokenize(self, text: str) -> list[int]:
-        """Token ids exactly as the server sees ``text`` (no BOS added)."""
+        """Token ids exactly as the server sees the prompt that :meth:`generate` sends.
+
+        The text goes through the same outbound filter as a prompt, and ``add_special_tokens`` is
+        false as in :meth:`generate` (``/tokenize`` would add a BOS by default).
+        """
+        sent = self._outbound(text) if self._outbound else text
         data = await self._call(
             "POST",
             "/tokenize",
-            payload={"model": self._model, "prompt": text, "add_special_tokens": False},
+            payload={"model": self._model, "prompt": sent, "add_special_tokens": False},
             timeout_s=TOKENIZE_TIMEOUT_S,
         )
         return _token_ids(_field(data, "tokens", list))

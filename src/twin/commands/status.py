@@ -16,10 +16,11 @@ Rounds that add something to show (the suggested quiet window of step 4, say) pu
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 
@@ -33,6 +34,7 @@ from twin.llm.budget import BudgetManager
 from twin.llm.ledger import LedgerStore
 from twin.ops.logging import get_logger
 from twin.schedule.time_service import PlanUnavailableError, TimeService
+from twin.serving.state import ServingStateStore
 from twin.storage.db import Database
 from twin.storage.models import Alert
 from twin.training.retrain import retrain_status_text
@@ -249,9 +251,62 @@ class StatusReport:
         )
         gate = texts.STATUS_GATE_PASSED if model.passed_gate else texts.STATUS_GATE_FORCED
         lines = [texts.STATUS_STYLE_ACTIVE.format(label=model.label, gate=gate, health=health)]
-        if self._s.settings.style_model.mode == "vllm_completion":
-            lines.append(texts.STATUS_REMOTE_HOURLY)
+        lines.extend(await self._serving())
         return lines
+
+    async def _serving(self) -> list[str]:
+        """What the application knows about the model's server or tunnel (round 14)."""
+        record = await asyncio.to_thread(ServingStateStore(self._s.db, self._s.clock).read)
+        lines: list[str] = []
+        server = record.get("server")
+        if isinstance(server, dict) and server.get("state") != "ready":
+            state = texts.STATUS_SERVE_STATES.get(
+                str(server.get("state")), str(server.get("state"))
+            )
+            detail = f"（{server['detail']}）" if server.get("detail") else ""
+            count = int(server.get("restarts") or 0)
+            restarts = texts.STATUS_SERVE_RESTARTS.format(count=count) if count else ""
+            lines.append(texts.STATUS_SERVE.format(state=state, detail=detail, restarts=restarts))
+        warmup = record.get("warmup")
+        if isinstance(warmup, dict) and warmup.get("first_token_ms") is not None:
+            speed = warmup.get("tokens_per_s")
+            zone = self._s.time.bot_timezone()
+            when = datetime.fromisoformat(str(warmup["at"])).astimezone(zone)
+            lines.append(
+                texts.STATUS_SPEED.format(
+                    first=warmup["first_token_ms"],
+                    tps=f"{speed:.1f}" if isinstance(speed, int | float) else "?",
+                    when=f"{when:%m-%d %H:%M}",
+                )
+            )
+        if self._s.settings.style_model.mode == "vllm_completion":
+            lines.extend(self._remote_lines(record.get("tunnel")))
+        return lines
+
+    def _remote_lines(self, tunnel: object) -> list[str]:
+        """The tunnel and the reminder that the rented instance is billed by the hour."""
+        if not isinstance(tunnel, dict) or tunnel.get("state") != "up":
+            lines = [texts.STATUS_REMOTE_HOURLY]
+            if isinstance(tunnel, dict):
+                state = texts.STATUS_TUNNEL_STATES.get(str(tunnel.get("state")), "?")
+                detail = f"（{tunnel['detail']}）" if tunnel.get("detail") else ""
+                count = int(tunnel.get("reconnects") or 0)
+                lines.insert(0, texts.STATUS_TUNNEL.format(state=state, detail=detail, count=count))
+            return lines
+        uptime = tunnel.get("instance_uptime_s")
+        if isinstance(uptime, int | float):
+            span = timedelta(seconds=float(uptime))
+        else:
+            up_since = datetime.fromisoformat(str(tunnel["up_since"]))
+            span = self._s.clock.now_utc() - up_since
+        return [
+            texts.STATUS_TUNNEL.format(
+                state=texts.STATUS_TUNNEL_STATES["up"],
+                detail="",
+                count=int(tunnel.get("reconnects") or 0),
+            ),
+            texts.STATUS_REMOTE_RUNNING.format(span=format_span(span)),
+        ]
 
     async def _alerts(self) -> list[str]:
         with self._s.db.session() as session:

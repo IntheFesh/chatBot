@@ -332,14 +332,28 @@ def candidates_of(items: Sequence[ItemView], side: Literal["bot", "real"]) -> li
 
 def style_of_items(services: Services, store: EvalStore, run: RunView, backend: str) -> StyleReport:
     """The replies generated for a blind run's contexts against the pre-holdout profile."""
-    if run.kind != "blind":
-        raise StyleError(f"run {run.id} is a {run.kind} run; style metrics need a blind run")
+    return style_of_runs(services, store, [run], backend)
+
+
+def style_of_runs(
+    services: Services, store: EvalStore, runs: Sequence[RunView], backend: str
+) -> StyleReport:
+    """The same for the contexts of several blind runs together (the evaluation of one model
+    may be done in more than one run, with contexts no run shares: ``twin model evaluate``)."""
+    for run in runs:
+        if run.kind != "blind":
+            raise StyleError(f"run {run.id} is a {run.kind} run; style metrics need a blind run")
     profile = load_profile(services, "pre_holdout")
     if profile is None:
         raise StyleError("there is no pre-holdout profile; run `twin profile rebuild` first")
-    items = store.items(run.id, backend=backend, status=["generated", "judged", "skipped"])
+    items = [
+        item
+        for run in runs
+        for item in store.items(run.id, backend=backend, status=["generated", "judged", "skipped"])
+    ]
     if not items:
-        raise StyleError(f"run {run.id} has no generated replies of the {backend} backend")
+        names = ", ".join(run.id for run in runs)
+        raise StyleError(f"run {names} has no generated replies of the {backend} backend")
     settings = services.settings.profile
     bots = candidates_of(items, "bot")
     measured = measure(candidate_recs(bots), settings.burst_gap_s, settings.segment_gap_min)
@@ -348,12 +362,14 @@ def style_of_items(services: Services, store: EvalStore, run: RunView, backend: 
     )
     messages = sum(len(c.lines) for c in bots)
     notes = [f"{len(bots)} replies of the {backend} backend; her real replies to the same contexts"]
+    if len(runs) > 1:
+        notes.append(f"the contexts of {len(runs)} evaluation runs together")
     return StyleReport(
         "eval_items",
         "pre_holdout",
         compare(profile.metrics, measured, live=False, real=real),
         backend=backend,
-        run_id=run.id,
+        run_id=runs[0].id,
         messages=messages,
         notes=notes,
     )

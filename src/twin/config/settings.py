@@ -351,6 +351,24 @@ class OpsConfig(_Section):
 class TunnelConfig(_Section):
     local_port: int = Field(default=8082, ge=1, le=65535)
     remote_port: int = Field(default=8000, ge=1, le=65535)
+    backoff_start_s: float = Field(default=2.0, gt=0)  # first wait before the tunnel reconnects
+    backoff_max_s: float = Field(default=60.0, gt=0)  # the wait doubles up to this
+    remind_remote: bool = True  # tell the user once a day that the rented instance is running
+
+
+class ServeConfig(_Section):
+    """The local ``llama-server`` (round 14, R-SRV-002); it listens on this computer only."""
+
+    binary: str | None = None  # llama-server executable; null: the newest below tools/llama.cpp
+    context: int = Field(default=4096, ge=512)  # -c
+    gpu_layers: int = Field(default=999, ge=0)  # -ngl (999: every layer on the GPU)
+    parallel: int = Field(default=1, ge=1)  # --parallel
+    start_timeout_s: float = Field(default=180.0, gt=0)  # loading the model, at most
+    backoff_start_s: float = Field(default=2.0, gt=0)  # first wait before a crashed server restarts
+    backoff_max_s: float = Field(default=60.0, gt=0)  # the wait doubles up to this
+    stable_after_s: float = Field(default=120.0, gt=0)  # running this long resets the wait
+    warm_standby: bool = True  # keep a gate-passed model loaded for budget level 4
+    eval_port: int = Field(default=8083, ge=1, le=65535)  # a model under evaluation
 
 
 class StyleModelConfig(_Section):
@@ -358,6 +376,7 @@ class StyleModelConfig(_Section):
     endpoint: str = "http://127.0.0.1:8081"
     model_id: str | None = None
     tunnel: TunnelConfig = Field(default_factory=TunnelConfig)
+    serve: ServeConfig = Field(default_factory=ServeConfig)
     memory_tokens: int = Field(default=300, ge=0)  # memory block in the system segment (R-TRN-002)
     n_predict: int = Field(default=200, ge=1)  # the most tokens one reply may have
     temperature: float = Field(default=0.7, ge=0)
