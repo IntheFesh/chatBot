@@ -17,6 +17,7 @@ from typing import Any, Protocol
 from rich.console import Console
 from rich.panel import Panel
 
+from twin.ops.cpp_runtime import preload_system_runtime
 from twin.ops.logging import get_logger
 
 log = get_logger("twin.notify")
@@ -48,6 +49,9 @@ class WindowsToastNotifier:
 
     def notify(self, title: str, body: str) -> None:  # pragma: win32-only
         try:
+            # before ``winrt`` brings its own, older msvcp140.dll that ``torch`` cannot start with
+            # (twin.ops.cpp_runtime)
+            preload_system_runtime()
             from windows_toasts import Toast, WindowsToaster
 
             if self._toaster is None:

@@ -16,8 +16,6 @@ done
 echo "files before it: ${#before[@]}"
 half=$(( ${#before[@]} / 2 ))
 case "$PROBE_INDEX" in
-  0)  echo "== 0: import orders and DLL versions"
-      uv run python ci/probe_dll_order.py ;;
-  1)  echo "== 1: first half of the earlier files, with the winrt import watcher"
-      uv run python -m pytest -q -p no:cacheprovider -p probe_plugin -m "not live" "${before[@]:0:$half}" "$TORCH_TEST" ;;
+  0)  echo "== 0: first half of the earlier files, then the torch test, with the winrt import watcher (-s)"
+      uv run python -m pytest -q -s -p no:cacheprovider -p probe_plugin -m "not live" "${before[@]:0:$half}" "$TORCH_TEST" ;;
 esac

@@ -3,3 +3,32 @@
 # Pushing a change to this file runs exactly these tests on windows-latest
 # (a few minutes instead of the 15 minutes of the full sharded run). Keep it empty
 # when not debugging: an empty selection runs nothing.
+tests/integration/life/test_life_crisis.py
+tests/integration/life/test_life_style_model.py
+tests/integration/test_template_parity.py
+tests/unit/test_activity_model.py
+tests/unit/test_architecture.py
+tests/unit/test_channel_cli.py
+tests/unit/test_channel_probe_runner_errors.py
+tests/unit/test_cli.py
+tests/unit/test_commands.py
+tests/unit/test_commands_memory_cost_import.py
+tests/unit/test_docs_architecture.py
+tests/unit/test_engine_commands.py
+tests/unit/test_engine_e2e.py
+tests/unit/test_engine_recovery.py
+tests/unit/test_engine_safety.py
+tests/unit/test_eval_consistency_model.py
+tests/unit/test_eval_consistency_ui.py
+tests/unit/test_eval_gates.py
+tests/unit/test_eval_jobs.py
+tests/unit/test_eval_samples.py
+tests/unit/test_eval_sandbox.py
+tests/unit/test_ilink_channel.py
+tests/unit/test_ilink_http.py
+tests/unit/test_ingest_hooks.py
+tests/unit/test_ingest_inspect.py
+tests/unit/test_ingest_normalize.py
+tests/unit/test_retrieval_real_backend.py
+tests/unit/test_cpp_runtime.py
+tests/unit/test_ops_notify.py

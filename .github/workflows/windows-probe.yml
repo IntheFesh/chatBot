@@ -1,6 +1,6 @@
 name: windows-probe
 
-# Temporary debugging aid (D-620): runs ci/windows-probe.sh, as 2 parallel probes, on windows-latest.
+# Temporary debugging aid (D-620): runs ci/windows-probe.sh, as 1 probe, on windows-latest.
 # It runs only when that script changes.
 on:
   push:
@@ -20,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        index: [0, 1]
+        index: [0]
     defaults:
       run:
         shell: bash
