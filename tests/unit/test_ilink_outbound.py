@@ -513,7 +513,11 @@ async def test_the_keep_alive_ends_by_itself_after_three_minutes_with_a_cancel(
     await h.channel.send_typing(True)
     await wait_until(lambda: clock.pending_sleepers >= 1)
     beats = int(TYPING_MAX_S / TYPING_KEEPALIVE_S)
-    for _ in range(beats):
+    for beat in range(beats):
+        # the next beat is slept from the moment the last one ended: step only when it is waiting
+        await wait_until(
+            lambda beat=beat: typing.call_count >= beat + 1 and clock.pending_sleepers >= 1
+        )
         await clock.advance(TYPING_KEEPALIVE_S)
     await wait_until(lambda: typing.call_count >= beats + 2)
     statuses = [request_json(call.request)["status"] for call in typing.calls]
