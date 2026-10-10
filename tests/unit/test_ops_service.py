@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from tests.support.ops import ScriptedRunner, failed, ok
 from tests.support.win32 import FakeWin32
 from twin.cli import app
+from twin.clock import SystemClock
 from twin.config.loader import parse_overrides
 from twin.config.secrets import SecretStore
 from twin.ops.instance_lock import (
@@ -638,7 +639,10 @@ def test_stop_reports_a_forced_end_a_manual_run_and_a_process_that_stays(home: S
 def test_status_shows_the_task_the_processes_and_the_restarts(home: Services) -> None:
     log = RestartLog(home.db, home.clock)
     log.start_session("task")
-    log.add(Restart(home.clock.now_utc(), 1, 3.0, 5.0, "exit code 1"))
+    # ``twin service status`` builds its own services, on the real clock, and counts the restarts of
+    # the last 24 hours from the real now: a restart stamped with the fixture's fixed date was
+    # "within a day" only on the day the test was written (D-626)
+    log.add(Restart(SystemClock().now_utc() - timedelta(minutes=30), 1, 3.0, 5.0, "exit code 1"))
     fake = FakeWin32()
     supervisor = hold(home.paths.locks_dir, LOCK_SUPERVISOR, fake)
     try:
