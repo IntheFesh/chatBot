@@ -42,7 +42,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import random
 import sys
 import tempfile
@@ -421,17 +420,6 @@ class LogTally(logging.Handler):
             self.warnings += 1
 
 
-def isolate(home: Path) -> None:
-    """Keep the run away from the real home, credentials and clock (as the tests do)."""
-    for name in list(os.environ):
-        if name.startswith("TWIN_"):
-            del os.environ[name]
-    os.environ["TWIN_HOME"] = str(home)
-    os.environ["TWIN_SECRETS_DIR"] = str(home / "secrets")
-    os.environ["TWIN_KEYRING_BACKEND"] = "file"
-    os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--days", type=int, default=14, help="local days to simulate (14)")
@@ -642,109 +630,66 @@ async def check_promises(world: LifeWorld, report: SoakReport, embedder: Any, be
 async def run(args: argparse.Namespace, home: Path, log: Any) -> SoakReport:
     import time
 
-    import respx
     from sqlalchemy import select
-    from tests.support.embedding import HashingBackend
     from tests.support.life_checks import snapshot_isolation
-    from tests.support.life_clock import LifeClock
-    from tests.support.life_world import LifeWorld
+    from tests.support.life_env import life_environment
     from tests.support.proactive_world import opening_curve, proactive_model
     from tests.support.process_metrics import current_rss_bytes, megabytes
 
-    from twin.clock import set_active_clock
-    from twin.config.loader import load_settings
-    from twin.config.secrets import SecretStore, select_backend
-    from twin.engine.turns import install_bot_turn_reader
-    from twin.retrieval import embedder as embedder_module
-    from twin.retrieval.embedder import reset_embedding_services
-    from twin.services import build_services
-    from twin.storage import migrate
     from twin.storage.models import Alert
 
     first_day = date.fromisoformat(args.first_day)
     report = SoakReport(args.days, args.seed, args.platform, args.first_day)
     started = time.monotonic()
-    clock = LifeClock()
-    set_active_clock(clock)
-    install_bot_turn_reader()
-    settings = load_settings(None, {"paths": {"data_dir": str(home / "data")}})
-    migrate.upgrade(Path(settings.paths.data_dir) / "twin.db")
-    backend, info = select_backend()
-    services = build_services(settings, root=home, secrets=SecretStore(backend, info), clock=clock)
-    embedder = HashingBackend()
-    original_factory = embedder_module.backend_factory
-    embedder_module.backend_factory = lambda config, paths: embedder
-    reset_embedding_services()
     tally = LogTally()
     logging.getLogger().addHandler(tally)
-    loop = asyncio.get_running_loop()
     lost: list[str] = []
-    loop.set_exception_handler(lambda _loop, context: lost.append(str(context.get("message"))))
-    pictures = home / "pictures"
-    pictures.mkdir()
+    asyncio.get_running_loop().set_exception_handler(
+        lambda _loop, context: lost.append(str(context.get("message")))
+    )
     try:
-        with respx.mock(assert_all_called=False) as api:
-            world = await LifeWorld.create(
-                services,
-                clock,
-                embedder,
-                api,
-                workdir=pictures,
-                start=world_start(first_day),
-                model=proactive_model(opening_curve(base=0.02, peaks=PEAKS)),
-                platform=args.platform,
-            )
-            try:
-                world.add_her_sticker("开心")
-                before = snapshot_isolation(world)
-                report.baseline_rss_mb = megabytes(current_rss_bytes())
-                plans = plan_days(args.seed, first_day, args.days)
-                rng = random.Random(f"{args.seed}/replies")  # noqa: S311
-                if args.trace_memory:
-                    import tracemalloc
+        async with life_environment(
+            home,
+            start=world_start(first_day),
+            model=proactive_model(opening_curve(base=0.02, peaks=PEAKS)),
+            platform=args.platform,
+        ) as env:
+            world = env.world
+            world.add_her_sticker("开心")
+            before = snapshot_isolation(world)
+            report.baseline_rss_mb = megabytes(current_rss_bytes())
+            plans = plan_days(args.seed, first_day, args.days)
+            rng = random.Random(f"{args.seed}/replies")  # noqa: S311
+            if args.trace_memory:
+                import tracemalloc
 
-                    tracemalloc.start(8)
-                await live_through(
-                    world,
-                    plans,
-                    rng,
-                    tally,
-                    report,
-                    started,
-                    log,
-                    args.trace_memory,
-                    args.trim_heap,
+                tracemalloc.start(8)
+            await live_through(
+                world, plans, rng, tally, report, started, log, args.trace_memory, args.trim_heap
+            )
+            await world.run_for(hours=3)
+            await world.run_until_idle()
+            await world.drain_jobs(approval_ok=True)
+            await check_promises(world, report, env.embedder, before)
+            report.calls = dict(world.deepseek.calls)
+            report.alerts = dict(Counter(category for category, _ in world.alerts()))
+            report.jobs = dict(world.jobs())
+            rows = world.rows()
+            kinds = Counter(r.kind for r in world.proactive_rows(outcomes=["sent"]))
+            report.summary = {
+                "messages in": sum(1 for r in rows if r.direction == "in" and not r.is_command),
+                "commands": sum(1 for r in rows if r.direction == "in" and r.is_command),
+                "bubbles out": sum(1 for r in rows if r.direction == "out" and not r.is_command),
+                **{f"proactive {kind}": count for kind, count in sorted(kinds.items())},
+            }
+            with world.services.db.session() as session:
+                report.engine_errors = sum(
+                    1 for a in session.scalars(select(Alert)) if a.category == "engine_error"
                 )
-                await world.run_for(hours=3)
-                await world.run_until_idle()
-                await world.drain_jobs(approval_ok=True)
-                await check_promises(world, report, embedder, before)
-                report.calls = dict(world.deepseek.calls)
-                report.alerts = dict(Counter(category for category, _ in world.alerts()))
-                report.jobs = dict(world.jobs())
-                rows = world.rows()
-                kinds = Counter(r.kind for r in world.proactive_rows(outcomes=["sent"]))
-                report.summary = {
-                    "messages in": sum(1 for r in rows if r.direction == "in" and not r.is_command),
-                    "commands": sum(1 for r in rows if r.direction == "in" and r.is_command),
-                    "bubbles out": sum(
-                        1 for r in rows if r.direction == "out" and not r.is_command
-                    ),
-                    **{f"proactive {kind}": count for kind, count in sorted(kinds.items())},
-                }
-                with world.services.db.session() as session:
-                    report.engine_errors = sum(
-                        1 for a in session.scalars(select(Alert)) if a.category == "engine_error"
-                    )
-                report.task_errors = len(lost)
-                report.error_events = list(tally.events) + lost[:5]
-            finally:
-                await world.close()
     finally:
         logging.getLogger().removeHandler(tally)
-        embedder_module.backend_factory = original_factory
-        reset_embedding_services()
-        services.close()
+    report.task_errors = len(lost)
+    report.error_events = list(tally.events) + lost[:5]
     report.real_seconds = time.monotonic() - started
     return report
 
@@ -762,6 +707,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def log(message: str) -> None:
         print(message, file=sys.stderr, flush=True)
+
+    from tests.support.life_env import isolate
 
     with tempfile.TemporaryDirectory(prefix="twin-soak-") as folder:
         home = Path(folder)

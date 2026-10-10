@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 
 def _windows_counters() -> tuple[int, int]:
@@ -106,3 +107,106 @@ def cpu_seconds() -> float:
 
 def megabytes(value: float) -> float:
     return value / (1024.0 * 1024.0)
+
+
+# ----------------------------------------------------------------------- another process
+
+
+def _windows_process(pid: int) -> tuple[Any, Any]:
+    """``(kernel32, handle)`` of a process we may query (Windows only)."""
+    import ctypes
+    from ctypes import wintypes
+
+    query_limited = 0x1000  # PROCESS_QUERY_LIMITED_INFORMATION
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    handle = kernel.OpenProcess(query_limited, False, pid)
+    return kernel, handle
+
+
+def child_cpu_seconds(pid: int) -> float | None:
+    """User plus system processor time of process ``pid`` so far (``None`` if unavailable)."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel, handle = _windows_process(pid)
+        if not handle:
+            return None
+        try:
+            created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+            kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [
+                ctypes.POINTER(wintypes.FILETIME)
+            ] * 4
+            ok = kernel.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(kernel_time),
+                ctypes.byref(user_time),
+            )
+            if not ok:
+                return None
+
+            def seconds(value: Any) -> float:
+                return ((value.dwHighDateTime << 32) | value.dwLowDateTime) / 1e7  # 100 ns ticks
+
+            return seconds(kernel_time) + seconds(user_time)
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+        ticks = int(fields[11]) + int(fields[12])  # utime + stime (fields 14 and 15 of the file)
+    except (OSError, ValueError, IndexError):
+        return None
+    import os
+
+    return ticks / os.sysconf("SC_CLK_TCK")
+
+
+def child_rss_bytes(pid: int) -> int | None:
+    """Resident memory of process ``pid`` right now (``None`` if unavailable)."""
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class Counters(ctypes.Structure):
+            _fields_ = [
+                ("cb", wintypes.DWORD),
+                ("PageFaultCount", wintypes.DWORD),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        kernel, handle = _windows_process(pid)
+        if not handle:
+            return None
+        try:
+            psapi = ctypes.WinDLL("psapi")  # type: ignore[attr-defined]
+            psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+            psapi.GetProcessMemoryInfo.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(Counters),
+                wintypes.DWORD,
+            ]
+            counters = Counters()
+            counters.cb = ctypes.sizeof(Counters)
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                return int(counters.WorkingSetSize)
+            return None
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if line.startswith("VmRSS:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
