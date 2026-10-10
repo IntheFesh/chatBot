@@ -7,6 +7,7 @@ on:
     paths:
       - ci/windows-probe.sh
       - ci/probe_nowindow.py
+      - ci/probe_notoast.py
 
 concurrency:
   group: windows-probe-${{ github.ref }}
