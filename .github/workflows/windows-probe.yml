@@ -1,0 +1,44 @@
+name: windows-probe
+
+# Temporary debugging aid (D-620): runs ci/windows-probe.sh, as 6 parallel probes, on windows-latest.
+# It runs only when that script changes.
+on:
+  push:
+    paths:
+      - ci/windows-probe.sh
+      - ci/probe_plugin.py
+
+concurrency:
+  group: windows-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: probe ${{ matrix.index }} (windows-latest)
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        index: [0, 1, 2, 3, 4, 5]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+      PROBE_INDEX: ${{ matrix.index }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+
+      - name: Probe
+        run: bash ci/windows-probe.sh
