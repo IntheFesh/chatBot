@@ -203,7 +203,9 @@ def twin(services: Services, *args: str) -> tuple[int, str]:
 
 @pytest.fixture
 def cli(services: Services, ledger: LedgerStore, secret_store: SecretStore) -> Services:
-    set_cli_context(CliContext(secrets=secret_store))
+    # the command reads the clock of the tests ("this month" is the month of its data), not the
+    # day on which the suite runs
+    set_cli_context(CliContext(secrets=secret_store, clock=services.clock))
     return services
 
 
