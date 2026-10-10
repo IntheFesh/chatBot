@@ -722,9 +722,12 @@ uv run twin purge --all
 | `twin db upgrade` | 独占（先停止应用） | Create or migrate the database to the latest schema (stop the application first). |
 | `twin doctor` | 只读 | Check the installation: Python, dependencies, time zones, keyring, disk, database. |
 | `twin eval blind` | 轻量修改 | Blind test: pick which of two replies is hers (R-EVAL-001). |
+| `twin eval consistency` | 轻量修改 | Consistency audit: DeepSeek lists contradictions, you decide which are real (R-EVAL-004). |
+| `twin eval cost` | 轻量修改 | Month cost of the daily account against the 15 dollar line; one-time batches are listed apart (R-EVAL-007). |
 | `twin eval gate` | 轻量修改 | Judge a milestone; exit code 0 passed, 1 not passed, 2 not reached yet (R-EVAL-010). |
 | `twin eval memory` | 轻量修改 | Memory test: twenty questions from the fact store, judged and reviewed (R-EVAL-003). |
 | `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant. |
+| `twin eval report` | 轻量修改 | The summary report of the stored M0–M5 and measure results (R-EVAL-008). |
 | `twin eval runs` | 只读 | List the recent evaluation runs. |
 | `twin eval stability` | 轻量修改 | The stability report of the last days, from the health snapshots (R-EVAL-006). |
 | `twin eval style` | 轻量修改 | Style metrics of the bot against her profile, within +-30 % (R-EVAL-002). |

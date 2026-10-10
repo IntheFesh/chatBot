@@ -317,7 +317,7 @@ stateDiagram-v2
 
 ## 6. 表结构概览
 
-SQLite（WAL、`foreign_keys=ON`），SQLAlchemy 2 模型 + Alembic 迁移；所有表有 `created_at`/`updated_at`（UTC）；敏感文本列用 `EncryptedText`/`EncryptedJSON`，每条记录独立 nonce，附加数据绑定表名与主键（R-STO-001/002，D-003）。下表就是 `twin.storage.models.Base.metadata` 的全部表（共 39 张，SPEC R-STO-006 的 37 张加 `memory_replay_days` 与 `training_plans`），`test_docs_architecture.py` 保证两者一致。
+SQLite（WAL、`foreign_keys=ON`），SQLAlchemy 2 模型 + Alembic 迁移；所有表有 `created_at`/`updated_at`（UTC）；敏感文本列用 `EncryptedText`/`EncryptedJSON`，每条记录独立 nonce，附加数据绑定表名与主键（R-STO-001/002，D-003）。下表就是 `twin.storage.models.Base.metadata` 的全部表（共 41 张，SPEC R-STO-006 的 39 张加 `memory_replay_days` 与 `training_plans`），`test_docs_architecture.py` 保证两者一致。
 
 | 领域 | 表 | 作用 |
 | --- | --- | --- |
@@ -355,7 +355,8 @@ SQLite（WAL、`foreign_keys=ON`），SQLAlchemy 2 模型 + Alembic 迁移；所
 | | `dataset_versions` | 导出的数据集版本 |
 | | `training_runs` | 每次远程训练的档位、步骤、指标、产物哈希、清理时间 |
 | | `model_registry` | 登记的风格模型与锁定的版本、评估分数、是否启用 |
-| 评估 | `eval_runs`, `eval_items` | 盲测、记忆测试、风格指标、稳定性、主动审计、里程碑门槛及其逐条样本 |
+| 评估 | `eval_runs`, `eval_items` | 盲测、记忆测试、风格指标、稳定性、主动审计、一致性审计、成本、汇总报告、里程碑门槛及其逐条样本 |
+| | `consistency_findings`, `consistency_fixes` | 一致性审计的矛盾清单（你逐条确认的结果）与记忆修正建议（逐条确认后才写入） |
 
 向量库（LanceDB）只存向量、行 id 和非敏感元数据（`twin.storage.vector_schema` 在写入前拒收任何文本列，R-STO-005）。
 
