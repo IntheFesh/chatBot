@@ -23,6 +23,7 @@ waits for a mail server and never fails the caller.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -87,14 +88,13 @@ class AlertCategory(StrEnum):
 class AlertSpec:
     """How one category reads and whether it is announced.
 
-    ``notify`` ``None`` means "only when the alert is critical".  ``show_title`` false keeps the
-    caller's one-line title out of the outgoing text (the category's wording says it all).
+    ``notify`` ``None`` means "only when the alert is critical".  The caller's one-line title is
+    never part of a notice (see :mod:`twin.ops.alert_text`).
     """
 
     label: str
     advice: str
     notify: bool | None = True
-    show_title: bool = True
 
 
 SPECS: dict[str, AlertSpec] = {
@@ -122,7 +122,7 @@ SPECS: dict[str, AlertSpec] = {
         "风格模型不可用", "回复已回退到 DeepSeek；模型恢复后会自动切回。"
     ),
     "style_tokenize_mismatch": AlertSpec(
-        "风格模型分词核对不一致", "模型与提示词模板对不上，暂不能启用；请重新核对训练时的模板版本。"
+        "风格模型分词核对不一致", "模型与提示词模板对不上，不能启用；请重新核对训练时的模板版本。"
     ),
     "backup_failed": AlertSpec(
         "备份失败或已过期", "用 twin backup now 手动备份一次，并查看日志里的原因。"
@@ -140,7 +140,6 @@ SPECS: dict[str, AlertSpec] = {
     "crisis_detected": AlertSpec(
         "检测到可能需要关心的信号",
         "机器人已跳出角色并给出求助渠道；请你亲自联系对方。（这里不会出现聊天内容。）",
-        show_title=False,
     ),
     "channel_window_unexpected": AlertSpec(
         "微信会话窗口意外失效", "请在手机上给机器人发一条消息，会话就会恢复。"
@@ -170,7 +169,7 @@ SPECS: dict[str, AlertSpec] = {
     "channel_send_failed": AlertSpec("微信发送失败", "回复发不出去；请查看 twin channel status。"),
     "channel_unbound": AlertSpec("微信没有绑定用户", "请运行 twin channel login 完成绑定。"),
     "retrieval_index": AlertSpec("检索库需要重建", "请运行 twin retrieval rebuild。"),
-    "emergency_contact": AlertSpec("紧急联系人提醒没有发出", "请检查邮件设置。", show_title=False),
+    "emergency_contact": AlertSpec("紧急联系人提醒没有发出", "请检查邮件设置。"),
     "task_crashed": AlertSpec("后台任务崩溃", "已自动重启；反复出现请查看日志。", notify=None),
     "engine_error": AlertSpec("回复引擎出错", "已自动恢复；反复出现请查看日志。", notify=None),
     "job_failed": AlertSpec(
@@ -215,9 +214,22 @@ def canonical_category(raw: str, detail: dict[str, Any] | None = None) -> str:
     return str(ALIASES.get(raw, raw))
 
 
+_PLAIN_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,47}$")
+UNKNOWN_LABEL = "未分类的告警"
+
+
 def spec_of(category: str) -> AlertSpec:
-    """The wording and policy of a category (unknown names are recorded and read as they are)."""
-    return SPECS.get(category) or AlertSpec(category, "请查看日志。", notify=None)
+    """The wording and policy of a category.
+
+    A name nobody wrote a wording for is recorded and, when it is a plain identifier
+    (``some_category``), read as it is; any other string is not a name, so the notice does not
+    repeat it (:data:`UNKNOWN_LABEL`).
+    """
+    found = SPECS.get(category)
+    if found is not None:
+        return found
+    label = category if _PLAIN_NAME.fullmatch(category) else UNKNOWN_LABEL
+    return AlertSpec(label, "请查看日志。", notify=None)
 
 
 def is_announced(category: str, severity: str) -> bool:

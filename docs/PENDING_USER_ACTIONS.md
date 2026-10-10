@@ -410,7 +410,7 @@
 > 沙箱里没有真实聊天记录、DeepSeek Key 和 GPU：导出用合成对话 + respx 验证，模板一致性在装了固定版本 LLaMA-Factory 0.9.5 的独立环境里对真实 Qwen3 分词器跑过（205 个样本全部逐 token 一致，最长 1781 token；DECISIONS D-332）。下面是你自己环境里要做的事。
 
 1. **前提**
-   - 人设卡、画像与作息的 `pre_holdout` 版本已生成（`twin persona generate`、`twin profile rebuild`），记忆回放已覆盖要导出的日期范围（`twin memory replay start` 并批准）。缺了哪个，`twin train export` 会直接告诉你先做什么。
+   - 人设卡、画像与作息的 `pre_holdout` 版本已生成（`twin persona regenerate`、`twin profile rebuild`），记忆回放已覆盖要导出的日期范围（`twin memory replay start` 并批准）。缺了哪个，`twin train export` 会直接告诉你先做什么。
    - 分词器：第一次导出会下载 `tokenizer.json`（约 11MB，先 Hugging Face 再 ModelScope，核对哈希）。两处都连不上时，手动下载 `Qwen/Qwen3-8B` 仓库里的 `tokenizer.json`，用 `--tokenizer <文件或目录>` 指定。
 
 2. **在真实数据上导出**
@@ -439,12 +439,12 @@
 
 ## 第 09b 轮 —— 评估沙盒、盲测、风格指标、记忆测试与里程碑门槛框架
 
-> 沙箱里没有真实聊天记录、DeepSeek Key 和真人：抽样、估价、批准、生成、判分界面、报告、门槛判定都用合成对话 + respx + 注入的按键流验证，沙盒的写入隔离用表级快照证明（DECISIONS D-360 至 D-373）。**因此 M0、M1、M2 没有在沙箱里通过，`eval_runs` 里没有任何一条是伪造的：下面三道门槛要靠你自己的环境和你自己的判断来过。**
+> 沙箱里没有真实聊天记录、DeepSeek Key 和真人：抽样、估价、批准、生成、判分界面、报告、门槛判定都用合成对话 + respx + 注入的按键流验证，沙盒的写入隔离用表级快照证明（DECISIONS D-364 至 D-373）。**因此 M0、M1、M2 没有在沙箱里通过，`eval_runs` 里没有任何一条是伪造的：下面三道门槛要靠你自己的环境和你自己的判断来过。**
 
 1. **升级数据库**：`uv run twin db upgrade`（迁移 `0012_eval_tables`，新增 `eval_runs` 与 `eval_items`；条目正文加密）。本轮没有新增配置键。
 
 2. **前提**
-   - 已导入聊天记录；`uv run twin profile rebuild`（含 `pre_holdout` 画像）、`uv run twin persona generate`（含 `pre_holdout` 人设卡）、记忆回放覆盖到留出点之前；已设置 DeepSeek Key。缺了哪个，`twin eval blind` 在花钱之前就会一条条列出来。
+   - 已导入聊天记录；`uv run twin profile rebuild`（含 `pre_holdout` 画像）、`uv run twin persona regenerate`（含 `pre_holdout` 人设卡）、记忆回放覆盖到留出点之前；已设置 DeepSeek Key。缺了哪个，`twin eval blind` 在花钱之前就会一条条列出来。
    - **先和机器人聊几天**（`twin chat --local` 或微信）：风格指标的“线上”来源读它真实发出的话；记忆测试要从“她说过的、机器人编的”事实里出 10 题，事实库里这类来源的事实不到 10 条时测试直接记为“未通过(样本不足)”，**不会拿真实记录凑数**。
 
 3. **盲测（M1 的条件，约 50 对）**
@@ -456,7 +456,7 @@
    - 请告诉我：猜对率、区间、哪些分组特别高，以及你凭什么认出机器人（我据此调提示词与后处理）。
 
 4. **风格指标**
-   - `uv run twin eval style --source live --days 7`：机器人最近 7 天真实发出的话 vs 她的当前（`live`）画像，六项指标逐项显示偏差，**每项 ±30% 以内为通过**，有一项不通过退出码为 1。线上来源的“引用率”显示 n/a（通道不支持引用，D-362）。
+   - `uv run twin eval style --source live --days 7`：机器人最近 7 天真实发出的话 vs 她的当前（`live`）画像，六项指标逐项显示偏差，**每项 ±30% 以内为通过**，有一项不通过退出码为 1。线上来源的“引用率”显示 n/a（通道不支持引用，D-342）。
    - `uv run twin eval style --source eval_items --run <盲测运行号> --backend deepseek`：用盲测里同一批上下文上机器人的回复，对 `pre_holdout` 画像比较；同一批对子里她的真实回复的同样指标并排显示，作为参照。
    - 请告诉我：哪几项超出 ±30%，以及显示的偏差方向。
 
@@ -579,7 +579,7 @@
 
 3. **纠正与规则（在微信里，或 `twin chat --local`）**
    - 先让她回几句，再说“她不会这么说”或“你说话一点都不像她”：她先正常回答，随后另发一条系统消息问要不要记成“不像”，回复“是”才记录（超过 60 分钟、或她又说了别的话之后，“是”只是普通的一句话）。
-   - 攒几条 `/不像`、`/重来` 之后：`uv run twin persona rules consolidate --foreground`（需要 Key，会花一点费用）；`uv run twin persona rules` 看带编号的规则（最多 30 条，只描述说话方式）；`uv run twin persona rules delete <编号>` 删掉不对的。应用在运行时，每周会自己在低价时段整理一次。
+   - 攒几条 `/不像`、`/重来` 之后：`uv run twin persona rules consolidate --foreground`（需要 Key，会花一点费用）；`uv run twin persona rules list` 看带编号的规则（最多 30 条，只描述说话方式）；`uv run twin persona rules delete <编号>` 删掉不对的。应用在运行时，每周会自己在低价时段整理一次。
    - 请告诉我：规则里有没有出现具体的日期、事件或事实（本地检查和第二次审查应当挡住；如果漏了，把那条规则发给我）。
 
 4. **DPO 导出（有 200 条偏好对之后再做，不到时只是演练）**
@@ -678,3 +678,30 @@
    - Windows 上才跑的测试：`uv run pytest tests/unit/test_serving_windows.py -q`（作业对象：杀掉父进程后服务器也会消失）。
 
 6. **没有做、也不属于这一步的**：用风格模型回复真实用户的长期稳定性观察（第 15 轮）、月度成本与最终验收（第 15、16 轮）；M3 门槛（第 10 轮）。
+
+## 第 16 轮（16-B）—— 文档、需求覆盖总审计、发布清单
+
+> 16-B 是文档和审计：`README.md`、`docs/RUNBOOK.md`、`docs/ARCHITECTURE.md`、`docs/RELEASE_CHECKLIST.md`，加上 `scripts/stub_scan.py`、`scripts/decisions_check.py` 和七个审计与文档测试（决策 D-580 至 D-594）。沙箱里能验证的都已验证；**下面这些需要你的真实环境，没有一项在沙箱里做过**。端到端场景测试、`scripts/soak.py` 和 `docs/PERFORMANCE.md` 属于 16-A。
+
+1. **同步，不需要别的**
+   - `uv sync --frozen`。没有新依赖、没有新迁移、没有新配置键。
+
+2. **按 `docs/RUNBOOK.md` 从头走一遍，看文档对不对**
+   - 文档里的每条 `twin` 命令和每个 `/指令` 都有测试核对过它们存在；**说的做不做得通、预期输出对不对**要你在真实环境里看。哪一步和文档不一样，改文档或告诉维护者，别硬撑。
+   - 特别留意：RUNBOOK 第 2.3 节（通道探针）、第 6 章（AutoDL 训练）、第 8 章（部署风格模型）里的命令和提示是照第 02、13、14 轮的记录写的，沙箱里没有跑过。
+
+3. **R-CH-010：主动推送能不能行，要等真实的 M0 探针**
+   - 先做 `uv run twin channel probe start` 的全流程（约 26 小时）和 `uv run twin llm probe`，再 `uv run twin eval gate M0`。窗口 < 12 小时，或一次入站后连发 < 3 条，报告会写“未达标”并以退出码 1 结束：**停下来告诉维护者**，不要自己去试“激活过期会话”之类的办法（RUNBOOK 第 13 章）。
+
+4. **告警邮件和通知的内容变了（D-581）**
+   - 邮件和 Windows 通知不再包含程序给告警写的那一行说明（“说明：…”），只有类别的固定措辞、建议、时间和数字/短代码。想看更多细节：`uv run twin health`、日志（`data\logs\`）。预算告警的邮件现在带 `spent_usd` 与 `budget_usd`，健康检查类告警带 `check` 与 `value`。
+   - 如果你觉得哪类告警现在缺信息，告诉维护者具体缺什么，改成 `detail` 里的数字或代码，不要把自由文字放回去。
+
+5. **备份、密钥和换电脑（D-594）**
+   - 数据库主密钥只在这台电脑的 Windows 凭据管理器里，没有导出命令；换电脑或重装 Windows 之后旧备份无法解密。如果你打算换电脑，现在就想好：把原始聊天导出重新导入新机器（机器人自己的对话记忆会丢）。要不要加密钥托管，请你决定（它会与“一键删除使残留备份不可解密”冲突）。
+
+6. **发布前清单**
+   - `docs/RELEASE_CHECKLIST.md` 的 A、B 两节是自动检查（CI 跑）；**C 节（`twin doctor`、全新安装、备份恢复演练、一键删除演练、告警送达）和 D 节（M0–M4 门槛报告，训练过的话还有 M5）要你来做**，做完在清单里打勾并填“记录”。M0 的两份报告 `docs/CHANNEL_REPORT.md`、`docs/LLM_REPORT.md` 文件头要从 `pending` 变成 `measured` 再提交（只含技术结果，不含对话内容）。
+
+7. **没有做、也不属于这一步的**
+   - 真实的 7 天无人值守、M3/M4 的观察期、盲测和记忆测试的判分：第 09b、10、12 轮已经写了工具，判分要你来。`twin eval consistency|cost|report`（第 15 轮）合并后，RUNBOOK 第 7.7 节的三条命令才可用；合并后把 `tests/support/cli_tree.py` 的 `PENDING_COMMANDS` 清空（测试会提醒）。

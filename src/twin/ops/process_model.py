@@ -117,11 +117,10 @@ def _fail(message: str, code: ExitCode) -> typer.Exit:
     return typer.Exit(int(code))
 
 
-def stop_hint() -> str:
-    return (
-        "stop the application first: run `twin service stop` "
-        "(or press Ctrl+C in the window where `twin run` is open)"
-    )
+STOP_HINT = (
+    "stop the application first: run `twin service stop` "
+    "(or press Ctrl+C in the window where `twin run` is open)"
+)
 
 
 def _guard_locks(
@@ -133,7 +132,7 @@ def _guard_locks(
         if busy:
             raise CliError(
                 f"this command needs exclusive access, but the '{busy[0]}' instance is running; "
-                + stop_hint(),
+                + STOP_HINT,
                 ExitCode.BUSY,
             )
     for name in spec.acquires:

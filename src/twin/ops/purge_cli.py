@@ -21,7 +21,7 @@ from typing import Annotated
 import typer
 
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
-from twin.ops.process_model import CliError, CommandKind, ExitCode, command, stop_hint
+from twin.ops.process_model import STOP_HINT, CliError, CommandKind, ExitCode, command
 from twin.ops.purge import (
     CONFIRM_ALL,
     CONFIRM_TRAINING,
@@ -51,7 +51,7 @@ def _confirm(plan: PurgePlan, phrase: str) -> None:
 def _still_stopped(locks_dir: Path) -> None:
     busy = locks_held_elsewhere(locks_dir, ALL_LOCKS)
     if busy:
-        raise CliError(f"the '{busy[0]}' instance is running now; {stop_hint()}", ExitCode.BUSY)
+        raise CliError(f"the '{busy[0]}' instance is running now; {STOP_HINT}", ExitCode.BUSY)
 
 
 def _show(report: PurgeReport) -> None:

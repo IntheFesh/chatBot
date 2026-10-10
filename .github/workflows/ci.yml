@@ -10,7 +10,7 @@ name: ci
 #   ci gate                   one check that is green only if everything above is
 #
 # Which files a shard runs is computed by scripts/shard_tests.py from the files on disk, never
-# from a list (docs/CI.md, D-490..D-499).  The weights in ci/test_weights.json only balance the
+# from a list (docs/CI.md, D-490..D-497).  The weights in ci/test_weights.json only balance the
 # shards; they cannot make a test file go missing.
 
 on:
@@ -68,6 +68,14 @@ jobs:
 
       - name: traceability (global consistency)
         run: uv run python scripts/trace_check.py
+
+      # round 16: nothing in src/ stands in for real code (keywords, bodies that are only pass or a
+      # constant, imports of tests), and docs/DECISIONS.md agrees with itself and with the tests
+      - name: stub scan (no stand-ins or toy code in src/)
+        run: uv run python scripts/stub_scan.py
+
+      - name: decisions (numbers, trade-off table, cited tests)
+        run: uv run python scripts/decisions_check.py
 
       - name: every test file pytest collects is covered by the sharding
         run: uv run python scripts/shard_tests.py --check-collection

@@ -25,6 +25,8 @@ Invoke-Step "mypy (strict, src/twin)" { uv run mypy src/twin }
 Invoke-Step "pytest + coverage" { uv run pytest -q -m "not live" --cov=src/twin --cov-report=json }
 Invoke-Step "coverage gate" { uv run python scripts/coverage_gate.py }
 Invoke-Step "privacy scan" { uv run python scripts/privacy_scan.py }
+Invoke-Step "stub scan" { uv run python scripts/stub_scan.py }
+Invoke-Step "decisions check" { uv run python scripts/decisions_check.py }
 Invoke-Step "twin --help" { uv run twin --help }
 Invoke-Step "twin doctor" { uv run twin doctor }
 if ($Round -ne "") {

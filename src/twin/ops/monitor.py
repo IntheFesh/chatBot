@@ -24,11 +24,12 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from sqlalchemy import delete
 
 from twin.app import ComponentHealth, TaskSupervisor
-from twin.ops.health import FIRST_RUN_KEY, HealthCollector, HealthLevel, HealthReport
+from twin.ops.health import FIRST_RUN_KEY, HealthCheck, HealthCollector, HealthLevel, HealthReport
 from twin.ops.integrity import IntegrityReport, run_integrity
 from twin.ops.logging import get_logger
 from twin.ops.recurring import Weekly, latest_due
@@ -52,6 +53,18 @@ def launch_kind(environ: dict[str, str] | None = None) -> str:
     env = os.environ if environ is None else environ
     value = env.get(LAUNCH_ENV, "")
     return value if value in LAUNCH_KINDS else "unsupervised"
+
+
+def _check_facts(check: HealthCheck) -> dict[str, Any]:
+    """What a notice may say about a failing check: its name and the number it measured.
+
+    The check's own sentence (``detail``) is for ``twin health`` on this computer; the notice that
+    leaves it carries codes and numbers only (:mod:`twin.ops.alert_text`).
+    """
+    facts: dict[str, Any] = {"check": check.name}
+    if check.value is not None:
+        facts["value"] = round(check.value, 2)
+    return facts
 
 
 @dataclass
@@ -142,6 +155,7 @@ class HealthMonitor:
                         check.category,
                         f"{check.name}: {check.detail}"[:200],
                         severity=check.severity,
+                        detail=_check_facts(check),
                         dedup_key=f"health:{check.name}",
                     )
                     self._open[check.name] = _Open(check.category, report.at)
