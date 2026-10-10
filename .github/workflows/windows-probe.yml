@@ -6,6 +6,7 @@ on:
   push:
     paths:
       - ci/windows-probe.sh
+      - ci/probe_nowindow.py
 
 concurrency:
   group: windows-probe-${{ github.ref }}
@@ -19,7 +20,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        index: [0, 1, 2, 3, 4, 5]
+        index: [0, 1, 2]
     defaults:
       run:
         shell: bash
