@@ -40,7 +40,16 @@ NODE = re.compile(
     r"|(?<![\w/\].])(?P<short>::[A-Za-z_]\w*\*?(?:\[[^\]\s`]*\])?)"
 )
 REFERENCE_SUFFIXES = {".md", ".py", ".toml", ".yaml", ".yml", ".ps1", ".sh", ".txt", ".mako"}
-SKIP_PARTS = {".git", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache", "node_modules", "data"}
+SKIP_PARTS = {
+    ".git",
+    ".venv",
+    ".claude",  # local agent worktrees: other copies of this repository
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "node_modules",
+    "data",
+}
 SPEC_POINTS = re.compile(r"R-SCOPE-009\*\*.*?至少[:：](?P<points>[^）)]+)[）)]", re.DOTALL)
 
 
