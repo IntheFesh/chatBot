@@ -158,13 +158,17 @@ def test_running_application_notices_a_cli_change_within_two_seconds_and_stops_g
         # the application keeps running
         assert app.poll() is None
 
-        started = time.monotonic()
         changed = run_twin(["settings", "set", "time.bot_timezone", "Asia/Shanghai"], env)
         assert changed.returncode == 0, changed.stderr
+        # The clock starts when the command has exited, i.e. when the change is committed: what is
+        # timed is how long the *running application* needs to notice it (its two-second poll plus
+        # slack for a loaded computer), not the start-up of the CLI process that made the change,
+        # which imports the whole application and takes seconds of its own on a busy machine.
+        committed = time.monotonic()
         wait_until_sync(
             lambda: any(e["event"] == "state_changed" for e in read_log(log_path)), timeout=10
         )
-        assert time.monotonic() - started < 2.0 + 3.0  # poll interval plus process start-up slack
+        assert time.monotonic() - committed < 2.0 + 3.0
     finally:
         app.send_signal(signal.SIGINT)
         try:
