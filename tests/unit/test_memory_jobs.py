@@ -49,7 +49,7 @@ from twin.memory.jobs import (
     queue_daily_summary,
 )
 from twin.memory.memory import Memory
-from twin.memory.recent import BotMessage, register_bot_turn_reader
+from twin.memory.recent import BotMessage, register_bot_turn_reader, use_bot_turn_reader
 from twin.memory.replay import REPLAY_JOB, plan_replay
 from twin.ops.jobs import HandlerRegistry, JobQueue, Worker
 from twin.services import Services
@@ -82,9 +82,9 @@ async def runtime(services: Services, embedder: HashingBackend) -> AsyncIterator
 
 @pytest.fixture(autouse=True)
 def no_bot_reader() -> Iterator[None]:
-    register_bot_turn_reader(None)
-    yield
-    register_bot_turn_reader(None)
+    """No conversation of the bot while a test starts; the application's reader comes back after."""
+    with use_bot_turn_reader(None):
+        yield
 
 
 def worker_for(services: Services, **handlers: Any) -> Worker:

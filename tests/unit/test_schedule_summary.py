@@ -16,7 +16,7 @@ from tests.support.routine import Rig, fixed_model
 from tests.support.synth_chat import MessageWriter
 from twin.config.settings import ScheduleConfig
 from twin.llm.pricing import PeakCalendar
-from twin.memory.recent import register_bot_turn_reader
+from twin.memory.recent import register_bot_turn_reader, registered_bot_turn_reader
 from twin.schedule.summary import queue_previous_day_summaries, summary_scopes, summary_times
 from twin.services import Services
 
@@ -80,8 +80,9 @@ def test_without_the_off_peak_discount_there_is_nothing_to_wait_for() -> None:
 @pytest.fixture
 def rig(services: Services, clock: ManualClock) -> Iterator[Rig]:
     clock.set_time(utc(2026, 10, 9, 12, 0))
+    application_reader = registered_bot_turn_reader()  # the tests below put readers of their own
     yield Rig.build(services, clock, fixed_model())
-    register_bot_turn_reader(None)
+    register_bot_turn_reader(application_reader)
 
 
 def test_the_scopes_are_the_real_records_of_the_day_and_the_bots_conversation(

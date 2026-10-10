@@ -17,12 +17,16 @@ stores the window start (the time of its first turn) in ``conversation_state`` a
 
 A reader is registered with :func:`register_bot_turn_reader` (round 09 does this when its tables
 exist); the memory jobs that need the bot's conversation - the bot's daily summary - ask
-:func:`bot_turn_reader` and do nothing while there is none.
+:func:`bot_turn_reader` and do nothing while there is none.  The registration is one slot for the
+whole process: whoever replaces it for a while (:func:`use_bot_turn_reader`) puts the previous one
+back, because the application registers its reader once, when ``twin.engine.turns`` is imported,
+and nothing registers it again.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -185,10 +189,30 @@ ReaderFactory = Callable[["Services"], BotTurnReader]
 _factory: ReaderFactory | None = None
 
 
-def register_bot_turn_reader(factory: ReaderFactory | None) -> None:
-    """Round 09 calls this with a factory that reads ``bot_turns`` (``None`` unregisters)."""
+def register_bot_turn_reader(factory: ReaderFactory | None) -> ReaderFactory | None:
+    """Round 09 calls this with a factory that reads ``bot_turns`` (``None`` unregisters).
+
+    It returns the factory that was registered before, so a caller that only borrows the
+    registration puts that one back (the registry is one slot for the whole process).
+    """
     global _factory
-    _factory = factory
+    previous, _factory = _factory, factory
+    return previous
+
+
+def registered_bot_turn_reader() -> ReaderFactory | None:
+    """The factory registered now (``None``: no reader), to be put back with the registration."""
+    return _factory
+
+
+@contextmanager
+def use_bot_turn_reader(factory: ReaderFactory | None) -> Iterator[None]:
+    """Read the bot's conversation through ``factory`` in the block, then put the old one back."""
+    previous = register_bot_turn_reader(factory)
+    try:
+        yield
+    finally:
+        register_bot_turn_reader(previous)
 
 
 def bot_turn_reader(services: Services) -> BotTurnReader | None:
