@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -335,27 +336,45 @@ def test_the_fixture_fails_the_test_that_reached_out_even_when_the_client_swallo
 
 
 def _own_address_other_than_loopback() -> str:
-    own = socket.gethostbyname(socket.gethostname())
-    if own.startswith("127."):
-        pytest.skip("this computer has no address other than loopback")
-    return own
+    names = {socket.gethostname(), socket.getfqdn()}
+    for name in sorted(names):
+        try:
+            found = socket.getaddrinfo(name, None, socket.AF_INET)
+        except OSError:
+            continue
+        for _family, _type, _proto, _canon, sockaddr in found:
+            if not str(sockaddr[0]).startswith("127."):
+                return str(sockaddr[0])
+    pytest.skip("this computer has no address other than loopback")
 
 
-def test_an_address_of_this_computer_can_be_let_through_for_one_test() -> None:
+def test_an_address_of_this_computer_is_refused_until_it_is_allowed() -> None:
     own = _own_address_other_than_loopback()
     with guard_network() as guard:
         with pytest.raises(NetworkBlocked):
-            socket.socket().connect((own, 9))
+            guard.check((own, 9), "connect")
         guard.allow_own_address(own)
-        listener = socket.socket()
-        listener.bind((own, 0))
-        listener.listen(1)
-        try:
-            with socket.socket() as client:
-                client.connect((own, listener.getsockname()[1]))  # stays on this computer
-        finally:
-            listener.close()
-    assert guard.attempts == [f"connect {own}:9"]  # only the refused one before the allowance
+        guard.check((own, 9), "connect")  # now it is "this computer"
+        with pytest.raises(NetworkBlocked):
+            guard.check((NOWHERE, 9), "connect")  # and nothing else is
+    assert guard.attempts == [f"connect {own}:9", f"connect {NOWHERE}:9"]
+
+
+def test_a_real_connection_to_an_address_of_this_computer_goes_through_the_fixture(
+    allow_own_address: Callable[[str], None],
+) -> None:
+    own = _own_address_other_than_loopback()
+    allow_own_address(own)
+    listener = socket.socket()
+    listener.bind((own, 0))
+    listener.listen(1)
+    try:
+        with socket.socket() as client:
+            client.connect(
+                (own, listener.getsockname()[1])
+            )  # the packet never leaves this computer
+    finally:
+        listener.close()
 
 
 def test_only_an_address_that_this_computer_owns_can_be_allowed() -> None:
