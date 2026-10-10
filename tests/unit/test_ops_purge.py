@@ -26,6 +26,7 @@ from twin.ops.process_model import ExitCode
 from twin.ops.purge import (
     CONFIRM_ALL,
     CONFIRM_TRAINING,
+    Eraser,
     PurgeItem,
     backup_files,
     database_counts,
@@ -258,6 +259,19 @@ def test_the_command_says_what_could_not_be_deleted_and_ends_with_an_error(
     cli.services.secrets.set(DEEPSEEK_KEY, "synthetic-key-keep-me")
     code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)  # the second run finishes the job
     assert code == 0 and not cli.paths.db_path.exists()
+
+
+def test_the_eraser_takes_files_folders_and_things_that_are_not_there(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    (work / "folder" / "inner").mkdir(parents=True)
+    (work / "folder" / "inner" / "a.bin").write_bytes(b"a")
+    (work / "folder" / "b.bin").write_bytes(b"b")
+    (work / "single.bin").write_bytes(b"c")
+    eraser = Eraser()
+    assert eraser.tree(work / "folder") == 2
+    assert eraser.tree(work / "single.bin") == 1
+    assert eraser.tree(work / "never-there") == 0
+    assert eraser.failed == [] and list(work.iterdir()) == []
 
 
 def test_a_read_only_file_is_made_writable_and_deleted(
