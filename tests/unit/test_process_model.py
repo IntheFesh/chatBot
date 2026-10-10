@@ -180,13 +180,17 @@ def expected_names() -> list[str]:
         "model tunnel start",
         "model tunnel stop",
         "model tunnel status",
+        # round 15: consistency audit, cost and the summary report
+        "eval consistency",
+        "eval cost",
+        "eval report",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 143 == len(expected_names())
+    assert len(names) == 146 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -336,6 +340,11 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "model tunnel start": CommandKind.LIGHT,
         "model tunnel stop": CommandKind.LIGHT,
         "model tunnel status": CommandKind.READ,
+        # round 15: the audit applies memory corrections the user confirms (state_version moves,
+        # so the running application reloads its memory); cost and report write short records
+        "eval consistency": CommandKind.LIGHT,
+        "eval cost": CommandKind.LIGHT,
+        "eval report": CommandKind.LIGHT,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

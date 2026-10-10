@@ -1,4 +1,5 @@
-"""The jobs that run by the clock: backup, monthly cost report (R-OPS-005, R-OPS-006).
+"""The jobs that run by the clock: backup, monthly cost report, the weekly consistency audit
+(R-OPS-005, R-OPS-006, R-EVAL-004).
 
 :class:`OpsScheduler` is a component of the application.  Every 30 seconds it asks, for each
 :class:`OpsTask`, "was the latest due moment of its rule served yet?"
@@ -29,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 from twin.app import ComponentHealth, TaskSupervisor
 from twin.engine.state_store import ConversationStateStore
+from twin.eval.consistency_jobs import CONSISTENCY_RULE, queue_consistency_job
 from twin.ops.backup.service import BackupBusyError, BackupError, BackupService
 from twin.ops.cost import build_report, previous_month, render_html, render_text
 from twin.ops.logging import get_logger
@@ -236,3 +238,19 @@ def cost_report_task(services: Services, mailer: Mailer | None) -> OpsTask:
             TaskResult.FAILED: timedelta(hours=1),
         },
     )
+
+
+def consistency_task(services: Services) -> OpsTask:
+    """Every Monday at 04:20 on the bot's clock: queue the audit of the bot against itself.
+
+    The audit itself is an off-peak job (:mod:`twin.eval.consistency_jobs`); this only queues it,
+    so a week in which the computer was off at that moment is simply not audited (the next audit
+    looks back over seven days again).
+    """
+
+    async def run(due: datetime) -> TaskResult:
+        job_id = await asyncio.to_thread(queue_consistency_job, services)
+        log.info("consistency_audit_queued" if job_id else "consistency_audit_already_waiting")
+        return TaskResult.DONE
+
+    return OpsTask("consistency_audit", CONSISTENCY_RULE, run, catch_up=False)

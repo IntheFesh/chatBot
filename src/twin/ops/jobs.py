@@ -520,6 +520,7 @@ HANDLER_MODULES: tuple[str, ...] = (
     "twin.training.plans",  # the plans of the hybrid share of the training set (round 13b)
     "twin.eval.blind",  # the generation of a blind test's replies (round 09b)
     "twin.eval.memory_test",  # the questions of the memory test (round 09b)
+    "twin.eval.consistency_jobs",  # the weekly consistency audit (round 15)
 )
 
 

@@ -179,6 +179,44 @@ def test_the_style_report_reads_the_live_conversation_or_the_replies_of_a_run(
     assert code == 1 and "no generated replies" in out
 
 
+def test_a_style_report_is_kept_as_a_run_of_numbers_for_the_summary(cli_world: World) -> None:
+    """R-EVAL-008 reads the style results from ``eval_runs``: the command keeps what it shows."""
+    code, _, screen = run("style", "--source", "live", "--days", "7")
+    assert code == 1 and "评估记录：" in screen
+    store = EvalStore(cli_world.services.db, cli_world.services.clock)
+    live = store.latest_run("style")
+    assert live is not None and live.status == "done" and live.verdict == "failed"
+    assert live.mode == "live" and live.backends == ()
+    assert live.params == {"source": "live", "days": 7, "blind_run": None, "backend": None}
+    assert live.summary["source"] == "live" and live.summary["passed"] is False
+    assert [m["key"] for m in live.summary["metrics"]] == [
+        "text_length",
+        "comma_rate",
+        "burst_size",
+        "sticker_share",
+        "emoji_code_rate",
+        "quote_rate",
+    ]
+    assert all(
+        set(m) >= {"reference", "measured", "deviation", "status"} for m in live.summary["metrics"]
+    )
+    blind = store.create_run("blind", mode="holdout", backends=["deepseek"], status="running")
+    store.add_items(
+        blind.id,
+        [NewItem("k0", "deepseek", KNOWN, {"real": {"lines": [{"k": "text", "t": "你好"}]}})],
+    )
+    item = store.items(blind.id)[0]
+    store.save_generated(
+        item.id, {"bot": {"quote": None, "lines": [{"k": "text", "t": "你好呀"}]}}, cost_usd=0.0
+    )
+    run("style", "--source", "eval_items", "--run", blind.id, "--backend", "deepseek")
+    held = store.latest_run("style")
+    assert held is not None and held.id != live.id
+    assert held.mode == "holdout" and held.backends == ("deepseek",)
+    assert held.params["source"] == "eval_items" and held.params["blind_run"] == blind.id
+    assert "你好" not in str(held.summary)  # numbers and names only, not what was said
+
+
 def test_the_memory_test_with_too_few_facts_from_the_bot_is_not_passed(cli_world: World) -> None:
     add_memory_facts(cli_world, real=12, bot=4)
     code, _, screen = run("memory")

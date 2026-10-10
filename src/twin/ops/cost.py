@@ -45,6 +45,7 @@ class CostReport:
     monthly_budget_usd: float
     daily_budget_usd: float
     days_over_daily: int
+    one_time_purposes: tuple[SpendSummary, ...] = ()  # what the one-time batches were for
 
     @property
     def month_ratio(self) -> float:
@@ -96,6 +97,9 @@ def build_report(
         monthly_budget_usd=budget.monthly_usd,
         daily_budget_usd=budget.daily_usd,
         days_over_daily=sum(1 for day in days if day.cost_usd > budget.daily_usd > 0),
+        one_time_purposes=tuple(
+            sorted(ledger.by_purpose(start, end, account="one_time"), key=_by_cost)
+        ),
     )
 
 
@@ -130,6 +134,9 @@ def render_text(report: CostReport) -> str:
     if report.one_time.calls:
         spent, calls = _usd(report.one_time.cost_usd), report.one_time.calls
         lines.append(f"一次性任务（不占预算）{spent}，{calls} 次调用")
+        lines += [
+            f"  一次性 · {_line(row, report.one_time.cost_usd)}" for row in report.one_time_purposes
+        ]
     lines += ["", "按用途"]
     lines += [_line(row, total.cost_usd) for row in report.purposes] or ["（没有调用）"]
     lines += ["", "按模型"]
@@ -177,6 +184,8 @@ def report_to_json(report: CostReport) -> dict[str, object]:
         "offpeak_usd": round(report.offpeak.cost_usd, 6),
         "peak_share": round(report.peak_share, 4),
         "one_time_usd": round(report.one_time.cost_usd, 6),
+        "one_time_calls": report.one_time.calls,
+        "one_time_by_purpose": rows(report.one_time_purposes),
         "by_day": rows(report.days),
         "by_purpose": rows(report.purposes),
         "by_model": rows(report.models),

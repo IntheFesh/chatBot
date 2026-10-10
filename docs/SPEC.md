@@ -158,7 +158,8 @@ style_model:
   top_p: 0.9
 autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
 training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
-eval: { blind_n: 50, memory_questions: 20 }
+eval: { blind_n: 50, memory_questions: 20, consistency_days: 7, consistency_reply_chars: 12000,
+        consistency_facts: 40 }   # 第 15 轮新增：一致性审计的回看天数、交给模型的回复字数与事实条数
 commands: { confirm_window_min: 60, pause_max_h: 168, morning_hour: 8, import_poll_s: 5.0 }
 learning: { rules_max: 30, rules_interval_days: 7, rule_max_chars: 40, detect_corrections: true,
             check_interval_s: 3600.0 }   # 第 11 轮新增：commands 的 4 个键与 learning 的 5 个键
@@ -179,7 +180,7 @@ safety:
 - **R-STO-003** 主密钥 256 位，首次运行生成并存入 `keyring`；每个密钥有 `key_id`，密文与备份都记录所用 `key_id`。`twin secrets rotate-db-key` 支持密钥轮换（重加密全部字段，可中断续跑）；轮换后旧密钥标记为"已退役"但保留在 keyring 中，直到没有任何保留期内的备份引用它才删除（保证旧备份仍可恢复）；一键删除（R-OPS-008）删除全部密钥。
 - **R-STO-004** 媒体文件（她的照片、语音、视频、头像）加密存储于 `data/media/<sha256>.enc`；表情包图片同样加密（统一处理，避免分支）；需要时解密到进程内存或受控临时目录并即用即删。
 - **R-STO-005** 向量库（LanceDB）只存向量、行 id、非敏感元数据（时间戳、类型），不存明文。
-- **R-STO-006** 必须的表（字段在实现中细化，字段名用英文）：`conversations`、`messages`、`media_assets`、`stickers`、`sticker_uses`、`import_runs`、`jobs`、`profile_versions`、`activity_models`、`routine_overrides`、`persona_cards`、`prompt_templates`、`example_windows`、`facts`、`daily_summaries`、`lifeline_events`、`followups`、`daily_plans`、`timezone_history`、`bot_turns`（机器人会话每条进出消息）、`conversation_state`、`proactive_candidates`、`proactive_log`、`ratings`、`feedback`、`preference_pairs`、`settings`、`cost_ledger`、`channel_state`、`alerts`、`health_snapshots`、`backup_records`、`training_runs`、`dataset_versions`、`model_registry`、`eval_runs`、`eval_items`。各表由首次使用它的轮次建立（见 TRACEABILITY）。
+- **R-STO-006** 必须的表（字段在实现中细化，字段名用英文）：`conversations`、`messages`、`media_assets`、`stickers`、`sticker_uses`、`import_runs`、`jobs`、`profile_versions`、`activity_models`、`routine_overrides`、`persona_cards`、`prompt_templates`、`example_windows`、`facts`、`daily_summaries`、`lifeline_events`、`followups`、`daily_plans`、`timezone_history`、`bot_turns`（机器人会话每条进出消息）、`conversation_state`、`proactive_candidates`、`proactive_log`、`ratings`、`feedback`、`preference_pairs`、`settings`、`cost_ledger`、`channel_state`、`alerts`、`health_snapshots`、`backup_records`、`training_runs`、`dataset_versions`、`model_registry`、`eval_runs`、`eval_items`、`consistency_findings`、`consistency_fixes`。各表由首次使用它的轮次建立（见 TRACEABILITY）。
 - **R-STO-007** `messages` 与 `bot_turns` 是两张物理隔离的表；任何"风格样本/检索/训练"查询只能读 `messages` 中 `is_sent=false` 的她的真实消息（R-RET-004、R-TRN-004 有测试守护）。
 
 ## 5. 微信通道（R-CH）
@@ -203,7 +204,7 @@ safety:
 - **R-LLM-003** JSON 输出：需要结构化结果的调用（规划、抽取、打标签、评审）使用 JSON 输出并用 pydantic 校验；校验失败带错误信息重试一次，仍失败则记为任务失败（离线任务进重试队列；在线路径降级）。
 - **R-LLM-004** 看图：`deepseek-flash` 视觉；图片以 `image_url` 的 base64 data URL 放在 `user` 消息中（system/assistant 中放图会 400）；支持 JPEG/PNG/GIF/WebP；表情包用 `detail: low`，照片用 `auto`（`detail` 是否被接受以 R-LLM-013 实测为准，不接受则不发送该参数）；每张图计费上限 1024 tokens（实际计费以实测为准，用于费用估算）。
 - **R-LLM-005** 可靠性：429/5xx/超时指数退避重试（最多 4 次，带抖动）；全局并发信号量；连续 10 次失败触发熔断 5 分钟并告警。
-- **R-LLM-006** 费用记账：每次调用把 `prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`、`completion_tokens`（含推理 token）按价格表与是否高峰计入 `cost_ledger`，带 `purpose` 标签（reply / plan / proactive / extract / summary / persona / caption / sticker_tag / eval / train_plan）。
+- **R-LLM-006** 费用记账：每次调用把 `prompt_cache_hit_tokens`、`prompt_cache_miss_tokens`、`completion_tokens`（含推理 token）按价格表与是否高峰计入 `cost_ledger`，带 `purpose` 标签（reply / plan / proactive / extract / summary / persona / caption / sticker_tag / eval / train_plan / consistency）。
 - **R-LLM-007** 高峰判定：北京日期为工作日（用 `chinese_calendar.is_workday()` 判定，含调休上班的周末，不含法定节假日）时，UTC 01:00–04:00 与 06:00–10:00 为高峰，其余为非高峰。`chinese-calendar` 对未收录年份会抛异常——此时回退为"周一至周五为工作日"并合并配置 `pricing.extra_offpeak_dates`/`extra_peak_dates`，同时告警、在 `twin doctor` 中提示升级该依赖。非高峰价格倍率为 `pricing.offpeak_multiplier`（默认 0.5；官方取消优惠时设为 1.0，此时离线任务不再等待非高峰）。提供 `next_offpeak_window(now)`，离线任务默认只在非高峰执行（可设截止时间强制执行）。
 - **R-LLM-008** 预算：日预算与月预算；达到 80% 告警；超出按顺序降级并告警：① 关闭聊天思考 ② 检索例子 8→3、记忆上下文预算减半 ③ 暂停主动消息 ④ 若已激活的风格模型通过了上线门槛（R-SRV-005）且健康，则切到该风格后端，否则保持最小上下文的非思考 DeepSeek。任何情况下都不停止回复用户。一次性批任务的费用不参与本条判断（R-LLM-014）。进入各级的花费占预算比例由 `budget.degrade_ratios` 给出（默认 1.0 / 1.25 / 1.5 / 2.0，取日预算与月预算中比例较大者）。
 - **R-LLM-009** 脱敏 `twin.llm.redaction`：发往 DeepSeek/AutoDL 前替换手机号（中国 `1[3-9]\d{9}` 与美国格式）、邮箱、身份证号（18 位含校验位）、银行卡号（16–19 位且通过 Luhn）、详细地址（省/市/区/路/号/栋/单元/室等启发式）、wxid；替换为类型占位符（如 `[手机号]`）。输出后处理检测占位符外泄（R-ENG-012）。脱敏有属性测试（hypothesis）。

@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from twin.engine.conversation_log import conversation_since
 from twin.eval.render import Candidate
@@ -194,6 +194,23 @@ class MetricResult:
     def counts(self) -> bool:
         return self.status != "n/a"
 
+    def to_json(self) -> dict[str, Any]:
+        """The numbers of the metric (no text): hers, the bot's, the deviation and the verdict."""
+
+        def reading(value: MetricReading | None) -> dict[str, Any] | None:
+            return None if value is None else {"value": value.value, "n": value.n}
+
+        return {
+            "key": self.key,
+            "label": self.label,
+            "reference": reading(self.reference),
+            "measured": reading(self.measured),
+            "deviation": self.deviation,
+            "status": self.status,
+            "interval": list(self.interval) if self.interval else None,
+            "real": reading(self.real),
+        }
+
 
 def deviation_of(reference: float | None, measured: float | None) -> float | None:
     """``(measured - reference) / reference``; 0 when both are 0; ``None`` when undefined."""
@@ -249,6 +266,21 @@ class StyleReport:
         """Every metric that can be measured is within the tolerance (and at least one was)."""
         counted = [r for r in self.results if r.counts]
         return bool(counted) and all(r.status == "pass" for r in counted)
+
+    def to_json(self) -> dict[str, Any]:
+        """The report as numbers and closed names, to be kept with a ``style`` evaluation run."""
+        return {
+            "source": self.source,
+            "scope": self.scope,
+            "backend": self.backend,
+            "blind_run": self.run_id,
+            "days": self.days,
+            "messages": self.messages,
+            "passed": self.passed,
+            "tolerance": TOLERANCE,
+            "metrics": [result.to_json() for result in self.results],
+            "notes": list(self.notes),
+        }
 
     @property
     def worst(self) -> list[MetricResult]:

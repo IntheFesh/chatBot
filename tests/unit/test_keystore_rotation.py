@@ -235,6 +235,9 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "proactive_candidates": {"detail"},
         "proactive_log": {"plan_reason", "content", "result"},
         "ratings": {"note"},
+        # round 15: what the consistency audit found (statements) and the corrections it proposed
+        "consistency_findings": {"payload"},
+        "consistency_fixes": {"payload"},
     }
 
 

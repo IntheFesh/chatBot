@@ -418,6 +418,11 @@ class TrainingConfig(_Section):
 class EvalConfig(_Section):
     blind_n: int = Field(default=50, ge=1)
     memory_questions: int = Field(default=20, ge=1)
+    # the weekly consistency audit (round 15, R-EVAL-004): how many days it looks back, how many
+    # characters of the bot's replies and how many facts it hands to DeepSeek
+    consistency_days: int = Field(default=7, ge=1, le=60)
+    consistency_reply_chars: int = Field(default=12000, ge=500)
+    consistency_facts: int = Field(default=40, ge=0)
 
 
 class CommandsConfig(_Section):

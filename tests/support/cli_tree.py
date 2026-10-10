@@ -108,11 +108,7 @@ def ROOT_INFO() -> CommandInfo:
 # round 15 is developed in parallel.  A document may name them as long as they do not exist; the
 # moment one does, the entry must go (``test_docs_commands`` fails until it does) and the command is
 # checked like every other.  The options are the ones the prompt names.
-PENDING_COMMANDS: dict[tuple[str, ...], frozenset[str]] = {
-    ("eval", "consistency"): frozenset({"--days"}),
-    ("eval", "cost"): frozenset({"--month"}),
-    ("eval", "report"): frozenset(),
-}
+PENDING_COMMANDS: dict[tuple[str, ...], frozenset[str]] = {}
 
 GLOBAL_WITH_VALUE = frozenset({"--config", "-c", "--set", "--log-level"})
 

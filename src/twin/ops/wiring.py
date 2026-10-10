@@ -4,7 +4,8 @@
 
 * ``alert_delivery`` - the notifications and e-mails of :mod:`twin.ops.alerts`;
 * ``health_monitor`` - the minute-by-minute check (:mod:`twin.ops.monitor`);
-* ``ops_scheduler`` - the daily backup and the monthly cost mail (:mod:`twin.ops.scheduler`);
+* ``ops_scheduler`` - the daily backup, the monthly cost mail and the weekly queueing of the
+  consistency audit (:mod:`twin.ops.scheduler`);
 * ``login_recovery`` - the QR window when the WeChat login is lost (WeChat channel only).
 
 The builders (:func:`build_mailer`, :func:`build_emergency_notifier`) are the one place where the
@@ -29,7 +30,7 @@ from twin.ops.login_recovery import LoginRecovery
 from twin.ops.mail import SMTP_PASSWORD_SECRET, Mailer, SmtpMailer
 from twin.ops.monitor import HealthMonitor
 from twin.ops.notify import Notifier, default_notifier
-from twin.ops.scheduler import OpsScheduler, backup_task, cost_report_task
+from twin.ops.scheduler import OpsScheduler, backup_task, consistency_task, cost_report_task
 from twin.schedule.component import ScheduleComponent
 from twin.schedule.events import Resumed
 from twin.schedule.service import time_service_for
@@ -125,7 +126,11 @@ def register_ops(
     backup = BackupService.from_services(services)
     scheduler = OpsScheduler(
         services,
-        [backup_task(services, backup, busy=busy), cost_report_task(services, mailer)],
+        [
+            backup_task(services, backup, busy=busy),
+            cost_report_task(services, mailer),
+            consistency_task(services),
+        ],
         zone=time.bot_timezone,
     )
     if schedule is not None:
