@@ -84,6 +84,17 @@ def peak_rss_bytes() -> int:
         if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
             return int(counters.PeakWorkingSetSize)
         return 0
+    if sys.platform.startswith("linux"):
+        # ``ru_maxrss`` survives fork + exec on Linux: a child started by a big parent (a pytest
+        # process that has already run thousands of tests) would report the parent's high-water
+        # mark.  ``VmHWM`` belongs to the current address space, which exec replaces, so it is
+        # the peak of this process alone (D-493).
+        try:
+            for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass  # no procfs: fall back to getrusage below
     import resource
 
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

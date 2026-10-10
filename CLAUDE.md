@@ -72,6 +72,7 @@ wechat-twin/
 ```
 uv sync                       # 安装依赖
 uv run pytest -q              # 全部测试
+uv run python scripts/shard_tests.py --shard 1 --of 3   # 本地取 CI 的一片测试文件（见 docs/CI.md）
 uv run ruff check . && uv run ruff format --check .
 uv run mypy src/twin
 uv run twin --help            # CLI

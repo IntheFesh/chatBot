@@ -26,6 +26,8 @@ dist/
 .coverage
 .coverage.*
 coverage.json
+junit*.xml
+shard-files.txt
 htmlcov/
 .mypy_cache/
 .ruff_cache/
