@@ -105,12 +105,14 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     await world.run_until_idle()
     said = world.said[-2:]
     assert said[0].text == "看电影"
-    assert said[1].kind == "system" and said[1].text == f"{PREFIX}思考：她问我周末的安排，我想去看电影"
+    assert (
+        said[1].kind == "system" and said[1].text == f"{PREFIX}思考：她问我周末的安排，我想去看电影"
+    )
     assert world.deepseek.of_kind("reply")[-1].body["thinking"] == {"type": "enabled"}
     assert await desk("/显示思考 关") == texts.SHOW_SET_OFF
     await desk("/思考 关")
 
-    # ---- the backend ------------------------------------------------------------------------------
+    # ---- the backend -----------------------------------------------------------------------------
     assert await desk("/后端 deepseek") == texts.BACKEND_SET.format(name="deepseek")
     refused = await desk("/后端 style")  # no model is registered: refused, nothing changes
     assert "还没有登记风格模型" in refused and runtime.get(BACKEND_ACTIVE) == "deepseek"
@@ -119,7 +121,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert await desk("/重来") == texts.REDO_DONE
     await world.run_until_idle()
     assert world.persona_said[-1].text == "逛街"
-    first = [r for r in world.out_rows() if r.text == "看电影"][0]
+    first = next(r for r in world.out_rows() if r.text == "看电影")
     assert first.rejected_at is not None  # a negative example, and not a message of hers any more
     with world.services.db.session() as session:
         assert [row.type for row in session.scalars(select(Feedback))] == ["redo"]
@@ -130,7 +132,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert (await desk("/不像")).startswith(texts.NOT_LIKE_DONE)
     book.queue.append("好的")
 
-    # ---- time zone, pause, resume --------------------------------------------------------------------
+    # ---- time zone, pause, resume ----------------------------------------------------------------
     assert (await desk("/时区 查看")).startswith("当前时区：America/Chicago")
     assert "America/Chicago" in await desk("/时区：查看")  # the colon of a Chinese keyboard
     paused = await desk("/暂停 2小时")
@@ -145,7 +147,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert world.persona_said[-1].text == "好的" and len(world.persona_said) == spoken + 1
     assert await desk("/恢复") == texts.RESUME_NOT_PAUSED
 
-    # ---- how often she writes first -------------------------------------------------------------------
+    # ---- how often she writes first --------------------------------------------------------------
     assert "每天 2-5 条" in await desk("/主动 2-5")
     assert (runtime.get(PROACTIVE_DAILY_MIN), runtime.get(PROACTIVE_DAILY_MAX)) == (2, 5)
     assert "已关闭" in await desk("/主动 关") and runtime.get(PROACTIVE_ENABLED) is False
@@ -153,7 +155,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     wrong = await desk("/主动 9-1")  # a wrong argument: the usage, never a trace
     assert "用法：/主动 <最少>-<最多>|开|关" in wrong and "例如：/主动 2-5" in wrong
 
-    # ---- her routine --------------------------------------------------------------------------------------
+    # ---- her routine -----------------------------------------------------------------------------
     assert "第 1 条" in await desk("/作息 睡 01:00-08:30")
     assert "第 2 条" in await desk("/作息 忙 周一 09:00-11:00")
     assert "第 3 条" in await desk("/作息 假期 2026-10-12..2026-10-14")
@@ -163,14 +165,14 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert "已删除第 1 条" in await desk("/作息 删除 1")
     assert "睡眠" not in await desk("/作息 查看")
 
-    # ---- memory ------------------------------------------------------------------------------------------------
+    # ---- memory ----------------------------------------------------------------------------------
     assert (await desk("/记住 她下周三有考试")).startswith("记住了（第 1 条）：她下周三有考试")
     assert (await desk("/记忆")).startswith("1. 她下周三有考试")
     assert (await desk("/记忆 考试")).startswith("1. 她下周三有考试")
     assert "第 1 条：她下周三有考试" in await desk("/忘掉 1")
     assert await desk("/记忆") == "还没有记住什么。"
 
-    # ---- rating, cost, import --------------------------------------------------------------------------------
+    # ---- rating, cost, import --------------------------------------------------------------------
     assert "记下了：4/5" in await desk("/评分 4 晚安发得很自然")
     assert "分数要在 1 到 5 之间" in await desk("/评分 9")
     today = await desk("/费用 今天")
@@ -180,7 +182,7 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     assert missing.startswith("找不到这个文件夹")
     assert not [kind for kind, *_ in world.job_rows() if "import" in kind]  # none queued
 
-    # ---- the table's own edges: unknown commands, other spellings ------------------------------------------
+    # ---- the table's own edges: unknown commands, other spellings --------------------------------
     desk.sent.append("/没有这条")
     await world.say("/没有这条")  # not in the table: the summary of what is, never chat
     unknown = world.system_said[-1].text
@@ -191,12 +193,12 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
     await world.run_until_idle()
     assert len(world.persona_said) == spoken + 1
 
-    # ---- the whole table was used --------------------------------------------------------------------------------
+    # ---- the whole table was used ----------------------------------------------------------------
     table = {spec.name for spec in router.registry.specs()}
     assert desk.used == table, f"not used: {table - desk.used}"
     assert table == SPEC_TABLE  # and it is the table of the specification (R-CMD-002)
 
-    # ---- what holds for every command ---------------------------------------------------------------------------
+    # ---- what holds for every command ------------------------------------------------------------
     rows = world.rows()
     commands = [row for row in rows if row.is_command]
     assert [r.text for r in commands if r.direction == "in"] == desk.sent

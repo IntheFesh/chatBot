@@ -4,7 +4,7 @@ The model is served by a made-up ``llama-server`` (a real HTTP server on the loo
 the way ``/health`` and ``/completion`` do), and the application of ``twin run`` talks to it
 through its own client and its own backend selector:
 
-* ``/后端 hybrid``: DeepSeek only plans, the style model writes - the reply says so in ``bot_turns``;
+* ``/后端 hybrid``: DeepSeek only plans, the style model writes - ``bot_turns`` says so;
 * the server dies: the next reply is DeepSeek's, nothing of the trouble is shown to him, the
   selector records why and since when (``backend.fallback``), and the alert ``style_model_down``
   goes through the alert service;

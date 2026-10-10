@@ -19,7 +19,7 @@ next    a new local day: level 0 again - thinking, eight examples, the greeting 
 from __future__ import annotations
 
 import re
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -90,7 +90,7 @@ async def test_the_budget_degrades_in_order_and_recovers_the_next_day(
     assert body["thinking"] == {"type": "disabled"} and len(EXAMPLE.findall(prompt)) == 3
     assert budget.limits().memory_budget_factor == 0.5
 
-    # ---- a dollar and a half: level 3, she stops writing first --------------------------------------
+    # ---- a dollar and a half: level 3, she stops writing first -----------------------------------
     await spend(world, 0.26, "我想看喜剧")
     assert budget.limits().level == 3 and not budget.limits().proactive_allowed
     sent_before = len(world.proactive_rows(outcomes=["sent"]))

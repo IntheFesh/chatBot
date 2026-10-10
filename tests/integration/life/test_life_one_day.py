@@ -8,8 +8,8 @@ made up (``tests/support/life_world.py``).  The user lives one Friday in Chicago
 * at half past nine he writes three messages in a row: she answers once, after he is done;
 * he sends a photo, and a few minutes later a sticker: she sees the photo through its description,
   answers the sticker with one of her own, and no photo of anyone ever goes out;
-* he is silent through the noon: she writes first (a meal, a piece of her day) but never in her sleep
-  and never closer than an hour apart;
+* he is silent through the noon: she writes first (a meal, a piece of her day) but never in her
+  sleep and never closer than an hour apart;
 * in the afternoon she is busy: his question waits for the busy window's latency;
 * in the evening he says he has an exam tomorrow: half an hour later the memory holds a follow-up;
 * she says good night before she goes to sleep;

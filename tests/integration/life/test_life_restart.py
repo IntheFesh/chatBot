@@ -1,4 +1,4 @@
-"""The process is killed in the middle of a reply and started again (R-ENG-001, R-CH-004, R-SCH-005).
+"""The process is killed in the middle of a reply and started again (R-ENG-001, R-CH-004).
 
 This one runs on the WeChat channel: the platform and the user's phone are made up
 (``tests/support/wechat_double.py``), the channel is the production ``IlinkChannel`` with its
@@ -81,7 +81,8 @@ async def test_killed_between_two_bubbles_the_rest_follows_once_and_in_order(
     assert phone(world) == list(COUNT)  # each bubble once, in order
     assert stored_indexes(world) == [(text, number) for number, text in enumerate(COUNT)]
     assert world.deepseek.calls["reply"] == 1  # the reply was not written again
-    third = [d for d in world.double.phone.delivered if d.text == "三"][0]  # type: ignore[union-attr]
+    assert world.double is not None
+    third = next(d for d in world.double.phone.delivered if d.text == "三")
     assert third.at - restarted >= timedelta(seconds=1)  # not the moment the machine is back
     assert world.now >= dead_until
     assert len({row.reply_id for row in world.out_rows()}) == 1  # one reply, four bubbles

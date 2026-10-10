@@ -63,6 +63,15 @@ def test_crisis_keywords_cover_self_harm_despair_and_harm_to_others() -> None:
         "红包发你了",
         "我给你买单",
         "我等下去你家做饭",
+        "我拍给你看",  # a photo without the word for it
+        "晚点拍给你看哈",
+        "拍个照给你看",
+        "我录个视频给你看",
+        "我给你拍一张",
+        "我拍一下发你",
+        "我明天去找你",  # a time between "I" and "go"
+        "我后天就过去看你",
+        "我周末来接你",
     ],
 )
 def test_commitment_patterns_catch_promises_of_real_world_actions(sentence: str) -> None:
@@ -72,7 +81,23 @@ def test_commitment_patterns_catch_promises_of_real_world_actions(sentence: str)
 
 @pytest.mark.parametrize(
     "sentence",
-    ["今天吃什么", "好烦啊", "我在上班", "哈哈哈哈", "你吃饭了吗", "晚安", "我刚到家", "好困"],
+    [
+        "今天吃什么",
+        "好烦啊",
+        "我在上班",
+        "哈哈哈哈",
+        "你吃饭了吗",
+        "晚安",
+        "我刚到家",
+        "好困",
+        "你拍的照片发给我看看",  # asking for one is not promising one
+        "照片拍得好好看",
+        "我在拍作业呢",
+        "他们拍给你们看了",
+        "录取结果出来了没",
+        "你明天来找我吗",
+        "我明天去上课",
+    ],
 )
 def test_commitment_patterns_leave_ordinary_chat_alone(sentence: str) -> None:
     patterns = load_regex_list(LISTS / "commitment_patterns.txt")

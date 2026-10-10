@@ -2,9 +2,9 @@
 
 A sleeping machine stops everything and its wall clock goes on: when it wakes up, the wall clock
 has moved three hours more than the monotonic clock did (``clock.jump_wall``).  The application of
-``twin run`` notices (the power monitor's clock-jump fallback; on Windows also ``WM_POWERBROADCAST``),
-and on the WeChat channel - the platform keeps what the user wrote while it slept - the wake-up
-flow does what the specification says:
+``twin run`` notices (the power monitor's clock-jump fallback; on Windows also
+``WM_POWERBROADCAST``), and on the WeChat channel - the platform keeps what the user wrote while
+it slept - the wake-up flow does what the specification says:
 
 * a message of her own that was planned for the time of the sleep is void: it is not sent three
   hours late, and the log says it was interrupted;
@@ -52,7 +52,11 @@ async def sleep_the_machine(world: LifeWorld, *, message_after: timedelta, text:
     world.double.user_types(text)  # the platform keeps it; nobody is home to fetch it
     world.clock.jump_wall((SLEEP - message_after).total_seconds())
     woke = world.now
+    taken = world.handled
     await world.clock.step(5)  # the power monitor's next look
+    # the channel connects again and fetches what the platform kept (a few polls, a second each)
+    await world.run_until(woke + timedelta(minutes=2), until=lambda: world.handled > taken)
+    assert world.handled > taken, "the message the platform kept was never fetched"
     return woke
 
 
@@ -67,7 +71,7 @@ async def test_a_wake_up_in_the_evening_voids_what_was_planned_and_answers_with_
     await world.say("我去开会啦")
     await world.run_until(world.local(17, 30))
     plan_before = world.plan().id
-    planned = [c for c in world.assembly.proactive.scheduler.candidates.pending()]
+    planned = list(world.assembly.proactive.scheduler.candidates.pending())
     dinner = [c for c in planned if c.kind == "meal" and c.planned_at > world.local(18, 0)]
     assert dinner and dinner[0].window_end < world.local(18, 45)  # asked about dinner at ~18:20
     assert announcements(world) == 1
@@ -87,7 +91,7 @@ async def test_a_wake_up_in_the_evening_voids_what_was_planned_and_answers_with_
     assert ("system_resumed", "warning") in world.alerts()
     assert world.plan().id == plan_before  # the plan was current: nothing to rebuild
 
-    # ---- the message of 18:00 is answered with her usual delay, counted from the wake-up -----------
+    # ---- the message of 18:00 is answered with her usual delay, counted from the wake-up ---------
     answer = world.persona_said[-1]
     assert answer.text == "嗯嗯" and answer.at >= woke + QUIET_WINDOW
     assert answer.at - woke < timedelta(minutes=30)  # a normal delay, not three hours of it
@@ -115,7 +119,7 @@ async def test_a_wake_up_after_midnight_makes_the_plan_of_the_new_day(
     onset, wake = friday.night.onset, friday.night.wake
     assert onset < world.local(1, 0, on=SATURDAY) and wake > world.local(6, 0, on=SATURDAY)
 
-    # ---- asleep from 23:00 to 02:00: the schedule never saw midnight --------------------------------
+    # ---- asleep from 23:00 to 02:00: the schedule never saw midnight -----------------------------
     woke = await sleep_the_machine(world, message_after=timedelta(minutes=60), text="睡了吗")
     assert woke == world.local(2, 0, on=SATURDAY)
     await world.run_for(minutes=10)
@@ -126,7 +130,7 @@ async def test_a_wake_up_after_midnight_makes_the_plan_of_the_new_day(
     sent = [r for r in world.proactive_rows(outcomes=["sent"]) if r.at >= world.local(23, 0)]
     assert sent == []  # the good night planned for 23:15 is not sent at 02:00
 
-    # ---- his message waits for her morning ----------------------------------------------------------------
+    # ---- his message waits for her morning -------------------------------------------------------
     assert [s for s in world.persona_said if s.at >= world.local(23, 0)] == []
     await world.run_until_idle()
     answer = world.persona_said[-1]

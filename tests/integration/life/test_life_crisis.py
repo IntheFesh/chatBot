@@ -2,8 +2,8 @@
 
 At ten past three in the morning, with her in deep sleep, the user writes that he does not want to
 live any more.  The application of ``twin run`` screens the words locally, asks DeepSeek for a
-second judgement, and - confirmed - answers *before* the night is over, out of the role, with a fixed
-text and the help lines of the country the bot lives in.  What the rest of the story shows:
+second judgement, and - confirmed - answers *before* the night is over, out of the role, with a
+fixed text and the help lines of the country the bot lives in.  What the rest of the story shows:
 
 * the answer is not queued behind her sleep, carries no persona, and costs one judgement;
 * an alert for the user himself is written; no mail goes anywhere (the emergency contact is off);
@@ -61,19 +61,19 @@ async def test_a_crisis_is_answered_at_once_and_out_of_the_role(make_world: Worl
     assert ("crisis_detected", "critical") in world.alerts()  # told to him, in the alerts
     assert "emergency_contact" not in categories  # nobody else is told (R-SAFE-001): it is off
 
-    # ---- an answer out of the role cannot be thrown away and written again ------------------------
+    # ---- an answer out of the role cannot be thrown away and written again -----------------------
     await world.say("/重来")
     assert world.system_said[-1].text == texts.PREFIX + texts.REDO_SAFETY
     assert world.deepseek.calls["reply"] == 0
 
-    # ---- he is better; she is in the role again, after her sleep ----------------------------------
+    # ---- he is better; she is in the role again, after her sleep ---------------------------------
     await world.say("谢谢你 我好多了")
     await world.run_until_idle()
     wake = world.plan(FRIDAY).morning.wake
     assert world.persona_said[-1].text == "嗯嗯" and world.persona_said[-1].at >= wake
     assert world.deepseek.calls["reply"] == 1
 
-    # ---- a word of the list in a harmless sentence: judged, and answered as always -----------------
+    # ---- a word of the list in a harmless sentence: judged, and answered as always ---------------
     await world.run_until(world.local(14, 0, on=FRIDAY))
     alerts = len(world.alerts())
     await world.say("刚才好尴尬 我想消失")

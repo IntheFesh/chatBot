@@ -56,7 +56,7 @@ async def test_a_short_count_merges_bubbles_and_closes_the_door_on_her_own_messa
     world.deepseek.on_her_own["meal"] = (("吃了吗", "吃的什么", "我也饿了"),)
     state = world.channel.session_state
 
-    # ---- a reply of five bubbles into the two that the reserve leaves ------------------------------
+    # ---- a reply of five bubbles into the two that the reserve leaves ----------------------------
     await world.say("数数")
     assert state().remaining_quota == QUOTA
     await world.run_until_idle()
@@ -68,17 +68,17 @@ async def test_a_short_count_merges_bubbles_and_closes_the_door_on_her_own_messa
     assert steps_of(first).get("quota_merge") == 3  # five bubbles into two: three merges
     assert state().remaining_quota == RESERVE
 
-    # ---- lunch: she asks in three bubbles; one is kept for a chase, so one is left -------------------
+    # ---- lunch: she asks in three bubbles; one is kept for a chase, so one is left ---------------
     await world.run_until(world.local(13, 0))
     lunch = [r for r in world.proactive_rows(outcomes=["sent"]) if r.kind == "meal"]
     assert len(lunch) == 1 and lunch[0].bubbles_sent == 1
     sent = [s for s in world.persona_said if s.at >= lunch[0].at]
     assert [s.text for s in sent] == ["吃了吗 吃的什么 我也饿了"]  # put together, not cut
-    row = [r for r in world.out_rows() if r.at >= lunch[0].at][0]
+    row = next(r for r in world.out_rows() if r.at >= lunch[0].at)
     assert steps_of(row).get("quota_merge") == 2
     assert state().remaining_quota == 1
 
-    # ---- dinner is the chase: the last message that fits; then the count is used up -------------------
+    # ---- dinner is the chase: the last message that fits; then the count is used up --------------
     await world.run_until(world.local(19, 0))
     dinner = [r for r in world.proactive_rows(outcomes=["sent"]) if r.at > lunch[0].at]
     assert lunch[0].chase_seq == 0
@@ -93,7 +93,7 @@ async def test_a_short_count_merges_bubbles_and_closes_the_door_on_her_own_messa
     assert refused and all(r.at > dinner[0].at for r in refused)  # the log says: the count is used
     assert not [s for s in world.persona_said if s.at > dinner[0].at + timedelta(minutes=5)]
 
-    # ---- he writes: the count starts afresh ------------------------------------------------------------------
+    # ---- he writes: the count starts afresh ------------------------------------------------------
     await world.say("数数")
     assert state().remaining_quota == QUOTA
     await world.run_until_idle()

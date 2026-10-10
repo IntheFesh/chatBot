@@ -29,9 +29,15 @@ class ShortAnswers:
 
     @classmethod
     def from_phrases(cls, phrases: dict[str, Any] | None) -> ShortAnswers:
-        """The short answers among the frequent sentences of a profile (``None``: no profile)."""
+        """The short answers among the frequent sentences of a profile (``None``: no profile).
+
+        ``phrases`` is the payload a profile version stores: the frequent sentences of each
+        party, ``{"her": {"sentences": [[text, count], ...], ...}, "user": {...}}``.  The words
+        are hers - what the user says is never an answer of hers.
+        """
         found: list[tuple[str, int]] = []
-        for entry in (phrases or {}).get("sentences", ()):
+        her = (phrases or {}).get("her")
+        for entry in her.get("sentences", ()) if isinstance(her, dict) else ():
             try:
                 text, count = str(entry[0]).strip(), int(entry[1])
             except (IndexError, TypeError, ValueError):

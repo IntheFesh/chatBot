@@ -30,9 +30,10 @@ import re
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -49,6 +50,7 @@ from tests.support.life_clock import HOUSEKEEPING, LifeClock
 from tests.support.life_screen import Said, TimedOutput
 from tests.support.lifeline import ScriptedLifelineModel
 from tests.support.memory import ScriptedMemoryModel
+from tests.support.network import OfflineTransport
 from tests.support.persona import attach_files, sync_counters
 from tests.support.proactive_world import ProactiveScript, proactive_model
 from tests.support.style_models import register_model
@@ -59,6 +61,7 @@ from twin.assembly import Assembly, assemble
 from twin.channel.base import Channel, MediaRef, MessageKind
 from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.state import ChannelStateStore
+from twin.clock import set_active_clock
 from twin.config.runtime import BOT_TIMEZONE
 from twin.engine.roundstate import RoundData
 from twin.engine.turns import BotTurnStore
@@ -73,8 +76,9 @@ from twin.schedule.plan_model import DailyPlan
 from twin.schedule.proactive.store import LogEntry, ProactiveLogStore
 from twin.schedule.service import schedule_kit
 from twin.schedule.store import SALT_KEY
-from twin.services import Services, build_services
+from twin.services import CliContext, Services, build_services, get_cli_context, set_cli_context
 from twin.stickers.catalog import StickerCatalog
+from twin.storage.crypto import set_active_keyring
 from twin.storage.engine_models import BotTurn
 from twin.storage.media import MediaKind
 from twin.storage.models import Alert, Job
@@ -84,6 +88,7 @@ from twin.storage.settings_store import put_setting
 USER_WORDS = re.compile(r"对方这一轮说的话：\s*(.*)\Z", re.DOTALL)
 CHICAGO = "America/Chicago"
 PLAN_SALT = "life-world"
+START_GRACE_S = 0.3  # real seconds the start of the application has to end by itself
 
 
 # ------------------------------------------------------------------------------ DeepSeek
@@ -379,6 +384,24 @@ def install_routine(services: Services, model: ActivityModel) -> str:
         return row.id
 
 
+def add_her_answers(
+    services: Services, day: date, answers: tuple[str, ...], times: int = 6
+) -> None:
+    """Short answers that she gave ``times`` times each in the past: the words of her profile.
+
+    The generated chat has no repeated sentence; what she says most often (and what the
+    last-resort answer of R-ENG-010 is drawn from) comes from here.
+    """
+    writer = MessageWriter(services)
+    opening = datetime.combine(day, time(18, 0), tzinfo=ZoneInfo("UTC")) + timedelta(days=1)
+    for number in range(times):
+        for index, text in enumerate(answers):
+            at = opening + timedelta(minutes=10 * (number * len(answers) + index))
+            writer.add(at, True, "text", text)
+    writer.store(append=True)
+    sync_counters(services)
+
+
 def log_in_and_bind(services: Services, clock: LifeClock) -> None:
     """The user has scanned the code and been bound (what ``twin channel login`` and bind leave)."""
     store = IlinkStore(ChannelStateStore(services.db), clock)
@@ -451,6 +474,7 @@ class LifeWorld:
         platform: Literal["console", "ilink"] = "console",
         platform_window_h: float = 24.0,
         platform_quota: int = 10,
+        her_answers: tuple[str, ...] = (),
     ) -> LifeWorld:
         """Build the world and, unless told not to, start the application (see the module text)."""
         settings = services.settings
@@ -466,6 +490,8 @@ class LifeWorld:
         moment = start or clock.now_utc()
         first = (moment.astimezone(ZoneInfo(CHICAGO)).date()) - timedelta(days=history_days)
         build_chat(services, ChatSpec(start=first, days=history_days))
+        if her_answers:
+            add_her_answers(services, first, her_answers)
         rebuild(services, "all")  # her profile, the examples and the like, from the past
         run_index(services)
         install_routine(services, model or proactive_model())
@@ -513,15 +539,29 @@ class LifeWorld:
         return world
 
     async def start(self) -> None:
+        """Start the application; virtual time moves only if it cannot finish without.
+
+        The start of some components waits for a time (the first tick of the schedule may send, and
+        pause, on a platform that has a window): then the clock is stepped.  Otherwise it ends in
+        real milliseconds, and not one second of the world's time goes by.
+        """
         self.before_start = asyncio.all_tasks()
         starting = asyncio.ensure_future(self.assembly.application.start())
-        while not starting.done():  # (the first tick of the schedule may send, and pause, on start)
+        loop = asyncio.get_running_loop()
+        waiting_since = loop.time()
+        while not starting.done():
             await self.clock.settle()
+            if starting.done():
+                break
+            if loop.time() - waiting_since < START_GRACE_S:
+                await asyncio.sleep(0.002)  # a hop between a thread and the loop, not a sleeper
+                continue
             wake = self.meaningful_wake_in()
             if wake is None:
                 await asyncio.sleep(0.001)
             else:
                 await self.clock.step(min(wake, 60.0))
+                waiting_since = loop.time()
         await starting
         self.started = True
         await self.clock.settle()
@@ -769,13 +809,30 @@ class LifeWorld:
     def turn_store(self) -> BotTurnStore:
         return BotTurnStore(self.services.db, self.services.clock)
 
-    async def drain_jobs(self, *, limit_s: float = 600.0) -> None:
-        """Let the job worker finish what is queued (the memory, the life line, the summaries)."""
+    def awaiting_approval(self) -> list[tuple[str, str, int, str | None]]:
+        """The jobs of a one-time batch that wait for ``twin jobs approve`` (R-LLM-014)."""
+        with self.services.db.session() as session:
+            rows = session.scalars(
+                select(Job)
+                .where(Job.requires_approval.is_(True), Job.approved_at.is_(None))
+                .where(Job.status == "pending")
+                .order_by(Job.created_at, Job.id)
+            )
+            return [(row.type, row.status, row.attempts, row.last_error) for row in rows]
+
+    async def drain_jobs(self, *, limit_s: float = 600.0, approval_ok: bool = False) -> None:
+        """Let the job worker finish what is queued (the memory, the life line, the summaries).
+
+        ``approval_ok``: jobs that wait for the user's approval of their cost are not waited for.
+        """
         end = self.now + timedelta(seconds=limit_s)
         step = 5.0
         while self.now < end:
             counts = self.jobs()
-            if not counts.get("pending") and not counts.get("running"):
+            waiting = counts.get("pending", 0) - (
+                len(self.awaiting_approval()) if approval_ok else 0
+            )
+            if not waiting and not counts.get("running"):
                 return
             await self.clock.step(step)
         raise AssertionError(f"jobs still waiting: {dict(self.jobs())}")
@@ -802,3 +859,28 @@ class LifeWorld:
 
     def set_timezone(self, name: str) -> None:
         self.services.runtime.set(BOT_TIMEZONE, name, by="life-world")
+
+    def cli(self, *args: str, answer: str | None = None) -> tuple[int, str]:
+        """Another process of the machine runs ``twin <args>``: ``(exit code, output)``.
+
+        The command line builds its own container on the same files - its own database
+        connection, the same key - as a second process does.  The wall clock is the machine's, so
+        it is the clock of the world (the real command line has the system clock, which every
+        process of the machine shares).  The application of this process goes on as it was.
+        """
+        from typer.testing import CliRunner
+
+        from tests.support.cli_runner import invoke  # (imports the whole command line)
+
+        before = get_cli_context()
+        set_cli_context(
+            CliContext(secrets=self.services.secrets, http_transport=OfflineTransport())
+        )
+        options = ["--set", f"paths.data_dir={self.services.paths.data_dir}"]
+        try:
+            with mock.patch("twin.services.SystemClock", return_value=self.clock):
+                return invoke(CliRunner(), [*options, *args], answer=answer)
+        finally:
+            set_cli_context(before)
+            set_active_clock(self.clock)
+            set_active_keyring(self.services.keyring)
