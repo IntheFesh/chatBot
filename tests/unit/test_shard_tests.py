@@ -1,4 +1,4 @@
-"""scripts/shard_tests.py: the file-level sharding of the CI matrix (D-490..D-499)."""
+"""scripts/shard_tests.py: the file-level sharding of the CI matrix (D-490..D-497)."""
 
 from __future__ import annotations
 

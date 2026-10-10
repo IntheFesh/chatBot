@@ -111,6 +111,7 @@ from twin.engine.sender import (
     SentBubble,
     StickerLookup,
     StopReason,
+    Wait,
 )
 from twin.engine.state_store import ConversationSnapshot, ConversationStateStore
 from twin.engine.sticker_sender import StickerSender
@@ -1194,7 +1195,7 @@ class ConversationEngine:
         await self._sender.send(
             bubbles,
             pacing=PacingModel(),
-            wait=_never_interrupted,
+            wait=uninterruptible_pause(self._clock),
             on_sent=keep,
             paced=False,
         )
@@ -1560,8 +1561,19 @@ def _with_extra(data: RoundData, action: dict[str, Any]) -> RoundData:
     return replace(data, outgoing=replace(out, extra_actions=(*out.extra_actions, action)))
 
 
-async def _never_interrupted(_seconds: float) -> bool:
-    return False
+def uninterruptible_pause(clock: Clock) -> Wait:
+    """A pause that really lasts and that nothing cuts short.
+
+    The out-of-role answer to a crisis goes out whatever the user writes next, so its sender never
+    hears of a new message; but when the network fails, the sender still waits before it repeats a
+    send, and that wait must take time (it does not return at once).
+    """
+
+    async def pause(seconds: float) -> bool:
+        await clock.sleep(max(0.0, seconds))
+        return False
+
+    return pause
 
 
 async def _written(work: Coroutine[Any, Any, None]) -> None:

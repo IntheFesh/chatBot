@@ -1,4 +1,4 @@
-"""Deterministic file-level test sharding for the CI matrix (docs/CI.md, D-490..D-499).
+"""Deterministic file-level test sharding for the CI matrix (docs/CI.md, D-490..D-497).
 
 ``.github/workflows/ci.yml`` runs the test suite as one job per shard, each on its own VM and
 each sequential inside (a few tests use Windows named mutexes or fixed local ports, so tests of

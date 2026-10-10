@@ -1,13 +1,17 @@
-"""The words of an alert notice (Windows notification and e-mail), R-OPS-004.
+"""The words of an alert notice (Windows notification and e-mail), R-OPS-004, R-SAFE-004.
 
 What leaves the machine is built from three things only: the fixed wording of the category
 (:data:`~twin.ops.alerts.SPECS`), the time, and numbers or short codes taken from the alert's
 ``detail``.  A text value of ``detail`` is shown only if it is a single lowercase token such as
 ``getupdates`` or ``http_503`` - a sentence, any Chinese, a key named like content
 (:data:`~twin.ops.logging.CONTENT_FIELDS`) never is - and the finished text passes
-:func:`~twin.llm.redaction.redact_text` once more.  The one-line ``title`` the caller gave is
-included unless the category says its wording is enough (``show_title``); callers write titles
-about the program, never about the conversation.
+:func:`~twin.llm.redaction.redact_text` once more.
+
+The one-line ``title`` that the caller gives an alert is for the ``alerts`` table, the log and
+``twin health``; it is **not** part of any notice.  A free-text field that a notice copies is a
+field through which chat content could leave the machine one day, so there is none: the facts a
+caller wants the user to see go into ``detail`` as numbers and codes (``tests/unit/
+test_outbound_audit.py`` puts a chat sentence into every field and asserts it never comes out).
 
 The QR code of a lost login is never part of a notice: the category's advice says where it is.
 """
@@ -67,8 +71,6 @@ def render_alert(view: AlertView, zone: ZoneInfo) -> RenderedAlert:
     local = view.created_at.astimezone(zone)
     when = f"{local:%Y-%m-%d %H:%M}（{zone.key}）"
     lines = [f"{SEVERITY_WORDS.get(view.severity, view.severity)}：{label}", f"时间：{when}"]
-    if spec.show_title and view.title:
-        lines.append(f"说明：{redact_text(view.title)}")
     if not recovered:
         lines.append(f"怎么办：{spec.advice}")
     for key, value in safe_detail(view.detail):
@@ -85,5 +87,5 @@ def render_alert(view: AlertView, zone: ZoneInfo) -> RenderedAlert:
         text=text,
         html=page,
         toast_title=f"wechat-twin：{label}",
-        toast_body=redact_text(spec.advice if not recovered else (view.title or label))[:200],
+        toast_body=redact_text(label if recovered else spec.advice)[:200],
     )

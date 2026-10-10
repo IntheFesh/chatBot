@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import dataclasses
 import json
 from collections.abc import AsyncIterator, Iterator
@@ -14,9 +15,12 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from tests.support.clock import ManualClock
 from tests.support.deepseek import API, TEST_KEY, error, ok
+from tests.support.waiting import wait_until
 from twin.config.runtime import BOT_TIMEZONE
 from twin.config.settings import SafetyConfig
+from twin.engine.machine import uninterruptible_pause
 from twin.engine.safety.commitments import CommitmentDetector
 from twin.engine.safety.crisis import CrisisHandler, CrisisScreen, crisis_bubbles
 from twin.engine.safety.hotlines import country_of, hotlines_for
@@ -366,3 +370,22 @@ def test_nothing_in_the_engine_package_sends_a_picture_by_itself() -> None:
             if isinstance(node, ast.Attribute) and node.attr == "send_image":
                 offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert offenders == []
+
+
+# ---------------------------------------------------------- the pause of the crisis answer
+
+
+async def test_the_pause_of_the_crisis_answer_takes_its_time_and_nothing_cuts_it_short(
+    clock: ManualClock,
+) -> None:
+    """The sender waits before it repeats a send that never left the machine: that wait is real."""
+    pause = uninterruptible_pause(clock)
+    waiting = asyncio.ensure_future(pause(7.0))
+    await wait_until(lambda: clock.pending_sleepers >= 1)
+    assert not waiting.done()  # a pause that returns at once would repeat the send in a flash
+    await clock.advance(6.0)
+    assert not waiting.done()
+    await clock.advance(1.0)
+    assert await waiting is False  # False: the user's new message did not interrupt the answer
+    assert clock.sleeps == [7.0]
+    assert await uninterruptible_pause(clock)(-3.0) is False  # a negative pause is no pause

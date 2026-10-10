@@ -353,6 +353,12 @@ class BudgetManager:
                 "budget",
                 title,
                 severity=severity,
-                detail={"period": period, "ratio": round(ratio, 4), "level": level},
+                detail={
+                    "period": period,
+                    "ratio": round(ratio, 4),
+                    "level": level,
+                    "spent_usd": round(spent, 2),
+                    "budget_usd": round(budget, 2),
+                },
                 dedup_key=f"budget:{mark}",
             )
