@@ -8,6 +8,7 @@ a real window.
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import timedelta
 
@@ -24,6 +25,7 @@ from twin.ops.winapi import (
     PBT_APMRESUMESUSPEND,
     PBT_APMSUSPEND,
     WM_POWERBROADCAST,
+    next_window_class_name,
 )
 
 TICK = 5.0
@@ -241,3 +243,37 @@ async def test_a_real_hidden_window_receives_a_broadcast_message(clock: ManualCl
     finally:
         await monitor.stop()
     assert monitor.window_handle is None
+
+
+def test_no_window_class_name_is_used_twice_in_a_process() -> None:
+    """The class belongs to the process, not to the object that registered it (D-624): a name
+    counted per object is taken by the next object, and ``RegisterClassW`` then fails."""
+    names = [next_window_class_name() for _ in range(50)]
+    assert len(set(names)) == 50
+    assert all(name.startswith(f"wechat-twin-power-{os.getpid()}-") for name in names)
+
+
+@pytest.mark.windows
+async def test_two_monitors_of_one_process_each_get_a_hidden_window(clock: ManualClock) -> None:
+    """The first is not stopped when the second starts - the process of a crash that is simulated
+    in-process leaves its window behind, and a started-again component must still get its own."""
+    from twin.ops.winapi import load_win32
+
+    first = PowerEventMonitor(
+        clock, Heard(), tick_s=TICK, platform=sys.platform, win32=load_win32()
+    )
+    second = PowerEventMonitor(
+        clock, Heard(), tick_s=TICK, platform=sys.platform, win32=load_win32()
+    )
+    await first.start()
+    try:
+        await second.start()
+        try:
+            assert first.window_handle is not None and second.window_handle is not None
+            assert first.window_handle != second.window_handle
+            assert first.health().status is HealthStatus.OK
+            assert second.health().status is HealthStatus.OK
+        finally:
+            await second.stop()
+    finally:
+        await first.stop()

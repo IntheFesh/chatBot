@@ -8,3 +8,4 @@ tests/integration/life/test_life_guards.py
 tests/integration/life/test_life_restart.py
 tests/unit/test_power_events.py
 tests/unit/test_power_console.py
+# window class names unique per process (D-624): the life tests that kill an application come first
