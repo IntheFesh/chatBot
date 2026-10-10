@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import socket
 import sys
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,10 +105,13 @@ async def test_the_local_port_leads_to_the_port_on_the_instance(world: World) ->
     assert ("127.0.0.1", world.remote.port) in world.ssh.state.forwards  # the instance's own port
 
 
-async def test_the_local_end_is_not_reachable_from_other_addresses(world: World) -> None:
+async def test_the_local_end_is_not_reachable_from_other_addresses(
+    world: World, allow_own_address: Callable[[str], None]
+) -> None:
     other = socket.gethostbyname(socket.gethostname())
     if other.startswith("127."):
         pytest.skip("this computer has no address other than loopback to try")
+    allow_own_address(other)  # the computer's own address: the packet never leaves it
     manager, port = make_tunnel(world)
     async with running(manager):
         await until(manager, TunnelState.UP)

@@ -105,13 +105,47 @@ def is_local(address: Any) -> bool:
     return (mapped or parsed).is_loopback
 
 
+def _host_of(address: Any) -> str | None:
+    host = address[0] if isinstance(address, tuple) and address else None
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if not isinstance(host, str):
+        return None
+    return host.strip().lower().split("%", 1)[0]
+
+
 class NetworkGuard:
     """What the guard saw: the addresses that were refused."""
 
     def __init__(self) -> None:
         self.attempts: list[str] = []
+        self._own: set[str] = set()
+
+    def allow_own_address(self, host: str) -> None:
+        """Let this test connect to an address that belongs to this computer (not loopback).
+
+        A packet to one of the computer's own addresses never leaves it, so this is still "this
+        computer" - the one case that needs it is a test that proves a server is *not* reachable
+        by the computer's other address.  The address is proven to be the computer's own by
+        binding a socket to it, which only succeeds for an address of one of its interfaces; any
+        other address is refused here (``ValueError``), so this is no way around the guard.
+        """
+        name = host.strip().lower().split("%", 1)[0]
+        try:
+            parsed = ipaddress.ip_address(name)
+        except ValueError as exc:
+            raise ValueError(f"{host!r} is not an IP address of this computer") from exc
+        family = socket.AF_INET6 if parsed.version == 6 else socket.AF_INET
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((name, 0))
+            except OSError as exc:
+                raise ValueError(f"{host!r} is not an address of this computer") from exc
+        self._own.add(name)
 
     def check(self, address: Any, how: str) -> None:
+        if _host_of(address) in self._own:
+            return
         if not is_local(address):
             shown = f"{address[0]}:{address[1]}" if isinstance(address, tuple) else str(address)
             self.attempts.append(f"{how} {shown}")

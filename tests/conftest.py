@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -12,7 +12,7 @@ import pytest
 from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
 from tests.support.network import OfflineTransport
-from tests.support.offline import guard_network, network_allowed
+from tests.support.offline import NetworkGuard, guard_network, network_allowed
 from twin.clock import SystemClock, set_active_clock
 from twin.config.loader import load_settings
 from twin.config.secrets import SecretStore, select_backend
@@ -41,7 +41,7 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 
 
 @pytest.fixture(autouse=True)
-def no_network(request: pytest.FixtureRequest) -> Iterator[None]:
+def no_network(request: pytest.FixtureRequest) -> Iterator[NetworkGuard | None]:
     """No test reaches a computer other than this one (R-NFR-004; see ``tests/support/offline.py``).
 
     ``respx`` stops a request before it reaches a socket; this catches the one nobody mocked.
@@ -50,12 +50,27 @@ def no_network(request: pytest.FixtureRequest) -> Iterator[None]:
     tests, so it is the same under any sharding of the suite and on every platform.
     """
     if network_allowed(request.node, LIVE_ENABLED):
-        yield
+        yield None
         return
     with guard_network() as guard:
-        yield
+        yield guard
     if guard.attempts:
         pytest.fail(guard.report(), pytrace=False)
+
+
+@pytest.fixture
+def allow_own_address(no_network: NetworkGuard | None) -> Callable[[str], None]:
+    """Let the test connect to one of this computer's own non-loopback addresses.
+
+    For the test that proves a server is not reachable by the computer's other address; see
+    :meth:`tests.support.offline.NetworkGuard.allow_own_address` for why it is still offline.
+    """
+
+    def allow(host: str) -> None:
+        if no_network is not None:  # live tests are not guarded
+            no_network.allow_own_address(host)
+
+    return allow
 
 
 @pytest.fixture(autouse=True)

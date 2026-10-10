@@ -332,3 +332,38 @@ def test_the_fixture_fails_the_test_that_reached_out_even_when_the_client_swallo
     assert "network access in a test: connect 192.0.2.1:443" in output
     assert "1 error" in output  # (in the teardown of the test that reached out)
     assert "3 passed" in output  # the three bodies ran: the live and the loopback test are fine
+
+
+def _own_address_other_than_loopback() -> str:
+    own = socket.gethostbyname(socket.gethostname())
+    if own.startswith("127."):
+        pytest.skip("this computer has no address other than loopback")
+    return own
+
+
+def test_an_address_of_this_computer_can_be_let_through_for_one_test() -> None:
+    own = _own_address_other_than_loopback()
+    with guard_network() as guard:
+        with pytest.raises(NetworkBlocked):
+            socket.socket().connect((own, 9))
+        guard.allow_own_address(own)
+        listener = socket.socket()
+        listener.bind((own, 0))
+        listener.listen(1)
+        try:
+            with socket.socket() as client:
+                client.connect((own, listener.getsockname()[1]))  # stays on this computer
+        finally:
+            listener.close()
+    assert guard.attempts == [f"connect {own}:9"]  # only the refused one before the allowance
+
+
+def test_only_an_address_that_this_computer_owns_can_be_allowed() -> None:
+    with guard_network() as guard:
+        with pytest.raises(ValueError, match="not an address of this computer"):
+            guard.allow_own_address(NOWHERE)
+        with pytest.raises(ValueError, match="not an IP address"):
+            guard.allow_own_address("example.com")
+        with pytest.raises(NetworkBlocked):
+            socket.socket().connect((NOWHERE, 9))  # the refusal is still in force
+    assert guard.attempts == [f"connect {NOWHERE}:9"]
