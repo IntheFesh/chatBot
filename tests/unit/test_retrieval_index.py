@@ -26,7 +26,12 @@ from twin.retrieval.indexer import (
     run_index,
     window_table,
 )
-from twin.retrieval.vector_store import IndexMeta, IndexMismatchError, VectorStore
+from twin.retrieval.vector_store import (
+    SMALL_FILES_BEFORE_COMPACTION,
+    IndexMeta,
+    IndexMismatchError,
+    VectorStore,
+)
 from twin.retrieval.windows import WindowRecord
 from twin.services import Services
 from twin.storage.retrieval_models import ExampleWindow
@@ -168,6 +173,26 @@ def test_a_table_refuses_another_vector_size(tmp_path: Path) -> None:
     table.create(4)  # same size: nothing happens
     with pytest.raises(IndexMismatchError, match="4-dimensional"):
         table.create(8)
+
+
+def test_a_table_written_to_one_row_at_a_time_does_not_collect_small_files(
+    tmp_path: Path,
+) -> None:
+    """Every write leaves a file; thousands of them were what a long soak measured as memory."""
+    table = VectorStore(tmp_path).table(GENERIC_SCHEMA)
+    most = 0
+    for number in range(SMALL_FILES_BEFORE_COMPACTION * 3):
+        row = {"id": f"r{number}", "vector": [1.0, 0.0, 0.0, 0.0], "at": number, "kind": "fact"}
+        table.upsert([row], dimension=4)
+        most = max(most, table.small_files())
+    assert most <= SMALL_FILES_BEFORE_COMPACTION  # merged as soon as there were many
+    assert table.small_files() < SMALL_FILES_BEFORE_COMPACTION
+    assert table.count() == SMALL_FILES_BEFORE_COMPACTION * 3  # and nothing was lost
+    found = table.search(np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float32), 100)
+    assert {hit.id for hit in found} == {f"r{n}" for n in range(SMALL_FILES_BEFORE_COMPACTION * 3)}
+    table.delete_ids([f"r{n}" for n in range(0, 40, 2)])
+    assert table.count() == SMALL_FILES_BEFORE_COMPACTION * 3 - 20
+    assert VectorStore(tmp_path / "other").table(GENERIC_SCHEMA).small_files() == 0  # no table
 
 
 def test_the_metadata_file_records_the_encoding(tmp_path: Path) -> None:

@@ -293,8 +293,11 @@ async def test_credentials_are_stored_encrypted_not_in_plaintext(h: Harness, db:
 
 
 async def test_the_application_runs_the_channel_and_reports_the_login_in_its_health(
-    services: Services,
+    services: Services, api: respx.MockRouter
 ) -> None:
+    api.post(STOP).respond(200, json={"ret": 0, "errmsg": ""})  # the goodbye of a logged-in channel
+    api.post(START).respond(200, json={"ret": 0, "errmsg": ""})
+    api.post(GET_UPDATES).respond(200, json=updates())
     application = Application()
     component = register_channel(application, services)
     assert component is not None

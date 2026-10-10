@@ -13,6 +13,7 @@ from sqlalchemy import func, select, update
 from typer.testing import CliRunner
 
 from tests.fixtures.synth_export import SynthExport
+from tests.support.embedding import HashingBackend
 from tests.support.ingest import make_export
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
@@ -155,8 +156,8 @@ def test_import_with_nothing_to_import_shows_help_and_resume_without_a_run_fails
 
 
 def test_a_queued_import_is_executed_by_the_job_runner_when_the_app_is_stopped(
-    data_dir: Path, tmp_path: Path
-) -> None:
+    data_dir: Path, tmp_path: Path, embedder: HashingBackend
+) -> None:  # the hooks after the import index the examples: with the offline model, not a download
     export = export_with(tmp_path, target_messages=90)
     assert cli("import", str(export.root), "--yes").exit_code == 0
     queued = cli("import", "status")

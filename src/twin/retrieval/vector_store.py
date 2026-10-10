@@ -31,6 +31,11 @@ from twin.storage.vector_schema import VECTOR_COLUMN, VectorTableSchema
 
 UPSERT_CHUNK = 2000
 DELETE_CHUNK = 500
+# Every write leaves one small file in the table.  Left alone, a table that is written to a few
+# times a day for months holds thousands of them: each is read, cached and kept in memory by
+# LanceDB (a long-running soak measured the resident memory growing with them), so after this
+# many a write compacts the table before it returns (R-NFR-002).
+SMALL_FILES_BEFORE_COMPACTION = 16
 _SAFE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 
 
@@ -191,6 +196,7 @@ class VectorTable:
                 .when_not_matched_insert_all()
                 .execute(chunk)
             )
+        self._compact_when_fragmented(table)
 
     def delete_ids(self, ids: Sequence[str]) -> None:
         """Remove the rows of these source ids (missing ids are ignored)."""
@@ -200,6 +206,7 @@ class VectorTable:
         for start in range(0, len(ids), DELETE_CHUNK):
             part = ids[start : start + DELETE_CHUNK]
             table.delete(f"{self._schema.id_column} IN ({_quoted_ids(part)})")
+        self._compact_when_fragmented(table)
 
     def delete_from(self, epoch: int) -> int:
         """Remove the rows whose timestamp is ``epoch`` or later; returns how many went."""
@@ -214,6 +221,19 @@ class VectorTable:
         """Merge small files and drop old versions (call after a long run of writes)."""
         if self.exists():
             self._open().optimize()
+
+    def small_files(self) -> int:
+        """How many small data files the table holds (what a write leaves behind)."""
+        if not self.exists():
+            return 0
+        stats = self._open().stats()
+        return int(stats["fragment_stats"]["num_small_fragments"])
+
+    def _compact_when_fragmented(self, table: Any) -> None:
+        """Merge the small files of ``table`` once there are many (see the constant)."""
+        stats = table.stats()
+        if int(stats["fragment_stats"]["num_small_fragments"]) >= SMALL_FILES_BEFORE_COMPACTION:
+            table.optimize()
 
     def drop(self) -> None:
         if self.exists():

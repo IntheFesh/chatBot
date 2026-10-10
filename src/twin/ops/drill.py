@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import typer
 
-from twin.clock import SystemClock
+from twin.clock import get_clock
 from twin.ops.process_model import CommandKind, command
 from twin.ops.service import running
 
@@ -35,7 +35,7 @@ STEPS = (
 def drill_network() -> None:
     """Print the steps of the network drill."""
     typer.echo("断网演练（观察期内做一次）")
-    typer.echo(f"现在是 {SystemClock().now_utc():%Y-%m-%d %H:%M} UTC。")
+    typer.echo(f"现在是 {get_clock().now_utc():%Y-%m-%d %H:%M} UTC。")
     from twin.services import get_cli_context
 
     supervisor, run = running(get_cli_context().paths().locks_dir)

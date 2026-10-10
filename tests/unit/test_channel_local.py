@@ -831,8 +831,10 @@ def test_the_echo_diagnostic_is_used_by_the_diagnostic_command_and_nothing_else(
 
 def test_the_terminal_channel_is_not_the_product_channel() -> None:
     # the product starts the WeChat channel (`twin run`); the terminal channel is for the chat and
-    # echo commands, and for `twin run` only where `channel.kind=console` asks for it
+    # echo commands, and for `twin run` only where `channel.kind=console` asks for it - and the
+    # assembly of `twin run` (D-551) is the one place that decides that
     assert importers_of("twin.channel.local") <= {
+        "assembly.py",
         "channel/chat.py",
         "channel/cli.py",
         "channel/echo.py",

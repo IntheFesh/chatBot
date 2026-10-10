@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import typer
 
-from twin.clock import SystemClock
+from twin.clock import get_clock
 from twin.config.loader import ConfigError, default_config_path
 from twin.config.secrets import SecretStore
 from twin.config.settings import Settings
@@ -57,7 +57,9 @@ def _consent(settings: Settings, config: Path) -> None:
     typer.echo("这个机器人模仿你女朋友的说话方式，只有在她知情并同意的情况下才能使用。")
     if not typer.confirm("她已经知道并同意了吗？", default=False):
         raise CliError("没有她的同意不能继续。")
-    current = settings.consent.confirmed_at or SystemClock().now_utc().date().isoformat()
+    # without an earlier answer the proposal is today's date where the user lives (not in UTC)
+    today = get_clock().now_utc().astimezone(ZoneInfo(settings.time.bot_timezone)).date()
+    current = settings.consent.confirmed_at or today.isoformat()
     answer = _ask("她同意的日期（YYYY-MM-DD）", current)
     try:
         date.fromisoformat(answer)

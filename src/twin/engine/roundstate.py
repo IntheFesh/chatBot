@@ -71,6 +71,8 @@ class Outgoing:
     quote_id: str | None = None  # the message the first text bubble quotes
     quote_text: str | None = None
     extra_actions: tuple[dict[str, Any], ...] = ()  # what the engine did besides the pipeline
+    in_flight: OutBubble | None = None  # handed to the channel, not yet noted as out
+    in_flight_at: datetime | None = None  # ... since this moment
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -80,6 +82,8 @@ class Outgoing:
             "quote_id": self.quote_id,
             "quote_text": self.quote_text,
             "extra_actions": [dict(a) for a in self.extra_actions],
+            "in_flight": bubble_to_json(self.in_flight) if self.in_flight else None,
+            "in_flight_at": _iso(self.in_flight_at),
         }
 
     @classmethod
@@ -91,6 +95,8 @@ class Outgoing:
             quote_id=data.get("quote_id"),
             quote_text=data.get("quote_text"),
             extra_actions=tuple(dict(a) for a in data.get("extra_actions") or ()),
+            in_flight=bubble_from_json(data["in_flight"]) if data.get("in_flight") else None,
+            in_flight_at=_moment(data.get("in_flight_at")),
         )
 
     def final_meta(self) -> ReplyMeta:

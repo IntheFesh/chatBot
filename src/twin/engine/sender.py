@@ -18,7 +18,10 @@
 
 Every bubble that goes out is reported to ``on_sent`` at once, so the engine can store it
 (``bot_turns``, ``conversation_state``) before the next one starts: a process that dies between
-two bubbles resumes after the last one that was stored.
+two bubbles resumes after the last one that was stored.  A process that dies *inside* a send - the
+bubble may be on the user's phone or not - would otherwise say it twice after the restart, so the
+engine is told before each send (``on_sending``) and, finding that note unanswered, takes the
+bubble as sent (an unknown outcome is never repeated, as above).
 """
 
 from __future__ import annotations
@@ -108,6 +111,7 @@ class SendReport:
 
 Wait = Callable[[float], Awaitable[bool]]  # sleeps; True when the user wrote in the meantime
 OnSent = Callable[[SentBubble], Awaitable[None]]
+OnSending = Callable[[OutBubble], Awaitable[None]]
 StickerLookup = Callable[[str], StickerRecord | None]
 
 
@@ -139,12 +143,14 @@ class BubbleSender:
         pacing: PacingModel,
         wait: Wait,
         on_sent: OnSent,
+        on_sending: OnSending | None = None,
         first_of_reply: bool = True,
         quote: QuoteTarget | None = None,
         paced: bool = True,
     ) -> SendReport:
         """Send ``bubbles`` in order.
 
+        ``on_sending`` is told which bubble is about to be handed to the channel, before it is;
         ``first_of_reply`` is false when the first of them continues a reply that is already
         under way; ``quote`` goes with the first text bubble; ``paced=False`` (the fixed
         out-of-role answer to a crisis, R-SAFE-001) sends without waiting.
@@ -170,6 +176,8 @@ class BubbleSender:
                 report.stop, report.rest = blocked, rest
                 return report
             quote_for_bubble = quote_pending if bubble.kind == "text" else None
+            if on_sending is not None:
+                await on_sending(bubble)
             outcome = await self._deliver(bubble, quote_for_bubble, wait)
             if isinstance(outcome, StopReason):
                 await self._typing(False)

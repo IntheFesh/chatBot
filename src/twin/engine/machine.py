@@ -1208,6 +1208,11 @@ class ConversationEngine:
         snap = await self._load()  # ... and one before it is in the stored state
         data = RoundData.of(snap)
         outgoing = data.outgoing
+        if outgoing is not None and outgoing.in_flight is not None:
+            await self._settle_in_doubt(data, outgoing)  # a send was under way when we stopped
+            snap = await self._load()
+            data = RoundData.of(snap)
+            outgoing = data.outgoing
         if outgoing is None or not outgoing.unsent:
             await self._finish_reply(data)
             return
@@ -1242,11 +1247,15 @@ class ConversationEngine:
         async def keep(sent: SentBubble) -> None:
             await _written(note(sent))
 
+        async def about_to_send(bubble: OutBubble) -> None:
+            await self._edit(lambda d: _with_in_flight(d, bubble, self._clock.now_utc()))
+
         report = await self._sender.send(
             outgoing.unsent,
             pacing=pacing,
             wait=wait,
             on_sent=keep,
+            on_sending=about_to_send,
             first_of_reply=outgoing.reply_id is None,
             quote=quote if outgoing.reply_id is None else None,
         )
@@ -1256,6 +1265,28 @@ class ConversationEngine:
             await asyncio.to_thread(self._store.reject_reply, thrown)  # a bubble that was in flight
             return
         await self._after_send(report, snap)
+
+    async def _settle_in_doubt(self, data: RoundData, outgoing: Outgoing) -> None:
+        """The process stopped while a bubble was being handed to the channel: it counts as sent.
+
+        It may be on the user's phone or not; there is no way to know, and a bubble said twice
+        hurts more than one that is missing (the channel's rule for an unknown outcome).  So it
+        is written down like any other - with the moment the send began and a note in the reply's
+        actions - and the reply goes on with the bubbles after it.
+        """
+        bubble = outgoing.in_flight
+        if bubble is None:
+            return
+        log.warning("bubble_in_doubt", kind=bubble.kind)
+        sent = SentBubble(
+            bubble, outgoing.in_flight_at or self._clock.now_utc(), message_id=None, ambiguous=True
+        )
+        recorder = _Recorder(self._store, outgoing.final_meta(), outgoing.reply_id)
+        await _written(recorder.record(sent))
+        if recorder.reply_id is not None:
+            noted = {"step": "bubble_in_doubt", "count": 1}
+            await self._edit(lambda d: _with_extra(d, noted))
+        await self._after_bubble(sent, recorder.reply_id, data.answering)
 
     async def _after_bubble(
         self, sent: SentBubble, reply_id: str | None, answering: tuple[str, ...]
@@ -1270,7 +1301,13 @@ class ConversationEngine:
             rest = list(out.unsent)
             with contextlib.suppress(ValueError):
                 rest = rest[rest.index(sent.bubble) + 1 :]
-            kept = replace(out, unsent=tuple(rest), reply_id=reply_id or out.reply_id)
+            kept = replace(
+                out,
+                unsent=tuple(rest),
+                reply_id=reply_id or out.reply_id,
+                in_flight=None,
+                in_flight_at=None,
+            )
             noted = {
                 "text": sent.bubble.text,
                 "kind": sent.bubble.kind,
@@ -1291,6 +1328,9 @@ class ConversationEngine:
         self._activity.set()
 
     async def _after_send(self, report: SendReport, snap: ConversationSnapshot) -> None:
+        left = RoundData.of(await self._load()).outgoing
+        if left is not None and left.in_flight is not None:
+            await self._edit(_without_in_flight)  # a send that ended without a bubble out
         if report.skipped:
             log.info("bubbles_skipped", count=len(report.skipped))
             await self._edit(
@@ -1576,6 +1616,21 @@ def uninterruptible_pause(clock: Clock) -> Wait:
     return pause
 
 
+def _with_in_flight(data: RoundData, bubble: OutBubble, at: datetime) -> RoundData:
+    """The notes with the bubble that is being handed to the channel."""
+    out = data.outgoing
+    if out is None:
+        return data
+    return replace(data, outgoing=replace(out, in_flight=bubble, in_flight_at=at))
+
+
+def _without_in_flight(data: RoundData) -> RoundData:
+    out = data.outgoing
+    if out is None or out.in_flight is None:
+        return data
+    return replace(data, outgoing=replace(out, in_flight=None, in_flight_at=None))
+
+
 async def _written(work: Coroutine[Any, Any, None]) -> None:
     """Finish writing down a bubble that is out, even if the driver is stopped meanwhile.
 
@@ -1584,7 +1639,8 @@ async def _written(work: Coroutine[Any, Any, None]) -> None:
     far it got.  A stop that lands in between - ``Ctrl+C``, the end of ``twin chat --local`` - would
     leave the state without it and the next start would send it again.  The write is therefore
     not cancelled with the driver: the driver waits for it, and then stops.  (A kill of the whole
-    process in that instant cannot be helped; the bubble is then sent twice rather than never.)
+    process in that instant, or a stop that lands while the channel is still sending, is covered
+    by the note that is made before each send: :meth:`ConversationEngine._settle_in_doubt`.)
     """
     task = asyncio.ensure_future(work)
     try:

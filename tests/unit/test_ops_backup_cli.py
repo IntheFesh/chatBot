@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -15,10 +16,14 @@ from tests.support.backup_world import (
     table_counts,
 )
 from tests.support.cli_runner import invoke
+from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
+from twin.clock import set_active_clock
 from twin.config.secrets import SecretStore
+from twin.ops.backup import cli as backup_cli
+from twin.ops.backup.archive import read_manifest
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
-from twin.ops.process_model import ExitCode
+from twin.ops.process_model import CommandKind, ExitCode, get_spec
 from twin.services import CliContext, Services, set_cli_context
 from twin.storage.memory_models import Fact
 from twin.storage.models import Job
@@ -137,6 +142,34 @@ def test_backup_restore_replaces_the_data_after_a_question(world: BackupWorld) -
     # the records were made to agree with the files: the new database knows the pre-restore copy
     code, out = twin(world, "list")
     assert "pre_restore" in out
+
+
+@pytest.mark.parametrize(
+    ("zone", "local_day"), [("America/Chicago", "2026-11-01"), ("Asia/Shanghai", "2026-11-02")]
+)
+def test_the_copy_made_before_a_restore_is_dated_by_the_day_of_the_bots_zone(
+    world: BackupWorld, clock: ManualClock, zone: str, local_day: str
+) -> None:
+    """21:30 on 1 November in Chicago is the 2nd in Shanghai: the same instant, two dates."""
+    name = make(world)  # (a command line builds its own services, and with them the system clock)
+    clock.set_time(datetime(2026, 11, 2, 3, 30, tzinfo=UTC))
+    set_active_clock(clock)  # the machine's clock for the next command
+    world.services.db.dispose()
+    options = ["--set", f"paths.data_dir={world.services.paths.data_dir}"]
+    options += ["--set", f"time.bot_timezone={zone}"]
+    code, out = invoke(runner, [*options, "backup", "restore", name, "--yes"])
+    assert code == 0, out
+    [pre] = sorted(world.services.paths.backups_dir.glob("pre-restore-*.bak.enc"))
+    assert pre.name == "pre-restore-20261102T033000Z.bak.enc"  # (named by the instant, in UTC)
+    manifest = read_manifest(pre, world.services.keyring)
+    assert manifest.local_date == local_day and manifest.kind == "pre_restore"
+    assert manifest.created_at.startswith("2026-11-02T03:30:00")
+
+
+def test_the_restore_is_an_exclusive_command_and_backup_now_only_writes() -> None:
+    restore, now = get_spec(backup_cli.backup_restore), get_spec(backup_cli.backup_now)
+    assert restore is not None and restore.kind is CommandKind.EXCLUSIVE
+    assert now is not None and now.kind is not CommandKind.EXCLUSIVE
 
 
 def test_restore_yes_skips_the_question_and_missing_files_are_refused(world: BackupWorld) -> None:

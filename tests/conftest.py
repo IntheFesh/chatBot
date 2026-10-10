@@ -12,6 +12,7 @@ import pytest
 from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
 from tests.support.network import OfflineTransport
+from tests.support.offline import guard_network, network_allowed
 from twin.clock import SystemClock, set_active_clock
 from twin.config.loader import load_settings
 from twin.config.secrets import SecretStore, select_backend
@@ -26,6 +27,9 @@ from twin.storage import migrate
 from twin.storage.crypto import KeyRing, generate_key, set_active_keyring, use_keyring
 from twin.storage.db import Database
 
+# read when the suite starts: the fixture below deletes every TWIN_ variable from the environment
+LIVE_ENABLED = os.environ.get("TWIN_LIVE") == "1"
+
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     live_enabled = os.environ.get("TWIN_LIVE") == "1"
@@ -34,6 +38,24 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.skip(reason="live test: set TWIN_LIVE=1 to run"))
         if "windows" in item.keywords and sys.platform != "win32":
             item.add_marker(pytest.mark.skip(reason="runs only on Windows"))
+
+
+@pytest.fixture(autouse=True)
+def no_network(request: pytest.FixtureRequest) -> Iterator[None]:
+    """No test reaches a computer other than this one (R-NFR-004; see ``tests/support/offline.py``).
+
+    ``respx`` stops a request before it reaches a socket; this catches the one nobody mocked.
+    ``live`` tests, and ``integration`` tests when ``TWIN_LIVE=1`` is set, are exempt - the
+    reasons are in ``tests.support.offline.EXEMPT_BECAUSE``.  The fixture keeps no state between
+    tests, so it is the same under any sharding of the suite and on every platform.
+    """
+    if network_allowed(request.node, LIVE_ENABLED):
+        yield
+        return
+    with guard_network() as guard:
+        yield
+    if guard.attempts:
+        pytest.fail(guard.report(), pytrace=False)
 
 
 @pytest.fixture(autouse=True)

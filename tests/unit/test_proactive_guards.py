@@ -51,6 +51,7 @@ READERS = {
     "eval/proactive_gate.py",
     "eval/proactive_report.py",
     "commands/rating.py",
+    "assembly.py",  # the one place that puts the scheduler into `twin run` (D-551)
     "cli.py",
 }
 PROACTIVE_MODULES = ("twin.schedule.proactive", "twin.storage.proactive_models")

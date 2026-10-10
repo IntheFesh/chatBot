@@ -12,26 +12,19 @@ from rich.table import Table
 
 from twin import __version__
 from twin.app import ComponentStartError, ShutdownSignals
-from twin.channel.base import Channel
-from twin.channel.chat import CHANNEL_COMPONENT_NAME, LocalChannelComponent
+from twin.assembly import assemble
 from twin.channel.cli import channel_app, chat_command
-from twin.channel.component import register_channel
-from twin.channel.local import LocalConsoleChannel, StreamInput, StreamOutput
-from twin.channel.probe.component import register_probe
+from twin.channel.local import StreamInput, StreamOutput
 from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
-from twin.engine.component import EngineComponent, register_engine
-from twin.engine.style_runtime import StyleRuntime
 from twin.eval.cli import eval_app
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
-from twin.llm.runtime import build_llm_runtime
 from twin.memory.cli import memory_app
 from twin.ops.backup.cli import backup_app
 from twin.ops.cli import jobs_app
-from twin.ops.components import build_application
 from twin.ops.console import ensure_utf8
 from twin.ops.cost_cli import cost_app
 from twin.ops.doctor import CheckStatus, DoctorContext, exit_code, run_checks
@@ -46,17 +39,13 @@ from twin.ops.purge_cli import purge_command
 from twin.ops.rollback_cli import rollback_app
 from twin.ops.service_cli import service_app, supervise_command
 from twin.ops.setup_cli import setup_command
-from twin.ops.wiring import register_ops
 from twin.profile.cli import profile_app, routine_app
 from twin.profile.persona.cli import persona_app
 from twin.retrieval.cli import retrieval_app
 from twin.schedule.cli import plan_app, timezone_app
-from twin.schedule.component import register_schedule
 from twin.schedule.proactive.cli import proactive_app
-from twin.schedule.proactive.component import proactive_status_for, register_proactive
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
 from twin.serving import cli as serving_cli  # noqa: F401 - adds the model commands of round 14
-from twin.serving.component import register_serving
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
 from twin.training.cli import train_app
@@ -152,66 +141,14 @@ def main(
 
 async def _serve(services: Services) -> None:
     """Assemble and run the application: the channel, the schedule and the reply engine."""
-    application, watcher = build_application(services)
-    stop = asyncio.Event()
-    channel_component = register_channel(application, services)
-    register_probe(application, services)
-    schedule_component, _power = register_schedule(
-        application,
-        services,
-        watcher,
-        reconnect=channel_component.reconnect if channel_component is not None else None,
+    assembly = assemble(
+        services, console_input=StreamInput(sys.stdin), console_output=StreamOutput(sys.stdout)
     )
-    engine_component: EngineComponent
-    # the style model: its server is up (or loading) before the engine asks it anything
-    llm = build_llm_runtime(services)
-    style = StyleRuntime.from_services(services, llm)
-    serving = register_serving(application, services, style=style, say=None, watcher=watcher)
-    if channel_component is not None:  # channel.kind "ilink": the user's WeChat conversation
-        channel: Channel = channel_component.channel
-        engine_component = register_engine(
-            application,
-            services,
-            channel,
-            watcher=watcher,
-            after=(channel_component.name, "schedule", serving.name),
-            schedule=schedule_component,
-            proactive=proactive_status_for(services, channel.session_state),
-            runtime=llm,
-            style=style,
-        )
-    else:  # channel.kind "console": the terminal in place of WeChat
-        console = LocalConsoleChannel.from_services(
-            services, input=StreamInput(sys.stdin), output=StreamOutput(sys.stdout)
-        )
-        application.register(LocalChannelComponent(console))
-        engine_component = register_engine(
-            application,
-            services,
-            console,
-            watcher=watcher,
-            after=(CHANNEL_COMPONENT_NAME, "schedule", serving.name),
-            on_finished=stop.set,
-            restart_dispatch=False,
-            schedule=schedule_component,
-            proactive=proactive_status_for(services, console.session_state),
-            runtime=llm,
-            style=style,
-        )
-    register_proactive(application, services, engine_component)
-    serving.set_say(engine_component.engine.notify)
-    register_ops(
-        application,
-        services,
-        style=style.selector,
-        schedule=schedule_component,
-        probes=(("style_serving", serving.health_check),),
-    )
-    signals = ShutdownSignals(asyncio.get_running_loop(), stop)
+    signals = ShutdownSignals(asyncio.get_running_loop(), assembly.stop)
     power = default_power_manager()
     power.start()
     try:
-        await application.run(stop, signals=signals)
+        await assembly.application.run(assembly.stop, signals=signals)
     finally:
         power.stop()
 

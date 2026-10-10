@@ -30,6 +30,7 @@ from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.memory.lifeline import SHARED_STEP, LifelineStore, PlannedEvent, shared_ids_of
 from twin.schedule.proactive.component import proactive_status_for
 from twin.schedule.proactive.settings import daily_range, is_enabled, is_paused
+from twin.schedule.proactive.status import ProactiveStatusSource
 from twin.schedule.proactive.store import RatingStore
 from twin.schedule.proactive.types import TriggerKind
 from twin.schedule.service import KIT_KEY
@@ -242,6 +243,42 @@ async def test_the_status_counts_what_went_out_today_and_names_what_blocks_it(
     calm.go_to(calm.at(23, 0))  # the window of the platform is over by then
     blocked = source()
     assert blocked is not None and blocked.blocked == "被窗口抑制"
+
+
+async def test_the_count_of_today_is_the_day_where_the_bot_lives_and_follows_a_zone_switch(
+    calm: World,
+) -> None:
+    calm.user_writes(at=calm.at(20, 0))
+    calm.put(TriggerKind.SHARE, calm.at(21, 20))
+    report = await calm.tick_at(calm.at(21, 30))  # 21:30 on Friday in Chicago: 02:30 Saturday
+    assert report.outcome == "sent"  # in Shanghai
+    source = ProactiveStatusSource(
+        clock=calm.clock,
+        schedule=calm.rig.kit,
+        runtime=calm.services.runtime,
+        config=calm.services.settings.proactive,
+        log_store=calm.log,
+        candidates=calm.candidates,
+        channel_state=calm.channel.session_state,
+    )
+    status = source()
+    assert status is not None and status.sent_today == 1
+    calm.rig.kit.planner.switch_timezone("Asia/Shanghai", source="command")
+    status = source()
+    assert status is not None and status.sent_today == 0  # it is Saturday there, and nothing yet
+
+
+async def test_the_next_message_is_never_shown_in_the_past(calm: World) -> None:
+    calm.user_writes(at=calm.at(8, 0))
+    calm.put(TriggerKind.MEAL, calm.at(11, 0), minutes=120)  # planned an hour ago, still open
+    calm.go_to(calm.at(12, 0))
+    source = proactive_status_for(calm.services, calm.channel.session_state)
+    status = source()
+    assert status is not None and status.next_at == calm.clock.now_utc()
+    assert status.next_kind == "饭点"
+    calm.go_to(calm.at(13, 30))  # the window of that candidate is over
+    after = source()
+    assert after is not None and after.next_kind != "饭点"
 
 
 async def test_the_status_without_a_plan_still_reports_the_range_and_a_channel_that_cannot_say(

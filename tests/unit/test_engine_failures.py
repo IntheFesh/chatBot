@@ -165,21 +165,25 @@ async def test_without_any_short_answer_of_hers_nothing_is_sent_but_the_alert_sa
 
 
 def test_short_answers_are_the_words_she_says_most_often() -> None:
-    phrases = {
-        "sentences": [
-            ["嗯嗯", 90],
-            ["好的", 60],
-            ["今天晚上我们去吃火锅好不好", 40],  # too long
-            ["[图片]", 30],  # a media placeholder
-            ["ok", 25],  # not words
-            ["在吗?", 20],  # punctuation
-            ["哈哈哈", 10],
-            ["坏", "x"],  # broken entry
-        ]
+    phrases = {  # the payload of a stored profile version: the sentences of each party
+        "her": {
+            "sentences": [
+                ["嗯嗯", 90],
+                ["好的", 60],
+                ["今天晚上我们去吃火锅好不好", 40],  # too long
+                ["[图片]", 30],  # a media placeholder
+                ["ok", 25],  # not words
+                ["在吗?", 20],  # punctuation
+                ["哈哈哈", 10],
+                ["坏", "x"],  # broken entry
+            ]
+        },
+        "user": {"sentences": [["晚安啦", 500]]},  # what he says is never an answer of hers
     }
     answers = ShortAnswers.from_phrases(phrases)
     assert list(answers.texts()) == ["嗯嗯", "好的", "哈哈哈"] and bool(answers)
     assert not ShortAnswers.from_phrases(None) and ShortAnswers.from_phrases({}).texts() == []
+    assert ShortAnswers.from_phrases({"her": None, "user": {}}).texts() == []
     import random
 
     counts: dict[str, int] = {}
