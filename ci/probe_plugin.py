@@ -37,6 +37,25 @@ def loaded_modules() -> list[str]:
     return names
 
 
+class _WinrtWatcher:
+    """Prints where ``winrt`` is imported for the first time."""
+
+    seen = False
+
+    def find_spec(self, name: str, path: object = None, target: object = None) -> None:
+        if name == "winrt" and not _WinrtWatcher.seen:
+            _WinrtWatcher.seen = True
+            import traceback
+
+            sys.stderr.write("\nPROBE: winrt imported for the first time from:\n")
+            sys.stderr.write("".join(traceback.format_stack(limit=25)))
+            sys.stderr.write(f"PROBE: torch already imported: {'torch' in sys.modules}\n")
+            sys.stderr.flush()
+
+
+sys.meta_path.insert(0, _WinrtWatcher())  # type: ignore[arg-type]
+
+
 def pytest_runtest_logreport(report: object) -> None:
     text = str(getattr(report, "longrepr", ""))
     if getattr(report, "failed", False) and "WinError 1114" in text:

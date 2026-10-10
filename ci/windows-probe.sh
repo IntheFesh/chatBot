@@ -16,16 +16,8 @@ done
 echo "files before it: ${#before[@]}"
 half=$(( ${#before[@]} / 2 ))
 case "$PROBE_INDEX" in
-  0)  echo "== 0: all earlier files, then the torch test"
-      uv run python -m pytest -q -p no:cacheprovider -p probe_plugin -m "not live" "${before[@]}" "$TORCH_TEST" ;;
-  1)  echo "== 1: collect only the earlier files, then import torch in the same process"
-      uv run python ci/probe_collect_then_torch.py "${before[@]}" ;;
-  2)  echo "== 2: the torch test alone"
-      uv run python -m pytest -q -p no:cacheprovider -p probe_plugin "$TORCH_TEST" ;;
-  3)  echo "== 3: first half of the earlier files, then the torch test"
+  0)  echo "== 0: import orders and DLL versions"
+      uv run python ci/probe_dll_order.py ;;
+  1)  echo "== 1: first half of the earlier files, with the winrt import watcher"
       uv run python -m pytest -q -p no:cacheprovider -p probe_plugin -m "not live" "${before[@]:0:$half}" "$TORCH_TEST" ;;
-  4)  echo "== 4: second half of the earlier files, then the torch test"
-      uv run python -m pytest -q -p no:cacheprovider -p probe_plugin -m "not live" "${before[@]:$half}" "$TORCH_TEST" ;;
-  5)  echo "== 5: the whole shard in order, as in CI"
-      uv run python -m pytest -q -p no:cacheprovider -p probe_plugin -m "not live" "${files[@]}" ;;
 esac
