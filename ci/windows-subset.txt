@@ -3,7 +3,3 @@
 # Pushing a change to this file runs exactly these tests on windows-latest
 # (a few minutes instead of the 15 minutes of the full sharded run). Keep it empty
 # when not debugging: an empty selection runs nothing.
-tests/unit/test_serving_windows.py
-tests/unit/test_serving_tunnel.py
-tests/unit/test_serving_cli.py
-tests/unit/test_serving_server.py
