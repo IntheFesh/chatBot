@@ -18,6 +18,9 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+import httpx
+import respx
+
 Body = dict[str, Any] | list[Any] | bytes | None
 
 
@@ -60,6 +63,38 @@ class StyleServer:
     def last(self, path: str) -> Recorded:
         return next(r for r in reversed(self.requests) if r.path == path)
 
+    def answer(
+        self, method: str, path: str, headers: dict[str, str], payload: dict[str, Any]
+    ) -> tuple[int, bytes, float]:
+        """Record a request and answer it from the route table: ``(status, body, delay_s)``."""
+        self.requests.append(Recorded(method, path, headers, payload))
+        route = self.routes.get((method, path))
+        if route is None:
+            return 404, b"", 0.0
+        body = route.handler(payload) if route.handler else route.body
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return route.status, data, route.delay_s
+
+    def mount(self, router: respx.MockRouter, url: str) -> None:
+        """Answer the requests for ``url`` inside the process, through a ``respx`` router.
+
+        The same routes and the same record as the real server on a socket, without the socket:
+        a test that steps a virtual clock needs the answer to be there when the request is made,
+        not a thread's moment later.
+        """
+        self.port = int(httpx.URL(url).port or 80)
+        base = url.rstrip("/")
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raw = request.content
+            payload = json.loads(raw) if raw else {}
+            headers = {k.lower(): v for k, v in request.headers.items()}
+            status, data, _ = self.answer(request.method, request.url.path, headers, payload)
+            kind = {"Content-Type": "application/json"}
+            return httpx.Response(status, content=data, headers=kind)
+
+        router.route(url__startswith=base).mock(side_effect=handler)
+
     def start(self) -> None:
         owner = self
 
@@ -68,21 +103,14 @@ class StyleServer:
                 length = int(self.headers.get("Content-Length") or 0)
                 raw = self.rfile.read(length) if length else b""
                 payload = json.loads(raw) if raw else {}
-                owner.requests.append(
-                    Recorded(
-                        method, self.path, {k.lower(): v for k, v in self.headers.items()}, payload
-                    )
-                )
-                route = owner.routes.get((method, self.path))
-                if route is None:
-                    self.send_response(404)
+                headers = {k.lower(): v for k, v in self.headers.items()}
+                status, data, delay = owner.answer(method, self.path, headers, payload)
+                if delay:
+                    time.sleep(delay)
+                self.send_response(status)
+                if status == 404 and not data:
                     self.end_headers()
                     return
-                if route.delay_s:
-                    time.sleep(route.delay_s)
-                body = route.handler(payload) if route.handler else route.body
-                self.send_response(route.status)
-                data = body if isinstance(body, bytes) else json.dumps(body).encode()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()

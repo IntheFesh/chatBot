@@ -29,7 +29,7 @@ import random
 import re
 from collections import Counter, deque
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -43,30 +43,37 @@ from tests.fixtures.synth_export import make_image_bytes
 from tests.support.console import ScriptedInput
 from tests.support.deepseek import API, TEST_KEY, error, ok, request_json
 from tests.support.embedding import HashingBackend
+from tests.support.ilink import API as ILINK_API
+from tests.support.ilink import BOT, CTX, TOKEN, USER
 from tests.support.life_clock import HOUSEKEEPING, LifeClock
+from tests.support.life_screen import Said, TimedOutput
 from tests.support.lifeline import ScriptedLifelineModel
 from tests.support.memory import ScriptedMemoryModel
 from tests.support.persona import attach_files, sync_counters
 from tests.support.proactive_world import ProactiveScript, proactive_model
+from tests.support.style_models import register_model
 from tests.support.synth_chat import ChatSpec, MessageWriter, build_chat
 from tests.support.waiting import wait_until
+from tests.support.wechat_double import Phone, WeChatDouble
 from twin.assembly import Assembly, assemble
-from twin.channel.base import MediaRef, MessageKind
-from twin.channel.local import TYPING_TEXT, LocalConsoleChannel
-from twin.commands import texts
+from twin.channel.base import Channel, MediaRef, MessageKind
+from twin.channel.ilink.store import Credentials, IlinkStore
+from twin.channel.state import ChannelStateStore
 from twin.config.runtime import BOT_TIMEZONE
 from twin.engine.roundstate import RoundData
 from twin.engine.turns import BotTurnStore
 from twin.llm.runtime import DEEPSEEK_SECRET
 from twin.profile.activity_model import ActivityModel
 from twin.profile.builder import rebuild
+from twin.profile.persona import compose
+from twin.profile.persona.store import PersonaStore
 from twin.profile.store import ACTIVITY_ACTIVE, VersionStore
 from twin.retrieval.indexer import run_index
 from twin.schedule.plan_model import DailyPlan
 from twin.schedule.proactive.store import LogEntry, ProactiveLogStore
 from twin.schedule.service import schedule_kit
 from twin.schedule.store import SALT_KEY
-from twin.services import Services
+from twin.services import Services, build_services
 from twin.stickers.catalog import StickerCatalog
 from twin.storage.engine_models import BotTurn
 from twin.storage.media import MediaKind
@@ -74,61 +81,9 @@ from twin.storage.models import Alert, Job
 from twin.storage.profile_models import ActivityModelVersion
 from twin.storage.settings_store import put_setting
 
-PREFIX = texts.PREFIX
-CONTINUATION = " " * 5  # how the terminal indents the further lines of a message
 USER_WORDS = re.compile(r"对方这一轮说的话：\s*(.*)\Z", re.DOTALL)
 CHICAGO = "America/Chicago"
 PLAN_SALT = "life-world"
-
-
-# ------------------------------------------------------------------------------ the screen
-
-
-@dataclass(frozen=True)
-class Said:
-    """One message she sent, as the terminal showed it, and when."""
-
-    at: datetime
-    kind: Literal["text", "sticker", "image", "system"]
-    text: str
-
-    @property
-    def persona(self) -> bool:
-        return self.kind != "system"
-
-
-class TimedOutput:
-    """The terminal screen: every line with the moment the clock showed when it was written."""
-
-    def __init__(self, clock: LifeClock) -> None:
-        self._clock = clock
-        self.lines: list[tuple[datetime, str]] = []
-
-    def write_line(self, text: str) -> None:
-        self.lines.append((self._clock.now_utc(), text))
-
-    def messages(self) -> list[Said]:
-        """The messages of the bot (the further lines of a message put back together)."""
-        found: list[Said] = []
-        for at, line in self.lines:
-            if line.startswith("bot: "):
-                body = line.removeprefix("bot: ")
-                kind: Literal["text", "sticker", "image", "system"] = "text"
-                if body.startswith(PREFIX):
-                    kind = "system"
-                elif body.startswith("[表情包："):
-                    kind = "sticker"
-                elif body.startswith("[图片]"):
-                    kind = "image"
-                found.append(Said(at, kind, body))
-            elif line.startswith(CONTINUATION) and found:
-                found[-1] = replace(
-                    found[-1], text=found[-1].text + "\n" + line[len(CONTINUATION) :]
-                )
-        return found
-
-    def typing_times(self) -> list[datetime]:
-        return [at for at, line in self.lines if line == TYPING_TEXT]
 
 
 # ------------------------------------------------------------------------------ DeepSeek
@@ -190,6 +145,24 @@ def _markers() -> dict[str, str]:
     } | {"reply_rules": newest_file_template("reply_rules").system.strip()[:24]}
 
 
+# what she says on her own, kind by kind: every time a different one, so that the post-processing
+# (which drops a bubble that repeats the last one) never empties a proactive message
+VARIANTS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "greeting": (("早啊", "刚醒"), ("早呀",), ("醒啦",), ("早安",)),
+    "meal": (("吃饭了吗",), ("你吃了没",), ("我饿了",), ("该吃饭啦",)),
+    "bedtime": (("我先睡啦", "晚安"), ("困了 晚安",), ("要睡了",), ("睡觉咯 晚安",)),
+    "followup": (("考试怎么样了",), ("考完了吗",), ("结果出来了吗",)),
+    "silence": (("在干嘛呀",), ("人呢",), ("忙完了吗",), ("在不在",)),
+    "share": (
+        ("刚刚在图书馆看文献", "有点困"),
+        ("今天的课好长",),
+        ("路上看到一只好胖的猫",),
+        ("晚饭有点咸",),
+    ),
+    "edge": (("睡不着",), ("刚醒",), ("还没睡",)),
+}
+
+
 KIND_OF_TEMPLATE = {
     "reply_rules": "reply",
     "reply_plan": "reply_plan",
@@ -215,7 +188,8 @@ class LifeDeepSeek:
         self.clock = clock
         self.memory = ScriptedMemoryModel()
         self.lifeline = ScriptedLifelineModel()
-        self.proactive = ProactiveScript()
+        self.proactive = ProactiveScript(by_hand=self._plan_by_hand)
+        self._variant: Counter[str] = Counter()
         self.book = ReplyBook()
         self.caption = "一张桌子上放着一杯咖啡的照片"
         self.sticker_tags = ["开心"]
@@ -229,6 +203,23 @@ class LifeDeepSeek:
         self.cache_hit_tokens = 300
         self.completion_tokens = 12
         self._markers = _markers()
+
+    def _plan_by_hand(self, kind: str, _body: dict[str, Any]) -> dict[str, Any]:
+        """The planner's answer: send, with the next variant of what she says for this kind."""
+        if kind in self.proactive.decline:
+            return {"send": False, "kind": kind, "messages": [], "reason": "现在发不合适"}
+        options = VARIANTS.get(kind, (("嗯",),))
+        lines = options[self._variant[kind] % len(options)]
+        self._variant[kind] += 1
+        return {
+            "send": True,
+            "kind": kind,
+            "messages": list(lines),
+            "sticker_hint": "",
+            "reason": f"{kind} 的理由",
+            "intent": "找他聊聊",
+            "tone": "随意",
+        }
 
     # ---- the knobs of a scenario -------------------------------------------------
 
@@ -327,13 +318,12 @@ class LifeDeepSeek:
         words = found.group(1) if found else whole
         return self._plain(self.book.answer(words, whole))
 
-    @staticmethod
-    def _crisis_lines(body: dict[str, Any]) -> str:
-        return str(body["messages"][-1]["content"])
-
     def _crisis(self, body: dict[str, Any]) -> httpx.Response:
-        lines = self._crisis_lines(body)
-        sure = any(word in lines for word in ("不想活", "结束生命", "自杀"))
+        """The second judgement: it reads the newest line (the last of the list)."""
+        prompt = str(body["messages"][-1]["content"])
+        lines = [x for x in prompt.splitlines() if x.startswith("- ")]
+        newest = lines[-1] if lines else ""
+        sure = any(word in newest for word in ("不想活", "结束生命", "自杀"))
         verdict = {"is_crisis": sure, "severity": "high" if sure else "none", "reason": "scripted"}
         return self._plain(json.dumps(verdict, ensure_ascii=False))
 
@@ -370,25 +360,55 @@ def install_routine(services: Services, model: ActivityModel) -> str:
         return row.id
 
 
+def log_in_and_bind(services: Services, clock: LifeClock) -> None:
+    """The user has scanned the code and been bound (what ``twin channel login`` and bind leave)."""
+    store = IlinkStore(ChannelStateStore(services.db), clock)
+    store.save_credentials(
+        Credentials(
+            bot_token=TOKEN,
+            ilink_bot_id=BOT,
+            ilink_user_id=USER,
+            api_base_url=ILINK_API,
+            saved_at=clock.now_utc().isoformat(),
+        )
+    )
+    store.bind(USER, context_token=CTX)
+
+
+def register_style_model(services: Services) -> str:
+    """A registered, active model that passed the gate, locked to a stored persona card v1."""
+    text = (
+        compose.stats_block(["几乎不用逗号"])
+        + compose.auto_block("### 风格\n- 训练时的口头禅是嘿嘿\n\n### 基本情况\n- 一件事实\n\n")
+        + compose.manual_block([], None)
+    )
+    PersonaStore(services.db, services.clock).add_version("pre_holdout", text, reason="generate")
+    return register_model(services, persona_version="v1")
+
+
 # ------------------------------------------------------------------------------ the world
 
 
 @dataclass
 class LifeWorld:
-    """A running application, a user at the terminal, and the doubles around them."""
+    """A running application, a user at the terminal (or the phone), and the doubles around them."""
 
     services: Services
     clock: LifeClock
     deepseek: LifeDeepSeek
     assembly: Assembly
-    keyboard: ScriptedInput
-    screen: TimedOutput
-    channel: LocalConsoleChannel
+    keyboard: ScriptedInput | None
+    screen: TimedOutput | Phone
+    channel: Channel
     api: respx.MockRouter
     workdir: Path
+    seed: int = 7
+    double: WeChatDouble | None = None
     watch: set[str] = field(default_factory=set)
     started: bool = False
     pictures: int = 0
+    before_start: set[asyncio.Task[Any]] = field(default_factory=set)
+    retired: list[Services] = field(default_factory=list)
 
     # ---- building it ------------------------------------------------------------------
 
@@ -409,11 +429,14 @@ class LifeWorld:
         quota: int | None = None,
         start_application: bool = True,
         configure: Callable[[Services], None] | None = None,
+        platform: Literal["console", "ilink"] = "console",
+        platform_window_h: float = 24.0,
+        platform_quota: int = 10,
     ) -> LifeWorld:
         """Build the world and, unless told not to, start the application (see the module text)."""
         settings = services.settings
         settings.retrieval.model = embedder.info.model
-        settings.channel.kind = "console"
+        settings.channel.kind = "console" if platform == "console" else "ilink"
         settings.pricing.offpeak_multiplier = 1.0  # a job may run at any hour
         if window_h is not None:
             settings.channel.proactive_window_safe_h = window_h
@@ -438,18 +461,39 @@ class LifeWorld:
         deepseek = LifeDeepSeek(clock)
         api.post(API).mock(side_effect=deepseek)
         api.route(host="127.0.0.1").pass_through()  # a made-up llama-server is a real local one
-        keyboard, screen = ScriptedInput(), TimedOutput(clock)
-        assembly = assemble(
-            services, console_input=keyboard, console_output=screen, rng=random.Random(seed)
+        double: WeChatDouble | None = None
+        keyboard: ScriptedInput | None = None
+        if platform == "ilink":  # the WeChat platform and the user's phone, made up
+            double = WeChatDouble(clock, window_h=platform_window_h, quota=platform_quota)
+            double.mount(api)
+            log_in_and_bind(services, clock)
+            screen: TimedOutput | Phone = double.phone
+            assembly = assemble(services, rng=random.Random(seed))
+        else:
+            keyboard, screen = ScriptedInput(), TimedOutput(clock)
+            assembly = assemble(
+                services, console_input=keyboard, console_output=screen, rng=random.Random(seed)
+            )
+        world = cls(
+            services,
+            clock,
+            deepseek,
+            assembly,
+            keyboard,
+            screen,
+            assembly.channel,
+            api,
+            workdir,
+            seed,
+            double,
         )
-        channel = assembly.channel
-        assert isinstance(channel, LocalConsoleChannel)
-        world = cls(services, clock, deepseek, assembly, keyboard, screen, channel, api, workdir)
+        clock.fast = world.watch  # what a scenario watches is woken at every step, too
         if start_application:
             await world.start()
         return world
 
     async def start(self) -> None:
+        self.before_start = asyncio.all_tasks()
         await self.assembly.application.start()
         self.started = True
         await self.clock.settle()
@@ -460,6 +504,48 @@ class LifeWorld:
             self.started = False
             await self.assembly.application.stop()
         await self.assembly.llm.client.aclose()
+        for old in self.retired:
+            old.close()
+
+    async def kill(self) -> None:
+        """The process dies: every task of the application ends where it is, nothing is cleaned up.
+
+        No component's ``stop`` runs (the channel does not say goodbye, the engine does not
+        finish its round); what is on disk is all that is left.
+        """
+        self.started = False
+        victims = asyncio.all_tasks() - self.before_start - {asyncio.current_task()}
+        for task in victims:
+            task.cancel()
+        await asyncio.gather(*victims, return_exceptions=True)
+        await self.assembly.llm.client.aclose()
+        await self.clock.settle()
+
+    async def restart(self) -> None:
+        """A new process on the same files: new services, a new application, the same world around.
+
+        The user's side - the terminal keyboard or the platform with its phone - and the made-up
+        DeepSeek are the same objects: they are not part of the process that died.
+        """
+        old = self.services
+        services = build_services(
+            old.settings, root=old.paths.root, secrets=old.secrets, clock=self.clock
+        )
+        services.runtime.initialize()
+        self.retired.append(old)
+        self.services = services
+        if self.double is not None:
+            self.assembly = assemble(services, rng=random.Random(self.seed + 1))
+        else:
+            assert isinstance(self.screen, TimedOutput) and self.keyboard is not None
+            self.assembly = assemble(
+                services,
+                console_input=self.keyboard,
+                console_output=self.screen,
+                rng=random.Random(self.seed + 1),
+            )
+        self.channel = self.assembly.channel
+        await self.start()
 
     # ---- time -------------------------------------------------------------------------
 
@@ -507,6 +593,7 @@ class LifeWorld:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + real_limit_s
+        crawled = 0  # steps in a row that moved the clock by less than a second
         while self.now < moment:
             await self.clock.settle()
             if until is not None and until():
@@ -514,9 +601,12 @@ class LifeWorld:
             wake = self.meaningful_wake_in()
             remaining = (moment - self.now).total_seconds()
             step = min(remaining, max_step_s, wake if wake is not None else max_step_s)
-            if step <= 0:
-                step = 0.0
-            await self.clock.step(step)
+            crawled = crawled + 1 if step < 1.0 else 0
+            if crawled > 200:
+                raise AssertionError(
+                    f"time crawls at {self.local_text(self.now)}: {self.clock.sleepers()[:8]}"
+                )
+            await self.clock.step(max(0.0, step))
             if loop.time() > deadline:
                 raise AssertionError(
                     f"the world did not reach {moment} within {real_limit_s}s of real time"
@@ -545,6 +635,14 @@ class LifeWorld:
     async def say(self, text: str) -> None:
         """The user types ``text``; returns when the engine took it (stored, queued, answered)."""
         before = self.handled
+        if self.double is not None:
+            self.double.user_types(text)
+            for _ in range(30):  # the channel's poll runs once a second
+                await self.clock.step(1.0)
+                if self.handled > before:
+                    return
+            raise AssertionError("the message never reached the engine")
+        assert self.keyboard is not None
         self.keyboard.feed(text)
         await wait_until(lambda: self.handled > before, limit_s=15.0, interval=0.002)
         await self.clock.settle()

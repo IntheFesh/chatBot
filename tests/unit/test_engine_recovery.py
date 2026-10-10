@@ -26,6 +26,7 @@ from tests.support.engine_harness import (
     wait_for_state,
 )
 from tests.support.waiting import wait_until
+from twin.channel.base import OutboundKind, OutboundResult
 from twin.engine.roundstate import RoundData
 from twin.schedule.events import Resumed
 from twin.services import Services
@@ -231,6 +232,75 @@ async def test_a_stop_while_a_bubble_is_being_written_down_still_notes_it_so_it_
         assert out_texts(second) == ["一", "二", "三"]
     finally:
         await second.engine.stop()
+
+
+class SilentAfterDelivery(ScriptedChannel):
+    """A channel whose answer to one send never comes: the bubble is out, the process dies."""
+
+    def __init__(self, clock: ManualClock, hang_on: str) -> None:
+        super().__init__(clock)
+        self.hang_on = hang_on
+        self.reached = asyncio.Event()
+
+    async def send_text(self, text: str, *args: Any, **kwargs: Any) -> Any:
+        result = await super().send_text(text, *args, **kwargs)
+        if text == self.hang_on:
+            self.reached.set()
+            await asyncio.Event().wait()  # the answer of the platform never arrives
+        return result
+
+
+async def test_a_stop_inside_a_send_does_not_say_the_bubble_twice(
+    services: Services, clock: ManualClock
+) -> None:
+    """The bubble is on the phone, the process ends before the channel has answered.
+
+    Nobody can tell whether it arrived, and a bubble said twice hurts more than one that is
+    missing: the next start takes it as sent, writes it down (with a note in the reply's actions)
+    and goes on after it.
+    """
+    channel = SilentAfterDelivery(clock, hang_on="二")
+    first = build_harness(services, clock, channel=channel)
+    await first.engine.start()
+    first.writer.add(make_draft("一", "二", "三"))
+    await first.message("数数")
+    await run_to_idle(first.engine, clock, until=channel.reached.is_set)
+    stored = RoundData.of(first.engine.snapshot()).outgoing
+    assert stored is not None and stored.in_flight is not None and stored.in_flight.text == "二"
+    assert [item["text"] for item in first.engine.snapshot().sent] == ["一"]  # "二" is not noted
+    second = await restart(first, clock_jump_s=60, channel=ScriptedChannel(clock))
+    try:
+        await run_to_idle(second.engine, second.clock)
+        assert channel.texts + second.channel.texts == ["一", "二", "三"]  # each once, in order
+        assert second.channel.texts == ["三"] and second.writer.calls == 0
+        assert out_texts(second) == ["一", "二", "三"]  # and the conversation holds all three
+        with second.services.db.session() as session:
+            rows = list(
+                session.scalars(
+                    select(BotTurn).where(BotTurn.direction == "out").order_by(BotTurn.at)
+                )
+            )
+            replies = {row.reply_id for row in rows}
+            indexes = [row.bubble_index for row in rows]
+            steps = [a["step"] for row in rows for a in row.actions or []]
+        assert len(replies) == 1 and indexes == [0, 1, 2]
+        assert "bubble_in_doubt" in steps  # said in the reply's own record
+        left = RoundData.of(second.engine.snapshot()).outgoing
+        assert left is None and second.engine.snapshot().state == "IDLE"
+    finally:
+        await second.engine.stop()
+
+
+async def test_a_send_that_ended_without_a_bubble_clears_the_note(rig: Harness) -> None:
+    """A refused send is not "in doubt" later: the note is taken back when the reply ends."""
+    rig.channel.results.append(
+        OutboundResult.failure(OutboundKind.WINDOW_REJECTED, "window_elapsed")
+    )
+    rig.writer.add(make_draft("一", "二"))
+    await rig.message("数数")
+    await run_to_idle(rig.engine, rig.clock)
+    assert rig.channel.texts == [] and rig.engine.snapshot().state == "IDLE"
+    assert RoundData.of(rig.engine.snapshot()).outgoing is None
 
 
 async def test_sending_with_a_message_that_came_meanwhile_continues_like_an_interruption(

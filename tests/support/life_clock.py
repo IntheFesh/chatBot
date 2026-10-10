@@ -47,6 +47,7 @@ FAST_HOUSEKEEPING: frozenset[str] = frozenset(
         "ops/jobs.py",  # the job worker's poll
         "ops/power_events.py",  # the sleep / wake detector
         "schedule/component.py",  # the schedule's tick: the day plan, the life line, the summaries
+        "ilink/poller.py",  # the WeChat channel's poll, once a second
     }
 )
 SLOW_HOUSEKEEPING: frozenset[str] = frozenset(
