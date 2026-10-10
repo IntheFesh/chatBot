@@ -40,4 +40,4 @@ jobs:
             echo "ci/windows-subset.txt lists no tests; nothing to run"
             exit 0
           fi
-          uv run pytest -q -m "not live" -p no:cacheprovider "${selected[@]}"
+          uv run pytest -q --tb=long -m "not live" -p no:cacheprovider "${selected[@]}"
