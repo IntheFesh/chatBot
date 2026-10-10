@@ -202,7 +202,7 @@ def test_more_shards_than_files_leave_some_empty() -> None:
 def test_the_committed_weights_balance_the_real_suite() -> None:
     files = shard.discover_test_files(REPO)
     table = shard.load_weights(REPO / "ci" / "test_weights.json")
-    for platform, count in (("linux", 3), ("windows", 4)):
+    for platform, count in (("linux", 3), ("windows", 5)):
         weighing = shard.weigh(files, table, platform, REPO)
         parts = shard.assign(weighing.weights, count)
         assert sorted(name for part in parts for name in part) == files
@@ -247,8 +247,8 @@ def test_every_file_of_the_real_suite_is_in_exactly_one_command_line_shard(
     capfdbinary: pytest.CaptureFixture[bytes],
 ) -> None:
     seen: list[str] = []
-    for index in range(1, 5):
-        assert shard.main(["--shard", str(index), "--of", "4", "--platform", "windows"]) == 0
+    for index in range(1, 6):
+        assert shard.main(["--shard", str(index), "--of", "5", "--platform", "windows"]) == 0
         seen += capfdbinary.readouterr().out.decode("utf-8").splitlines()
     assert sorted(seen) == shard.discover_test_files(REPO)
 
@@ -375,6 +375,7 @@ def test_the_committed_weights_file_is_valid_and_mentions_real_files() -> None:
     table = shard.load_weights(REPO / "ci" / "test_weights.json")
     files = set(shard.discover_test_files(REPO))
     for platform, recorded in table.items():
+        assert recorded, f"{platform}: no weights recorded"
         assert set(recorded) <= files, f"{platform}: weights of files that do not exist"
 
 

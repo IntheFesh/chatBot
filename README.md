@@ -90,7 +90,7 @@ uv run python scripts/privacy_scan.py                  # 提交前隐私扫描
 powershell -File scripts/check.ps1 -Round 01           # 以上全部一键运行（Windows）
 ```
 
-GitHub Actions 把这些检查拆成矩阵分片并行运行（Windows 4 片、Linux 3 片，每片一台虚拟机，覆盖率合并后再过同一道门槛）；结构、分片器 `scripts/shard_tests.py`、权重维护与排查见 [`docs/CI.md`](docs/CI.md)。本地跑其中一片：`uv run pytest -q -m "not live" $(uv run python scripts/shard_tests.py --shard 1 --of 3)`。
+GitHub Actions 把这些检查拆成矩阵分片并行运行（Windows 5 片、Linux 3 片，每片一台虚拟机，覆盖率合并后再过同一道门槛）；结构、分片器 `scripts/shard_tests.py`、权重维护与排查见 [`docs/CI.md`](docs/CI.md)。本地跑其中一片：`uv run pytest -q -m "not live" $(uv run python scripts/shard_tests.py --shard 1 --of 3)`。
 
 规则摘要（完整见 `CLAUDE.md`）：不留桩和玩具实现；时间一律带时区并通过 `twin.clock`；真实数据永远不进 git，测试只用合成数据；日志 INFO 及以上不含正文；秘密只存凭据管理器；机器人自己的回复永远不进风格样本、检索库和训练集。
 
