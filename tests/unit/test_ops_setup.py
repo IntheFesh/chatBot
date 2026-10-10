@@ -5,12 +5,14 @@ from __future__ import annotations
 import email
 import email.policy
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import yaml
 from typer.testing import CliRunner
 
+from tests.support.clock import ManualClock
 from tests.support.ops import Certificate, SmtpServer, make_certificate
 from twin.cli import app
 from twin.config.loader import ENV_CONFIG
@@ -79,6 +81,22 @@ def test_the_consent_is_required_and_the_date_must_be_a_date(
     assert not config.exists() and not secret_store.exists(DEEPSEEK_SECRET)
     code, out = wizard(["y", "yesterday"])
     assert code != 0 and "YYYY-MM-DD" in out and not config.exists()
+
+
+@pytest.mark.parametrize(
+    ("zone", "today"), [("America/Chicago", "2026-11-01"), ("Asia/Shanghai", "2026-11-02")]
+)
+def test_without_an_earlier_answer_the_proposed_date_is_today_where_the_user_lives(
+    config: Path, clock: ManualClock, zone: str, today: str
+) -> None:
+    """21:30 on 1 November in Chicago is already the 2nd in UTC and in Shanghai."""
+    clock.set_time(datetime(2026, 11, 2, 3, 30, tzinfo=UTC))
+    answers = ["y", "", "n", "n", "", "", "n"]  # the date, and every answer is the proposal
+    options = ("--set", "consent.confirmed_at=null", "--set", f"time.bot_timezone={zone}")
+    code, out = wizard(answers, *options)
+    assert code == 0, out
+    assert f"[{today}]" in out  # the proposal on the screen
+    assert written(config)["consent"] == {"confirmed_at": today}
 
 
 def test_the_wizard_can_be_run_again_and_keeps_what_is_there(

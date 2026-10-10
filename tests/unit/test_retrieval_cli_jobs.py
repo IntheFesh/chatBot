@@ -4,6 +4,7 @@ R-RET-006, R-ARCH-006)."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,15 +12,17 @@ import pytest
 from sqlalchemy import select
 from typer.testing import CliRunner
 
+from tests.support.clock import ManualClock
 from tests.support.embedding import H, HashingBackend, U, day, write_dialogue
 from tests.support.ingest import make_export, run_import
 from twin.cli import app
+from twin.clock import to_epoch
 from twin.config.loader import load_settings, resolve_paths
 from twin.ingest.hooks import HookContext, load_hooks
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.jobs import HANDLER_MODULES, HandlerRegistry, JobQueue, Worker, load_handlers
 from twin.ops.process_model import CommandKind, get_spec, iter_commands
-from twin.profile.holdout import LISTENER_MODULES, get_holdout, resplit_holdout
+from twin.profile.holdout import LISTENER_MODULES, Holdout, get_holdout, resplit_holdout
 from twin.profile.queue import PROFILE_JOB
 from twin.retrieval import embedder as embedder_module
 from twin.retrieval.embedder import reset_embedding_services
@@ -27,6 +30,7 @@ from twin.retrieval.hook import queue_retrieval
 from twin.retrieval.indexer import INDEX_JOB, collect_stats, run_index, window_table
 from twin.retrieval.jobs import MISMATCH_ALERT, handle_retrieval_index
 from twin.retrieval.queue import queue_retrieval_index
+from twin.retrieval.resplit import retrieval_after_resplit
 from twin.services import Services, build_services
 from twin.storage.models import Alert
 from twin.storage.retrieval_models import ExampleWindow
@@ -247,6 +251,33 @@ async def test_a_smaller_holdout_releases_windows_that_are_then_encoded(
     with services.db.session() as session:
         flags = [row.holdout for row in session.scalars(select(ExampleWindow))]
     assert sum(flags) == 2
+
+
+def test_the_cutoff_is_an_instant_and_the_index_is_cut_at_it(
+    services: Services, embedder: HashingBackend, clock: ManualClock
+) -> None:
+    """A cutoff is an instant, not a wall-clock time: 01:30 happens twice on 1 November."""
+    configure(services, embedder)
+    fill(services)
+    run_index(services)
+    with services.db.session() as session:
+        before = [(row.reply_at_utc, row.holdout) for row in session.scalars(select(ExampleWindow))]
+    times = sorted(at for at, _ in before)
+    cutoff = times[-6] - timedelta(seconds=1)  # the last six windows are at or after it
+    entering = sum(1 for at, held in before if at >= cutoff and not held)
+    current = Holdout(cutoff, 0.2, 30, 6, clock.now_utc())
+    note = retrieval_after_resplit(services, None, current)
+    assert f"{entering} window(s) are now held out" in note
+    with services.db.session() as session:
+        rows = [(row.reply_at_utc, row.holdout) for row in session.scalars(select(ExampleWindow))]
+    assert {held for at, held in rows if at >= cutoff} == {True}
+    assert {held for at, held in rows if at < cutoff} == {False}
+    assert window_table(services).count() == len(rows) - 6
+    table = window_table(services)
+    column = table.schema.time_column
+    assert all(row[column] < int(to_epoch(cutoff)) + 1 for row in table.rows())
+    again = retrieval_after_resplit(services, current, current)  # the same cutoff: nothing moves
+    assert "0 window(s) are now held out" in again and "0 were released" in again
 
 
 def test_a_resplit_before_the_library_exists_only_says_so(

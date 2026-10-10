@@ -46,6 +46,12 @@ from twin.channel.base import (
     QuoteTarget,
     RecipientNotAllowed,
 )
+from twin.channel.ilink.outbound import (
+    TICKET_TTL_S,
+    TYPING_KEEPALIVE_S,
+    TYPING_MAX_S,
+    IlinkSender,
+)
 from twin.channel.policy import CompositeMediaPolicy, sha256_hex
 from twin.storage.db import Database
 
@@ -495,6 +501,44 @@ async def test_typing_starts_with_a_ticket_keeps_alive_every_five_seconds_and_ca
     await clock.advance(30)
     assert typing.call_count == count  # the keep-alive is gone
     assert config.call_count == 1  # the ticket was cached
+
+
+async def test_the_keep_alive_ends_by_itself_after_three_minutes_with_a_cancel(
+    api: respx.MockRouter, h: Harness, clock: ManualClock
+) -> None:
+    """The bot that started typing and was never told to stop does not type for ever."""
+    assert isinstance(h.channel._sender, IlinkSender)  # the sender the channel is made of
+    api.post(GETCONFIG).respond(200, json={"ret": 0, "typing_ticket": "TICKET-1"})
+    typing = api.post(SENDTYPING).respond(200, json={})
+    await h.channel.send_typing(True)
+    await wait_until(lambda: clock.pending_sleepers >= 1)
+    beats = int(TYPING_MAX_S / TYPING_KEEPALIVE_S)
+    for _ in range(beats):
+        await clock.advance(TYPING_KEEPALIVE_S)
+    await wait_until(lambda: typing.call_count >= beats + 2)
+    statuses = [request_json(call.request)["status"] for call in typing.calls]
+    assert statuses == [1] * (beats + 1) + [2]  # the start, a beat every 5 s for 180 s, a cancel
+    count = typing.call_count
+    await clock.advance(60)
+    assert typing.call_count == count  # and then nothing
+
+
+async def test_the_ticket_is_asked_for_again_after_ten_minutes(
+    api: respx.MockRouter, h: Harness, clock: ManualClock
+) -> None:
+    config = api.post(GETCONFIG).respond(200, json={"ret": 0, "typing_ticket": "TICKET-1"})
+    api.post(SENDTYPING).respond(200, json={})
+    await h.channel.send_typing(True)
+    await h.channel.send_typing(False)
+    await clock.advance(TICKET_TTL_S - 1)
+    await h.channel.send_typing(True)
+    await h.channel.send_typing(False)
+    assert config.call_count == 1  # a minute short of ten: the ticket is still good
+    await clock.advance(2)
+    config.respond(200, json={"ret": 0, "typing_ticket": "TICKET-2"})
+    await h.channel.send_typing(True)
+    assert config.call_count == 2  # ten minutes of the (monotonic) clock: a new one
+    await h.channel.send_typing(False)
 
 
 async def test_typing_without_a_ticket_is_silent(api: respx.MockRouter, h: Harness) -> None:

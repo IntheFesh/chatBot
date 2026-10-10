@@ -9,7 +9,7 @@ import sqlite3
 import threading
 from collections import Counter
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from twin.ingest.importer import (
     prepare_import,
     resumable_run,
 )
+from twin.ingest.media_import import ASSET_GROUP, MediaImporter
 from twin.ingest.normalize import RENDER_TYPE_KINDS
 from twin.ingest.runs import get_run, latest_run
 from twin.services import Services
@@ -522,6 +523,31 @@ def test_media_files_are_encrypted_into_the_store_and_linked(
             assert message_row is not None and message_row.media_sha256 == asset.sha256
     paths = sorted((services.paths.media_dir).glob("*.enc"))
     assert paths and b"PNG" not in paths[0].read_bytes()[:200]  # ciphertext, not the picture
+
+
+def test_media_rows_carry_the_times_of_the_injected_clock_not_the_ones_of_the_files(
+    services: Services, tmp_path: Path, clock: ManualClock
+) -> None:
+    """The row says when the application stored the file (UTC); the export's own times are kept."""
+    assert ASSET_GROUP > 0 and MediaImporter.run_assets  # the importer of the media phase
+    clock.set_time(datetime(2026, 11, 1, 7, 30, tzinfo=UTC))  # 01:30 CST, the repeated hour
+    export = make_export(tmp_path, target_messages=200, missing_image_ratio=0.0)
+
+    def later(_event: BatchEvent) -> None:
+        clock.tick(60)  # a minute for each batch of messages
+
+    run_import(services, export, batch_size=50, on_batch=later)
+    finished = clock.now_utc()
+    with services.db.session() as session:
+        rows = session.scalars(select(MediaAsset)).all()
+        assert rows and all(r.created_at.tzinfo is not None for r in rows)
+        assert {r.updated_at.utcoffset() for r in rows} == {timedelta(0)}  # stored as UTC
+        assert min(r.created_at for r in rows) >= datetime(2026, 11, 1, 7, 30, tzinfo=UTC)
+        assert max(r.updated_at for r in rows) <= finished
+        available = [r for r in rows if r.status == "available" and r.message_id]
+        assert available and all(r.updated_at >= r.created_at for r in available)
+        avatars = [r for r in rows if r.kind == "avatar"]
+        assert len(avatars) == 2 and all(r.status == "available" for r in avatars)
 
 
 def test_missing_media_is_recorded_with_its_reason(services: Services, tmp_path: Path) -> None:

@@ -24,7 +24,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.clock import SystemClock
+from twin.clock import get_clock
 from twin.ops.backup.archive import ArchiveError
 from twin.ops.backup.restore import RestoreError, restore_archive
 from twin.ops.backup.service import BackupBusyError, BackupError, BackupService
@@ -158,7 +158,7 @@ def backup_restore(
     typer.echo(f"restoring {path.name}: the current data is backed up first, then replaced")
     if not yes and not typer.confirm("Replace the current data with this backup?"):
         raise typer.Exit(1)
-    clock = SystemClock()
+    clock = get_clock()  # the machine's clock; a test installs its own
     local_date = clock.now_utc().astimezone(ZoneInfo(settings.time.bot_timezone)).date().isoformat()
     context.reset()  # nothing of the old database may stay open
     try:

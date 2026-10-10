@@ -17,6 +17,7 @@ from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.state import ChannelStateStore
 from twin.cli import app
 from twin.config.secrets import SecretStore
+from twin.ops import drill
 from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR, InstanceLock
 from twin.ops.process_model import ExitCode
 from twin.services import CliContext, Services, set_cli_context
@@ -197,6 +198,17 @@ def test_the_drill_prints_the_steps_and_changes_nothing(home: Services) -> None:
         child.release()
     assert "twin run 在运行" in out
     assert home.db.path.stat().st_mtime_ns >= before  # (nothing of ours was written by the drill)
+
+
+def test_the_drill_says_the_time_of_the_clock_it_runs_on_and_gives_every_step(
+    home: Services, clock: ManualClock
+) -> None:
+    """The person notes the time before pulling the cable: it must be the machine's clock."""
+    clock.set_time(datetime(2026, 11, 2, 3, 30, tzinfo=UTC))  # 21:30 on 1 November in Chicago
+    code, out = twin(home, "ops", "drill", "network")
+    assert code == 0, out
+    assert "现在是 2026-11-02 03:30 UTC。" in out
+    assert len(drill.STEPS) == 5 and all(step in out for step in drill.STEPS)
 
 
 # ----------------------------------------------------------------------------- twin eval stability
