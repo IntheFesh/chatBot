@@ -7,7 +7,7 @@ OPTS=(-q -p no:cacheprovider -m "not live" -rf --tb=short --log-level=INFO
       --log-format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s" --log-date-format="%H:%M:%S")
 for i in 1 2 3 4; do
   echo "-- job $PROBE_INDEX run $i"
-  uv run python -m pytest "${OPTS[@]}" -p probe_notoast $L/test_life_one_day.py $L/test_life_sleep.py > "out-$i.txt" 2>&1
+  uv run python -m pytest "${OPTS[@]}" -p probe_notoast -p probe_nowindow $L/test_life_one_day.py $L/test_life_sleep.py > "out-$i.txt" 2>&1
   code=$?
   tail -n 1 "out-$i.txt"
   if [ "$code" -ne 0 ]; then
