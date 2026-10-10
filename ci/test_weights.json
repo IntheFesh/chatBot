@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "unit": "seconds of one sequential run of the file (relative weights; only ratios matter)",
+  "platforms": {
+    "linux": {},
+    "windows": {}
+  }
+}

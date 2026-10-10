@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -74,6 +76,31 @@ def test_peak_memory_and_formatting_helpers() -> None:
     bench = load_bench()
     assert bench.peak_rss_bytes() > 0
     assert bench.mb(5 * 1024 * 1024) == "5.0 MB"
+
+
+def test_a_fresh_child_reports_its_own_peak_not_the_peak_of_its_parent() -> None:
+    """``ru_maxrss`` survives fork + exec on Linux; in a long pytest run (thousands of tests, in
+    CI a whole shard) the import child would inherit the high-water mark of the test process and
+    fail the 500 MB target by no fault of its own (D-493)."""
+    block = bytearray(400 * 1024 * 1024)
+    for offset in range(0, len(block), 4096):
+        block[offset] = 1  # touch every page so that it counts towards this process' peak
+    del block
+    code = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('bench_import', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "print(module.peak_rss_bytes())\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code, str(ROOT / "scripts" / "bench_import.py")],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    child_peak = int(done.stdout.strip())
+    assert 0 < child_peak < 200 * 1024 * 1024
 
 
 def test_the_verdicts_follow_the_specification_targets() -> None:
