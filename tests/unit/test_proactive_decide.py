@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -154,6 +155,20 @@ async def test_the_planner_reads_the_moment_her_day_and_the_conversation(started
     assert "$" not in request["messages"][0]["content"]  # every field of the template was filled
     roles = [m["role"] for m in request["messages"]]
     assert roles[-1] == "user" and "在吗" in " ".join(m["content"] for m in request["messages"])
+
+
+async def test_nothing_that_identifies_a_person_is_sent_to_the_planner(calm: World) -> None:
+    """Everything the planner reads passes the redaction first (CLAUDE.md rule 6, R-PRIV-002)."""
+    phone = "1" + "3800138000"  # built from parts: the privacy scan must not see a number
+    calm.user_writes(f"我的手机号是{phone}，别告诉别人", at=calm.at(9, 0))
+    followup, _ = calm.followups.add(
+        f"周五联系{phone}", calm.at(9, 0), created_at=calm.at(20, 0, day=8)
+    )
+    draft = await decide(calm, TriggerKind.FOLLOWUP, followup_id=followup.id)
+    assert draft.usable, draft
+    sent = json.dumps(last_request(calm)["messages"], ensure_ascii=False)
+    assert phone not in sent and phone[:3] + " " + phone[3:7] not in sent
+    assert "[手机号" in sent  # the words are there, the number is a token
 
 
 async def test_the_planner_sees_the_followup_it_is_asked_to_follow(started: World) -> None:

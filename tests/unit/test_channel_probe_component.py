@@ -306,6 +306,7 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
         "job_worker",
         "learning",  # queues the weekly consolidation of the correction rules (round 11)
         "power_events",
+        "proactive",  # she writes first, never while she sleeps (round 10)
         "schedule",
         "state_watcher",
     ]

@@ -272,11 +272,19 @@ def build_scheduler(
 
 
 def register_proactive(
-    application: Application, services: Services, engine_component: EngineComponent
+    application: Application,
+    services: Services,
+    engine_component: EngineComponent,
+    *,
+    rng: random.Random | None = None,
 ) -> ProactiveComponent:
-    """Build the scheduler, subscribe it to the schedule's events and add the component."""
+    """Build the scheduler, subscribe it to the schedule's events and add the component.
+
+    ``rng`` is the generator of the scheduler's draws (the running application passes none; a
+    test that ticks a scheduler built here passes one whose draws it knows).
+    """
     kit = schedule_kit(services)
-    scheduler = build_scheduler(services, engine_component)
+    scheduler = build_scheduler(services, engine_component, rng=rng)
 
     async def on_plan_change(_event: PlanRebuilt | TimezoneSwitched) -> None:
         scheduler.forget_day()

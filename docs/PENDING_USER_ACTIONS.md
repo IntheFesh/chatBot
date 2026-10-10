@@ -532,6 +532,8 @@
 
 沙箱里没有真实微信、真实 DeepSeek 和真实的七天，下面这些都要你来做。M3 的两个条件（连续七天的主动消息审计合规、`/评分` 平均 ≥4）只能靠真实使用达成，没有办法在测试里“造”出来。
 
+0. **升级数据库，并先确认 ClawBot 允许主动推送（R-CH-010）** `uv run twin db upgrade`（迁移 `0014_proactive_tables`：`proactive_candidates`、`proactive_log`、`ratings` 三张表，`lifeline_events` 加“已说过”标记，`eval_runs.kind` 增加 `proactive_audit`；降级一步可回到 `0013_preference_pairs`）。主动消息能不能真的送达，取决于真实 M0 探针的结果：`uv run twin channel probe` 要先在你的 ClawBot 会话里做完，`docs/CHANNEL_REPORT.md` 里“窗口”和“条数”两项有实测数字，`uv run twin eval gate M0` 通过。**如果探针说你发完消息后，主动消息一小段时间后就送不出去（窗口过短或条数不够），这一轮的调度器照常运行，但 M3 在 ClawBot 上达不成**——按 R-CH-010 要停下来告诉我，企业微信通道要另开一轮，不要自己去试“激活过期会话”之类的办法。
+
 1. **真实跑七天（M3 的观察期）** `uv run twin run`（微信已绑定：`uv run twin channel login`），电脑保持开着、关掉自动休眠（睡眠醒来不会补发，见 R-SCH-005）。每天开着的那天，日志里会有一条“当日开始”，没开的那天不算“被监测”，会让连续观察的天数重新数。
    - **每天至少给她发一条消息**：平台只允许在你最近一条消息之后约 22 小时内主动发，过了窗口她就不发（日志里是“被窗口抑制”），这一天算免责，但发不满。
    - 想看她当天做了什么决定：`uv run twin proactive log --days 7`（不显示消息正文；要看正文加 `--show-text`，会问两次）。每行是一次决定：当地时间、类型（起床问候/饭点/睡前/跟进/沉默/分享/睡不着刚醒）、结果（已发/被拒/规划不发/失败/过期/放弃）、原因、她的状态、追发次数。
@@ -550,7 +552,7 @@
 
 5. **没有真实环境时也能做的：模拟器** `uv run python scripts/simulate_proactive.py --days 14`（`--user all-day` 模拟一天写三次的人，`--silent 3,4,5` 让用户某几天完全不写，`--min/--max` 改范围，`--salt` 换一批日程）：用合成的用户和假的 DeepSeek 跑真的调度器，打印每天的条数、类型、被拒原因、钟点分布和审计。它不是 `twin` 的子命令，也不碰你的数据目录。
 
-6. **（不需要做什么）配置键与设置键** 配置键：`proactive.user_active_min`（10，你和她刚聊完这么久内她不会冒出来）、`proactive.unanswered_after_min`（30，主动消息发出多久没回算“没回”）、`proactive.meal_window_min`（30，饭点消息在计划饭点前后多少分钟内）、`proactive.bedtime_lead_min`（[15, 60]，睡前晚安在入睡前多少分钟之间）。运行时设置：`proactive.enabled`、`proactive.daily_min`、`proactive.daily_max`、`engine.paused_until`（第 11 轮的 `/主动`、`/暂停`、`/恢复` 写这些；现在可以用 `uv run twin settings set proactive.enabled false` 手动关掉主动消息）。
+6. **（不需要做什么）配置键与设置键** 配置键：`proactive.user_active_min`（10，你和她刚聊完这么久内她不会冒出来）、`proactive.unanswered_after_min`（30，主动消息发出多久没回算“没回”）、`proactive.meal_window_min`（30，饭点消息在计划饭点前后多少分钟内）、`proactive.bedtime_lead_min`（[15, 60]，睡前晚安在入睡前多少分钟之间）。运行时设置：`proactive.enabled`、`proactive.daily_min`、`proactive.daily_max`、`engine.paused_until`（微信里的 `/主动 开|关`、`/主动 2-5`、`/暂停 <时长>`、`/恢复` 写这些，调度器每个 tick 重新读；也可以用 `uv run twin settings set proactive.enabled false` 关掉主动消息）。
 
 7. **已知的、等你反馈的限制（DECISIONS D-391）** 风格模型的训练数据没有“她先开口”的样例，用 `/后端 hybrid` 或 `style` 时开场的语气主要靠规划；觉得不像时先用 `/后端 deepseek` 对比。`twin chat --local`（终端）不启动调度器，主动消息只在 `twin run` 里有。
 

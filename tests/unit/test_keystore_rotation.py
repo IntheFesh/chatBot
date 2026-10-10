@@ -203,6 +203,10 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
         "eval_items": {"payload"},
         # round 11: the three texts of a preference pair
         "preference_pairs": {"prompt_sample", "chosen", "rejected"},
+        # round 10: the proactive messages and the ratings (words and reasons are sealed)
+        "proactive_candidates": {"detail"},
+        "proactive_log": {"plan_reason", "content", "result"},
+        "ratings": {"note"},
     }
 
 

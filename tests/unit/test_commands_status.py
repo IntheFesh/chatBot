@@ -116,7 +116,8 @@ async def test_a_fresh_installation_reports_what_it_has_and_says_so_for_the_rest
     assert found["她此刻"].count("，到 ") == 1 and "还有约" in found["她此刻"]
     assert found["后端"] == "deepseek"
     assert found["思考模式"] == "关；显示思考：关"
-    assert found["主动消息"] == "未启用（主动消息还没有上线）"  # not implemented: said as it is
+    # this process has no scheduler: only `twin run` writes first
+    assert found["主动消息"] == "没有在运行（只有 twin run 会主动发消息）"
     assert found["平台窗口"] == "暂无"
     assert found["今日费用"] == "$0.0000 / $1.00，今天还没有调用"
     assert found["预算级别"] == "0（正常）"

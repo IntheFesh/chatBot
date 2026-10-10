@@ -9,7 +9,8 @@ import pytest
 
 from tests.support.clock import ManualClock
 from tests.support.engine_harness import build_harness
-from tests.support.proactive_world import World
+from tests.support.proactive_world import Never, World
+from tests.support.waiting import wait_until
 from twin.app import Application, HealthStatus
 from twin.engine.command_port import CommandContext
 from twin.engine.component import EngineComponent
@@ -81,6 +82,19 @@ class Counting:
         return TickReport(at=self.clock.now_utc())
 
 
+async def asleep(world: World, *, ticks: tuple[Counting, int] | None = None) -> None:
+    """Wait (real time) until the tick loop sleeps on the clock - after ``n`` ticks, if given.
+
+    The loop reads its offset in a worker thread before it sleeps, so the clock must not be
+    moved before the sleeper exists; the condition is the state that was written, not a count of
+    loop turns.
+    """
+    if ticks is not None:
+        counting, number = ticks
+        await wait_until(lambda: len(counting.times) >= number)
+    await wait_until(lambda: world.clock.pending_sleepers >= 1)
+
+
 async def test_the_component_ticks_at_once_and_then_on_the_aligned_grid(calm: World) -> None:
     counting = Counting(calm.clock)
     calm.scheduler.tick = counting  # type: ignore[method-assign]
@@ -92,13 +106,16 @@ async def test_the_component_ticks_at_once_and_then_on_the_aligned_grid(calm: Wo
     )
     await component.start()
     try:
-        await calm.clock.settle()
+        await asleep(calm)
         assert len(counting.times) == 1 and component.ticks == 1  # it opens the day at once
-        for _ in range(4):
-            await calm.clock.advance(TICK_S + 1)
-            await calm.clock.settle()
-        assert len(counting.times) >= 4
         offset = tick_offset_s(calm.rig.planner.salt.get(), DAY, TICK_S)
+        for number in range(2, 6):
+            # up to the next point of the grid and not a second beyond it: the time of the tick is
+            # then the point itself, whatever the loop does first (the clock is moved by the test)
+            now = calm.clock.now_utc()
+            await calm.clock.advance((next_tick_at(now, TICK_S, offset) - now).total_seconds())
+            await asleep(calm, ticks=(counting, number))
+        assert len(counting.times) >= 4
         for moment in counting.times[1:]:
             assert (moment.timestamp() - offset) % TICK_S < 2.0 or TICK_S - (
                 (moment.timestamp() - offset) % TICK_S
@@ -114,10 +131,10 @@ async def test_a_component_without_a_first_tick_waits_for_the_grid(calm: World) 
     component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit, first_tick=False)
     await component.start()
     try:
-        await calm.clock.settle()
+        await asleep(calm)
         assert counting.times == []
         await calm.clock.advance(TICK_S + 1)
-        await calm.clock.settle()
+        await asleep(calm, ticks=(counting, 1))
         assert len(counting.times) == 1
     finally:
         await component.stop()
@@ -129,10 +146,10 @@ async def test_one_bad_tick_does_not_end_the_schedule(calm: World) -> None:
     component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
     await component.start()
     try:
-        await calm.clock.settle()
+        await asleep(calm)
         assert component.ticks == 1  # the failed one counts, and nothing was raised
         await calm.clock.advance(TICK_S + 1)
-        await calm.clock.settle()
+        await asleep(calm, ticks=(counting, 2))
         assert len(counting.times) == 2 and component.ticks == 2
     finally:
         await component.stop()
@@ -143,11 +160,11 @@ async def test_stopping_the_component_stops_the_ticks(calm: World) -> None:
     calm.scheduler.tick = counting  # type: ignore[method-assign]
     component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
     await component.start()
-    await calm.clock.settle()
+    await asleep(calm)
     await component.stop()
     before = len(counting.times)
     await calm.clock.advance(3 * TICK_S)
-    await calm.clock.settle()
+    await calm.clock.settle()  # nothing is left to wake: a few turns of the loop are all there is
     assert len(counting.times) == before
 
 
@@ -178,7 +195,10 @@ async def test_registering_adds_the_component_the_events_and_the_rating_command(
 async def test_a_plan_change_makes_the_scheduler_forget_what_it_worked_out(calm: World) -> None:
     application = Application()
     component = register_proactive(
-        application, calm.services, EngineComponent(calm.engine, calm.channel, calm.services)
+        application,
+        calm.services,
+        EngineComponent(calm.engine, calm.channel, calm.services),
+        rng=Never(),  # nothing is drawn: this scheduler has no pretended pauses to wait for
     )
     scheduler = component.scheduler
     calm.user_writes(at=calm.at(20, 0, day=8))
