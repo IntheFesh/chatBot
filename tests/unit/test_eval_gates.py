@@ -415,4 +415,5 @@ def test_a_later_round_registers_its_judge_and_the_gate_then_runs(services: Serv
 def test_the_default_registry_holds_exactly_the_judges_of_the_rounds_so_far() -> None:
     registry = load_judges()
     assert registry is default_registry
-    assert registry.milestones() == {"M0", "M1", "M2", "M3", "M4", "M5"}  # M3: round 10, M4: 12, M5: 14
+    # M3: round 10, M4: round 12, M5: round 14
+    assert registry.milestones() == {"M0", "M1", "M2", "M3", "M4", "M5"}
