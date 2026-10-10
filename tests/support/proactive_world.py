@@ -49,7 +49,7 @@ from twin.channel.window import SessionWindow
 from twin.engine.component import EngineComponent, build_engine
 from twin.engine.machine import ConversationEngine
 from twin.engine.state_store import ConversationSnapshot, ConversationStateStore
-from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta
+from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta, install_bot_turn_reader
 from twin.llm.ledger import LedgerRecord
 from twin.llm.runtime import DEEPSEEK_SECRET
 from twin.llm.types import CostBreakdown, LedgerTag, Usage
@@ -533,6 +533,10 @@ def build_world(
     still interrupt: a message that arrives makes the pause return ``True``).
     """
     services.secrets.set(DEEPSEEK_SECRET, TEST_KEY)
+    # the planner reads the conversation through the reader of ``bot_turns`` that the application
+    # registers (once, for the process): the world is the application, so it has that reader,
+    # whatever an earlier test did with the registration
+    install_bot_turn_reader()
     rig = Rig.build(
         services,
         clock,

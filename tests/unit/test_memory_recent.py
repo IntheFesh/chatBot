@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from tests.support.bot_turns import DEFAULT_START, ListBotTurnReader, conversation
+from twin.engine.turns import BotTurnStore
 from twin.memory.recent import (
     BotMessage,
     HistoryWindow,
@@ -15,6 +16,8 @@ from twin.memory.recent import (
     bot_turn_reader,
     merge_turns,
     register_bot_turn_reader,
+    registered_bot_turn_reader,
+    use_bot_turn_reader,
 )
 from twin.services import Services
 
@@ -142,13 +145,60 @@ def test_the_policy_comes_from_the_engine_settings(services: Services) -> None:
 def test_the_reader_that_is_registered_is_the_one_the_memory_asks(services: Services) -> None:
     """Round 09 registers the ``bot_turns`` reader on import; any other can be put in its place."""
     reader = conversation(4)
-    register_bot_turn_reader(lambda _services: reader)
-    try:
+    with use_bot_turn_reader(lambda _services: reader):
         assert bot_turn_reader(services) is reader
-    finally:
-        register_bot_turn_reader(None)
-    assert bot_turn_reader(services) is None
+    with use_bot_turn_reader(None):
+        assert bot_turn_reader(services) is None
     message = BotMessage("x", "bot", "好", START)
     assert message.role == "bot" and ListBotTurnReader([message]).messages_since(None, 5) == [
         message
     ]
+
+
+def test_a_reader_put_in_place_for_a_while_gives_the_registration_back() -> None:
+    """The registration is one slot for the whole process: a borrower returns what it found."""
+    found = registered_bot_turn_reader()
+
+    def mine(_services: Services) -> ListBotTurnReader:
+        return conversation(1)
+
+    def other(_services: Services) -> ListBotTurnReader:
+        return conversation(2)
+
+    try:
+        assert register_bot_turn_reader(mine) is found  # the call names what it replaced
+        assert registered_bot_turn_reader() is mine
+        with use_bot_turn_reader(None):
+            assert registered_bot_turn_reader() is None
+            with pytest.raises(RuntimeError, match="boom"), use_bot_turn_reader(other):
+                assert registered_bot_turn_reader() is other
+                raise RuntimeError("boom")
+            assert registered_bot_turn_reader() is None  # an error in the block changes nothing
+        assert registered_bot_turn_reader() is mine
+    finally:
+        register_bot_turn_reader(found)
+    assert registered_bot_turn_reader() is found
+
+
+def test_a_test_may_leave_the_reader_unregistered() -> None:
+    """The first of a pair: it leaves the registration as it is on purpose, the next test must cope.
+
+    A test that unregistered the reader of ``bot_turns`` and did not put it back once took the
+    conversation away from every test after it in the same process (the proactive planner then
+    had no history, only in the CI run of the whole suite).  pytest runs a module in file order,
+    so the test below runs right after this one.
+    """
+    register_bot_turn_reader(None)
+    assert registered_bot_turn_reader() is None
+
+
+def test_the_next_test_starts_with_the_reader_the_application_registered(
+    services: Services,
+) -> None:
+    """The second of the pair (R-MEM-001): every test finds the ``bot_turns`` reader in place."""
+    BotTurnStore(services.db, services.clock).add_inbound(
+        at=START, kind="text", text="在吗", external_id="m-1"
+    )
+    reader = bot_turn_reader(services)
+    assert reader is not None
+    assert [(m.role, m.text) for m in reader.messages_since(None)] == [("user", "在吗")]

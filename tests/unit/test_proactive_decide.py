@@ -8,14 +8,24 @@ from typing import Any
 
 import pytest
 
-from tests.support.proactive_world import World
+from tests.support.clock import ManualClock
+from tests.support.proactive_world import (
+    Never,
+    ProactiveScript,
+    World,
+    opening_curve,
+    proactive_model,
+)
+from tests.support.proactive_world import build_world as build_proactive_world
 from twin.config.runtime import THINKING_PROACTIVE
 from twin.engine.backend import BackendRequest
 from twin.engine.backend_select import BackendChoice
 from twin.engine.style_backend import StyleWrite
 from twin.engine.style_prompt import PlanFields
 from twin.engine.types import Bubble, UsageSummary
+from twin.memory.recent import register_bot_turn_reader
 from twin.retrieval.examples import Example, ExampleLine
+from twin.schedule.plan_builder import QuotaRange
 from twin.schedule.proactive.decide import (
     CUE_TEXT,
     Brief,
@@ -25,6 +35,7 @@ from twin.schedule.proactive.decide import (
     repeats_previous,
 )
 from twin.schedule.proactive.types import Candidate, Reason, TriggerKind
+from twin.services import Services
 
 
 def decider_of(world: World) -> ProactiveDecider:
@@ -155,6 +166,35 @@ async def test_the_planner_reads_the_moment_her_day_and_the_conversation(started
     assert "$" not in request["messages"][0]["content"]  # every field of the template was filled
     roles = [m["role"] for m in request["messages"]]
     assert roles[-1] == "user" and "在吗" in " ".join(m["content"] for m in request["messages"])
+
+
+@pytest.mark.usefixtures("pro_api")
+async def test_the_planner_reads_the_conversation_even_when_a_test_before_unregistered_the_reader(
+    services: Services, clock: ManualClock, pro_script: ProactiveScript
+) -> None:
+    """The failure of the CI run of the whole suite: no history reached the planner.
+
+    The planner reads the bot's conversation through the reader of ``bot_turns`` that the
+    application registers once per process; a test that had unregistered it left every world
+    after it without a conversation.  The world is built here with the registration gone.
+    """
+    register_bot_turn_reader(None)
+    world = build_proactive_world(
+        services,
+        clock,
+        script=pro_script,
+        model=proactive_model(opening_curve(base=0.0, peaks={})),
+        quota=QuotaRange(6, 6),
+        rng=Never(),
+    )
+    try:
+        world.user_writes("在吗", at=world.at(9, 0))
+        draft = await decide(world, TriggerKind.SHARE)
+        assert draft.usable, draft
+        sent = [m["content"] for m in last_request(world)["messages"]]
+        assert any("在吗" in content for content in sent)
+    finally:
+        await world.aclose()
 
 
 async def test_nothing_that_identifies_a_person_is_sent_to_the_planner(calm: World) -> None:
