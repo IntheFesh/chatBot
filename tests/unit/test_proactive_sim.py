@@ -87,8 +87,8 @@ async def test_a_user_who_writes_in_the_evening_only_leaves_the_rest_to_the_wind
 
 
 async def test_days_without_a_message_of_the_user_are_quiet_and_excused(pro: World) -> None:
-    days = 8 if not SLOW else 5
-    silent = frozenset({2, 3, 4})
+    # days 2-4 are silent (2-3 and a shorter week when the database is slow); then he writes again
+    days, silent, back = (8, frozenset({2, 3, 4}), 5) if not SLOW else (6, frozenset({2, 3}), 4)
     result = await simulate(
         pro,
         first_day=FIRST,
@@ -110,7 +110,7 @@ async def test_days_without_a_message_of_the_user_are_quiet_and_excused(pro: Wor
     quiet = next(day for day in audit.days if day.day == FIRST + timedelta(days=3))
     assert quiet.excused and quiet.compliant  # below the minimum, but the window did it
     assert audit.compliant and audit.suppressed_window > 0
-    resumed = [s for s in result.days if s.day >= FIRST + timedelta(days=5)]
+    resumed = [s for s in result.days if s.day >= FIRST + timedelta(days=back)]
     assert sum(s.sent for s in resumed) > 0  # after he writes again she writes too
 
 

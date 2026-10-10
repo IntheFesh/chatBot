@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import httpx
@@ -13,13 +13,14 @@ from typer.testing import CliRunner
 
 from tests.support.clock import ManualClock
 from tests.support.deepseek import API, TEST_KEY, ok, request_json
+from tests.support.policies import AlwaysOffPeak
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta
 from twin.learning.jobs import RULES_JOB
 from twin.llm.runtime import DEEPSEEK_SECRET
-from twin.ops.jobs import JobQueue
+from twin.ops.jobs import JobQueue, get_offpeak_policy, set_offpeak_policy
 from twin.ops.process_model import ExitCode
 from twin.profile.persona import compose
 from twin.profile.persona.api import read_corrections
@@ -37,6 +38,23 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clock: ManualClock
     result = runner.invoke(app, ["db", "upgrade"])
     assert result.exit_code == 0, result.output
     return path
+
+
+@pytest.fixture
+def off_peak(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Off-peak jobs may run now, whatever the time of day the suite is run at.
+
+    The foreground run registers the production policy, the calendar of DeepSeek's off-peak hours
+    read from the system clock, so these tests passed at some hours of the day and failed at the
+    others.  The policy it registers is replaced by one that always allows.
+    """
+    previous = get_offpeak_policy()
+    monkeypatch.setattr(
+        "twin.ops.foreground.activate_offpeak_policy",
+        lambda services: set_offpeak_policy(AlwaysOffPeak()),
+    )
+    yield
+    set_offpeak_policy(previous)
 
 
 def with_services[T](work: Callable[[Services], T]) -> T:
@@ -115,7 +133,7 @@ def seed_feedback(services: Services) -> None:
 
 
 def test_consolidate_queues_the_job_once_and_can_run_it_in_the_foreground(
-    data_dir: Path,
+    data_dir: Path, off_peak: None
 ) -> None:
     with_services(seed_feedback)
     queued = runner.invoke(app, ["persona", "rules", "consolidate"])
@@ -143,7 +161,7 @@ def test_consolidate_queues_the_job_once_and_can_run_it_in_the_foreground(
     assert rules_now() == ["不要用客服腔"] and with_services(jobs) == ["done"]
 
 
-def test_a_consolidation_that_cannot_finish_says_so(data_dir: Path) -> None:
+def test_a_consolidation_that_cannot_finish_says_so(data_dir: Path, off_peak: None) -> None:
     with_services(seed_feedback)
     from tests.support.deepseek import error
 

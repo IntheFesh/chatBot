@@ -168,7 +168,7 @@ async def test_the_proactive_range_and_the_count_of_today_come_from_the_schedule
     assert found["主动消息"] == "每天 1-6 条（开），今天已发 2 条"
     off = ProactiveStatus(0, 0, False, 0)
     assert "（关）" in lines_of(await rig.report(proactive=lambda: off))["主动消息"]
-    assert "未启用" in lines_of(await rig.report(proactive=lambda: None))["主动消息"]
+    assert "没有在运行" in lines_of(await rig.report(proactive=lambda: None))["主动消息"]
 
 
 async def test_the_cost_of_today_comes_with_the_cache_hit_rate_and_the_budget_level(
