@@ -131,11 +131,19 @@ def test_a_library_that_raises_is_handled_like_an_unknown_year() -> None:
 
 
 def test_coverage_reports_the_years_the_library_lacks() -> None:
-    coverage = PeakCalendar().coverage(date(2026, 10, 9))
+    def knows_2026_only(day: date) -> bool:
+        if day.year != 2026:  # what the installed library does outside its years
+            raise NotImplementedError(f"no holiday data for {day.year}")
+        return day.weekday() < 5
+
+    coverage = PeakCalendar(workday=knows_2026_only).coverage(date(2026, 10, 9))
     assert coverage.covered_years == (2026,)
     assert coverage.missing_years == (2027,)
     assert not coverage.complete
     assert PeakCalendar(workday=lambda day: True).coverage(date(2026, 10, 9)).complete
+    # the installed library: these years it has for good (which later years it has depends on
+    # its version, so no test may rely on that)
+    assert PeakCalendar().coverage(date(2024, 3, 1)).complete
 
 
 def test_next_offpeak_window_inside_and_outside_peak_hours() -> None:

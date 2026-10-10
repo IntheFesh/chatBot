@@ -6,7 +6,7 @@ import shutil
 import sqlite3
 import sys
 from collections import namedtuple
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -18,6 +18,7 @@ from tests.support.network import OfflineTransport
 from tests.support.ops import ScriptedRunner, healthy_machine_runner
 from twin.config.loader import load_settings
 from twin.config.secrets import BackendInfo, SecretStore
+from twin.llm.pricing import PeakCalendar
 from twin.ops.doctor import CheckResult, CheckStatus, DoctorContext, exit_code, run_checks
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.storage import migrate
@@ -40,6 +41,17 @@ def context(tmp_path: Path, **overrides: object) -> DoctorContext:
 
 def result_of(check: doctor.DoctorCheck, ctx: DoctorContext) -> CheckResult:
     return check(ctx)
+
+
+def library_knowing(*years: int) -> PeakCalendar:
+    """A holiday library with data for exactly these years, whatever the installed one knows."""
+
+    def workday(day: date) -> bool:
+        if day.year not in years:
+            raise NotImplementedError(f"no holiday data for {day.year}")
+        return day.weekday() < 5
+
+    return PeakCalendar(workday=workday)
 
 
 def healthy_network(request: httpx.Request) -> httpx.Response:
@@ -74,6 +86,7 @@ def test_all_checks_pass_on_a_healthy_setup(
         tmp_path,
         secrets=secrets,
         runner=healthy_machine_runner(),
+        calendar=library_knowing(2024, 2025),
         http_transport=httpx.MockTransport(healthy_network),
     )
     migrate.upgrade(ctx.paths().db_path)  # type: ignore[union-attr]
@@ -304,17 +317,22 @@ def test_doctor_check_decorator_registers_new_checks(monkeypatch: pytest.MonkeyP
 def test_holiday_calendar_check_warns_about_years_the_library_lacks(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    from datetime import UTC, datetime
-
+    """The verdict follows the date and the years the library knows, both given by the test."""
+    library = library_knowing(2024, 2025, 2026)
     monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2026, 10, 9, tzinfo=UTC))
-    warn = doctor.check_holiday_calendar(context(tmp_path))
+    warn = doctor.check_holiday_calendar(context(tmp_path, calendar=library))
     assert warn.status is CheckStatus.WARN and "2027" in warn.detail
     assert "chinese-calendar" in warn.hint and "extra_peak_dates" in warn.hint
     monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2024, 3, 1, tzinfo=UTC))
-    ok = doctor.check_holiday_calendar(context(tmp_path))
+    ok = doctor.check_holiday_calendar(context(tmp_path, calendar=library))
     assert ok.status is CheckStatus.OK and "2024, 2025" in ok.detail
     monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2040, 1, 1, tzinfo=UTC))
-    assert doctor.check_holiday_calendar(context(tmp_path)).status is CheckStatus.WARN
+    assert doctor.check_holiday_calendar(context(tmp_path, calendar=library)).status is (
+        CheckStatus.WARN
+    )
+    # without a library handed in, the installed one is used (it knows these old years for good)
+    monkeypatch.setattr(doctor, "now_utc", lambda: datetime(2024, 3, 1, tzinfo=UTC))
+    assert doctor.check_holiday_calendar(context(tmp_path)).status is CheckStatus.OK
 
 
 def test_llm_config_check_validates_models_prices_and_vision(tmp_path: Path) -> None:

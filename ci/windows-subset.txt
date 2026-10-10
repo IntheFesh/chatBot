@@ -11,3 +11,4 @@ tests/unit/test_ops_purge.py
 tests/unit/test_ops_service.py
 tests/unit/test_ops_supervise.py
 tests/unit/test_ops_windows.py
+tests/unit/test_llm_pricing.py

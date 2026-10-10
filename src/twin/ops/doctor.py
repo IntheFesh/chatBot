@@ -95,6 +95,9 @@ class DoctorContext:
     platform: str = field(default_factory=lambda: sys.platform)
     http_transport: httpx.BaseTransport | None = None  # network checks use it when given
     runner: CommandRunner | None = None  # nvidia-smi, powercfg and schtasks go through it
+    calendar: PeakCalendar | None = (
+        None  # the holiday library to check (default: the installed one)
+    )
 
     def run(self, args: list[str]) -> CommandResult | None:
         """Run a program (no shell); ``None`` if it is not installed or does not answer."""
@@ -324,7 +327,7 @@ def check_power(ctx: DoctorContext) -> CheckResult:
 def check_holiday_calendar(ctx: DoctorContext) -> CheckResult:
     """The holiday library must cover this year and the next (R-LLM-007, R-OPS-009)."""
     today = now_utc().date()
-    coverage = PeakCalendar().coverage(today)
+    coverage = (ctx.calendar or PeakCalendar()).coverage(today)
     if coverage.complete:
         years = ", ".join(str(year) for year in coverage.covered_years)
         return CheckResult("holiday-calendar", CheckStatus.OK, f"chinese-calendar covers {years}")
