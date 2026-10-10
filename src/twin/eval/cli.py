@@ -106,6 +106,11 @@ def _default_console() -> Console:
 _interaction = Interaction(_default_console, TerminalKeys)
 
 
+def interaction() -> Interaction:
+    """The console and the keys in use (the tests replace them with `use_interaction`)."""
+    return _interaction
+
+
 @contextmanager
 def use_interaction(
     console: Console | None = None, keys: KeySource | None = None
@@ -175,7 +180,14 @@ def _generate_in_foreground(
 # ------------------------------------------------------------------------ blind
 
 
-def _describe_plan(console: Console, services: Services, plan: BlindPlan) -> None:
+def describe_plan(
+    console: Console,
+    services: Services,
+    plan: BlindPlan,
+    *,
+    resume_command: str = "twin eval blind",
+) -> None:
+    """What was drawn, what it will cost and how to go on (a model evaluation says its own)."""
     run = plan.run
     console.print(
         Text(
@@ -196,7 +208,7 @@ def _describe_plan(console: Console, services: Services, plan: BlindPlan) -> Non
     _print_batches(console, services, run)
     console.print(
         Text(
-            f"批准并跑完后：twin eval blind --resume {run.id}"
+            f"批准并跑完后：{resume_command} --resume {run.id}"
             "（--foreground 可在这里执行已批准的任务）"
         )
     )
@@ -232,15 +244,53 @@ def eval_blind(
             plan = asyncio.run(plan_blind(services, expand_backends(backend), n, seed=seed))
         except EvalError as exc:
             raise CliError(str(exc), ExitCode.FAILURE) from exc
-        _describe_plan(console, services, plan)
+        describe_plan(console, services, plan)
         return
     run = _run_of(store, resume, "blind")
+    if run.params.get("model_id"):
+        raise CliError(
+            f"run {run.id} was drawn for the model {run.params['model_id']}: continue it with "
+            f"`twin model evaluate {run.params['model_id']} --resume {run.id}`",
+            ExitCode.FAILURE,
+        )
+    continue_blind(
+        services, console, store, run, foreground=foreground, generate=_generate_blind_pairs
+    )
+
+
+async def run_blind_jobs(services: Services) -> None:
+    """Run the approved generation jobs of a blind test in this process, until none is left."""
+    registry = HandlerRegistry()
+    registry.register(EVAL_GENERATE_JOB, handle_eval_generate)
+    summary = await run_jobs_until_idle(services, registry)
+    if summary.failed or summary.retried:
+        typer.echo(f"some jobs did not finish: {'; '.join(summary.failures) or 'see the log'}")
+
+
+def _generate_blind_pairs(services: Services) -> None:
+    """Run the approved generation jobs of a blind test here (the application is stopped)."""
+    asyncio.run(run_blind_jobs(services))
+
+
+def continue_blind(
+    services: Services,
+    console: Console,
+    store: EvalStore,
+    run: RunView,
+    *,
+    foreground: bool,
+    generate: Callable[[Services], None],
+    resume_command: str = "twin eval blind",
+) -> None:
+    """Go on with a blind run from wherever it is: generate (``generate`` runs the jobs here),
+    judge on the screen, report.  ``twin model evaluate --resume`` uses the same steps with
+    a ``generate`` that starts the model's server first."""
     pending = store.counts(run.id)["pending"]
     if pending and foreground:
         if app_is_running(services):
             typer.echo("the application is running and will execute the approved jobs")
         else:
-            _generate_in_foreground(services, EVAL_GENERATE_JOB, handle_eval_generate)
+            generate(services)
             pending = store.counts(run.id)["pending"]
     if pending:
         console.print(Text(f"还有 {pending} 对没有生成（任务排队、等待批准或正在执行）："))
@@ -258,7 +308,7 @@ def eval_blind(
         run = _finish_blind(store, store.get_run(run.id))
     print_blind_report(console, blind_report(store, run))
     if run.status != "done":
-        console.print(Text(f"没做完：twin eval blind --resume {run.id}"))
+        console.print(Text(f"没做完：{resume_command} --resume {run.id}"))
 
 
 # ------------------------------------------------------------------------ style

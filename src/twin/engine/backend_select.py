@@ -16,6 +16,12 @@ The user's choice is the runtime setting ``backend.active`` (``deepseek``, ``sty
   the selector **switches back** by itself, clears ``backend.fallback`` and raises the notice
   ``style_recovered``.
 
+A model that is **still loading** (llama.cpp answers 503 while it reads the file, and the serving
+component of round 14 says so while it starts the process) is not a failure: for up to
+``loading_grace_s`` (``style_model.serve.start_timeout_s``) the replies go to DeepSeek without a
+fallback record, an alert or the ten-minute wait.  A model whose last tokenizer comparison failed
+(R-TRN-011.4) is never usable.
+
 Every change is on record: the settings keep a history of each write (who, when, old value, new
 value - ``by`` says ``auto`` for what the selector did and ``command`` for ``/后端``), and the
 selector logs one audit line per switch with the closed reason code, never a text.
@@ -67,6 +73,8 @@ MIN_STALE_S = 60.0
 # the closed codes of a probe and of a refused switch
 NO_MODEL = "no_model"
 TEMPLATE = "template"
+TOKENIZER = "tokenizer"
+LOADING = "loading"
 UNHEALTHY = "unhealthy"
 NOT_REGISTERED = "not_registered"
 NOT_ACTIVE = "not_active"
@@ -83,6 +91,10 @@ class Probe:
     at: datetime
     model: ActiveStyleModel | None = None
     latency_ms: int = 0
+
+    @property
+    def loading(self) -> bool:
+        return self.code == LOADING
 
 
 @dataclass(frozen=True)
@@ -131,6 +143,7 @@ class BackendSelector:
         clock: Clock,
         alerts: AlertSink,
         limits: Callable[[], BudgetLimits] | None = None,
+        loading_grace_s: float = 0.0,
     ) -> None:
         self._runtime = runtime
         self._models = models
@@ -143,6 +156,8 @@ class BackendSelector:
         self._probed_at = 0.0
         self._healthy_since: float | None = None
         self._violations = 0
+        self._loading_grace_s = loading_grace_s
+        self._loading_since: float | None = None
         self._transition = asyncio.Lock()
 
     # ------------------------------------------------------------------ the settings
@@ -175,12 +190,17 @@ class BackendSelector:
         if model.versions.template_version != lf_template.TEMPLATE_VERSION:
             detail = f"the model is bound to {model.versions.template_version}"
             return Probe(False, TEMPLATE, detail, now, model)
+        if model.tokenizer_ok is False:
+            detail = "the server's tokens differ from the training tokenizer (twin model verify)"
+            return Probe(False, TOKENIZER, detail, now, model)
         try:
             health: StyleHealth = await self._client.health()
         except Exception as exc:  # a health check must never raise; if it does, the model is down
             return Probe(False, UNHEALTHY, type(exc).__name__, now, model)
-        code = "ok" if health.ok else UNHEALTHY
-        return Probe(health.ok, code, health.detail, now, model, health.latency_ms)
+        if health.ok:
+            return Probe(True, "ok", health.detail, now, model, health.latency_ms)
+        code = LOADING if health.loading else UNHEALTHY
+        return Probe(False, code, health.detail, now, model, health.latency_ms)
 
     def available(self) -> bool:
         """:class:`~twin.llm.budget.StyleBackendStatus`: a gate-passed model that is healthy now."""
@@ -206,7 +226,7 @@ class BackendSelector:
                     self._clear("deepseek_chosen", notify=False)
                 return
             if fallback is None:
-                if not probe.usable:
+                if not probe.usable and not self._waiting_for_load(probe):
                     self._enter_fallback(requested, probe.code, probe.detail)
                 return
             if not probe.usable:
@@ -217,6 +237,16 @@ class BackendSelector:
                 self._healthy_since = now
             if now - self._healthy_since >= self._config.recover_after_min * 60:
                 self._clear("recovered", notify=True)
+
+    def _waiting_for_load(self, probe: Probe) -> bool:
+        """True while the model is loading and the grace period has not run out."""
+        if not probe.loading:
+            self._loading_since = None
+            return False
+        now = self._clock.monotonic()
+        if self._loading_since is None:
+            self._loading_since = now
+        return now - self._loading_since < self._loading_grace_s
 
     def _enter_fallback(self, backend: str, code: str, detail: str) -> None:
         """Stop using the style model: ``backend`` is the one that was in use or asked for."""
@@ -275,6 +305,9 @@ class BackendSelector:
         fallback = self.fallback()
         if fallback is not None:
             return BackendChoice("deepseek", requested, f"fallback:{fallback.get('reason')}")
+        probe = self._probe
+        if probe is not None and probe.loading and self._loading_since is not None:
+            return BackendChoice("deepseek", requested, LOADING)  # not a fallback: still loading
         return BackendChoice(requested, requested)
 
     # ------------------------------------------------------------------- the outcome

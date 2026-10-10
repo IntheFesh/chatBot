@@ -42,6 +42,8 @@ from twin.ops.taskscheduler import (
     decode_output,
 )
 from twin.retrieval.embedder import read_manifest
+from twin.serving.hardware import choose_build, detect_gpu
+from twin.serving.llamacpp import find_install
 from twin.storage.keystore import KeyStore, KeyStoreError
 from twin.storage.migrate import SchemaState, schema_status
 
@@ -568,6 +570,82 @@ def check_gpu(ctx: DoctorContext) -> CheckResult:
         )
     first = decode_output(result.stdout).strip().splitlines()[:1]
     return CheckResult("gpu", CheckStatus.OK, first[0].strip() if first else "NVIDIA GPU found")
+
+
+class _ContextRunner:
+    """``DoctorContext.run`` as a :class:`CommandRunner` (a program that is missing exits 127)."""
+
+    def __init__(self, ctx: DoctorContext) -> None:
+        self._ctx = ctx
+
+    def run(self, args: list[str], *, timeout_s: float = 30.0) -> CommandResult:
+        found = self._ctx.run(args)
+        return found if found is not None else CommandResult(127, b"", b"")
+
+
+@doctor_check
+def check_llamacpp(ctx: DoctorContext) -> CheckResult:
+    """llama.cpp for the local style model: installed, complete, the right build (R-SRV-002).
+
+    The CUDA builds need ``ggml-cuda.dll`` and the ``cudart``/``cublas`` DLLs of the same CUDA
+    version next to it; a folder with only one half starts and then fails at the first request.
+    """
+    if ctx.settings is None:
+        return CheckResult("llamacpp", CheckStatus.WARN, "skipped (configuration did not load)")
+    config = ctx.settings.style_model
+    local = config.mode == "llamacpp_completion"
+    wanted = local and ctx.settings.backend.active in ("style", "hybrid")
+    paths = ctx.paths()
+    install = (
+        find_install(paths.root, config.serve.binary, platform=ctx.platform) if paths else None
+    )
+    if install is None:
+        detail = "llama-server is not installed"
+        if wanted:
+            return CheckResult(
+                "llamacpp",
+                CheckStatus.WARN,
+                detail,
+                "run scripts\\windows\\get_llamacpp.ps1 (it picks the build for your card)",
+            )
+        return CheckResult(
+            "llamacpp", CheckStatus.OK, detail + " (only the local style model needs it)"
+        )
+    label = f"{install.version} ({install.kind})"
+    if install.missing:
+        return CheckResult(
+            "llamacpp",
+            CheckStatus.FAIL if wanted else CheckStatus.WARN,
+            f"llama.cpp {label} is incomplete: missing {', '.join(install.missing)}",
+            "run scripts\\windows\\get_llamacpp.ps1 -Force (CUDA builds need the cudart archive "
+            "of the same CUDA version unpacked next to ggml-cuda.dll)",
+        )
+    gpu = detect_gpu(_ContextRunner(ctx))
+    choice = choose_build(gpu)
+    if install.kind == "cpu" and choice.cuda:
+        return CheckResult(
+            "llamacpp",
+            CheckStatus.WARN,
+            f"llama.cpp {label}: the CPU build is installed but "
+            f"{gpu.describe() if gpu else 'a card'} is available",
+            "run scripts\\windows\\get_llamacpp.ps1 -Force: the CUDA build is much faster",
+        )
+    if install.kind != "cpu" and not choice.cuda:
+        return CheckResult(
+            "llamacpp",
+            CheckStatus.WARN,
+            f"llama.cpp {label}: a CUDA build is installed but it cannot be used here "
+            f"({choice.reason})",
+            "update the NVIDIA driver, or run scripts\\windows\\get_llamacpp.ps1 -Build cpu -Force",
+        )
+    if install.kind == "cuda-12.4" and choice.kind == "cuda-13.4":
+        return CheckResult(
+            "llamacpp",
+            CheckStatus.WARN,
+            f"llama.cpp {label}: the CUDA 13 build fits this card better ({choice.reason})",
+            "run scripts\\windows\\get_llamacpp.ps1 -Force",
+        )
+    return CheckResult("llamacpp", CheckStatus.OK, f"llama.cpp {label}, complete")
 
 
 @doctor_check

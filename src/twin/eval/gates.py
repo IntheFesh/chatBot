@@ -153,6 +153,7 @@ JUDGE_MODULES: tuple[str, ...] = (
     "twin.eval.gates",
     "twin.eval.proactive_gate",
     "twin.ops.gate_m4",
+    "twin.serving.gate_m5",
 )
 
 

@@ -31,6 +31,7 @@ from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.types import CostBreakdown, Usage
 from twin.schedule.time_service import BotTimeService
 from twin.services import Services
+from twin.serving.state import ServingStateStore
 
 PREFIX = "⚙️ "
 
@@ -233,6 +234,63 @@ async def test_a_style_model_on_a_rented_machine_comes_with_the_reminder_about_t
     register_model(rig.services, quant="lora", kind="adapter")
     rig.clock.tick(31)
     assert texts.STATUS_REMOTE_HOURLY in await rig.report()
+
+
+async def test_the_state_of_the_local_server_and_its_speed_are_reported(rig: Rig) -> None:
+    register_model(rig.services, gate_passed=True)
+    rig.clock.tick(31)
+    store = ServingStateStore(rig.services.db, rig.clock)
+    assert "风格模型服务" not in lines_of(await rig.report())  # nothing recorded: nothing said
+    store.update({"server": {"state": "ready", "restarts": 0, "detail": ""}})
+    assert "风格模型服务" not in lines_of(await rig.report())  # running as it should: no line
+    store.update({"server": {"state": "starting", "restarts": 0, "detail": "loading the model"}})
+    assert lines_of(await rig.report())["风格模型服务"] == "正在加载模型（loading the model）"
+    store.update({"server": {"state": "backoff", "restarts": 2, "detail": "exit code 7"}})
+    found = lines_of(await rig.report())
+    assert found["风格模型服务"] == "崩溃后等待重启（exit code 7），已重启 2 次"
+    at = rig.clock.now_utc().isoformat()
+    store.update({"warmup": {"first_token_ms": 380, "tokens_per_s": 61.234, "at": at}})
+    found = lines_of(await rig.report())
+    assert found["风格模型速度"].startswith("首 token 约 380 毫秒，每秒约 61.2 个 token（10-09 ")
+    store.update({"warmup": {"first_token_ms": 900, "tokens_per_s": None, "at": at}})
+    assert "每秒约 ? 个 token" in lines_of(await rig.report())["风格模型速度"]
+
+
+async def test_the_tunnel_and_the_hourly_bill_of_the_rented_instance_are_reported(
+    rig: Rig,
+) -> None:
+    rig.services.settings.style_model.mode = "vllm_completion"
+    rig.selector = BackendSelector(
+        runtime=rig.services.runtime,
+        models=StyleModels(rig.services.db, mode="vllm_completion"),
+        client=rig.client,
+        config=rig.services.settings.backend,
+        clock=rig.clock,
+        alerts=rig.services.alerts,
+    )
+    register_model(rig.services, quant="lora", kind="adapter", gate_passed=True)
+    rig.clock.tick(31)
+    store = ServingStateStore(rig.services.db, rig.clock)
+    report = await rig.report()
+    assert texts.STATUS_REMOTE_HOURLY in report and "隧道" not in report  # no tunnel yet
+    store.update(
+        {"tunnel": {"state": "backoff", "reconnects": 3, "detail": "the connection was lost"}}
+    )
+    found = lines_of(await rig.report())
+    assert found["隧道"] == "断线，等待重连（the connection was lost），断线重连 3 次"
+    assert texts.STATUS_REMOTE_HOURLY in await rig.report()
+    # up: the instance's own uptime wins over the tunnel's
+    store.update(
+        {"tunnel": {"state": "up", "reconnects": 0, "instance_uptime_s": 7500, "up_since": None}}
+    )
+    report = await rig.report()
+    assert lines_of(report)["隧道"] == "已连上，断线重连 0 次"
+    assert texts.STATUS_REMOTE_RUNNING.format(span="2 小时 5 分") in report
+    assert texts.STATUS_REMOTE_HOURLY not in report
+    # up without an uptime reading: how long the tunnel has been up
+    since = (rig.clock.now_utc() - timedelta(minutes=42)).isoformat()
+    store.update({"tunnel": {"state": "up", "reconnects": 1, "up_since": since}})
+    assert texts.STATUS_REMOTE_RUNNING.format(span="42 分钟") in await rig.report()
 
 
 async def test_a_fallback_and_a_budget_takeover_are_visible_in_the_backend_line(rig: Rig) -> None:

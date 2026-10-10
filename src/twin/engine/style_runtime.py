@@ -22,6 +22,7 @@ to DeepSeek, not as a program that does not start.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -60,6 +61,9 @@ class ConfiguredStyleClient:
         self._clock = clock
         self._api_key = api_key
         self._client: StyleModelClient | None = None
+        self.health_hook: Callable[[], StyleHealth | None] | None = None
+        """Set by the serving component (round 14): it knows when the server it started is still
+        loading the model, which the server itself cannot say before it listens."""
 
     def _real(self) -> StyleModelClient:
         if self._client is None:
@@ -75,6 +79,10 @@ class ConfiguredStyleClient:
         return await self._real().generate(prompt, params)
 
     async def health(self) -> StyleHealth:
+        hook = self.health_hook
+        known = hook() if hook is not None else None
+        if known is not None:
+            return known
         try:
             client = self._real()
         except StyleModelError as exc:
@@ -112,11 +120,17 @@ class StyleRuntime:
         llm: LlmRuntime,
         *,
         client: StyleModelClient | None = None,
+        models: StyleModels | None = None,
     ) -> StyleRuntime:
-        """The style model of the running application (``client``: another transport, for tests)."""
+        """The style model of the running application.
+
+        ``client`` is another transport (tests, and the evaluation of a model that talks to a
+        server of its own); ``models`` another view of the registry (the evaluation pins the model
+        under test, which is not active yet).
+        """
         settings = services.settings
         chosen = client or ConfiguredStyleClient(settings.style_model, services.clock)
-        models = StyleModels(services.db, mode=settings.style_model.mode)
+        models = models or StyleModels(services.db, mode=settings.style_model.mode)
 
         def builder(locked: LockedVersions) -> StylePromptBuilder:
             return StylePromptBuilder.from_services(services, locked=locked)
@@ -153,6 +167,11 @@ class StyleRuntime:
             clock=services.clock,
             alerts=services.alerts,
             limits=llm.budget.limits,
+            loading_grace_s=(
+                settings.style_model.serve.start_timeout_s
+                if settings.style_model.mode == "llamacpp_completion"
+                else 0.0
+            ),
         )
         return cls(chosen, models, selector, style, hybrid)
 

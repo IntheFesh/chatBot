@@ -647,7 +647,9 @@ async def test_the_engine_reaches_the_configured_style_server_and_falls_back_whe
         assert built.bot_lines[-1] == "bot: 好呀"
         sent = style_server.last("/completion").json
         assert sent["prompt"].endswith(ASSISTANT_OPENER) and "<|im_end|>" in sent["stop"]
-        style_server.set("GET", "/health", status=503, body={"status": "loading"})
+        # a server that is broken, not one that is loading (a 503 of /health means "loading" since
+        # round 14: the replies then go to DeepSeek without a fall-back for a while)
+        style_server.set("GET", "/health", status=500, body={"error": "gone"})
         style_server.set("POST", "/completion", status=503, body={"error": "gone"})
         built.clock.tick(31)  # the next look at the server is due
         built.replies.append("换我来回")

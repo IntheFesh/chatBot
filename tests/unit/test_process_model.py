@@ -170,13 +170,23 @@ def expected_names() -> list[str]:
         "ops drill network",
         "eval proactive",
         "proactive log",
+        # round 14: serving the style model
+        "model activate",
+        "model disable",
+        "model serve",
+        "model verify",
+        "model recommend",
+        "model evaluate",
+        "model tunnel start",
+        "model tunnel stop",
+        "model tunnel status",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 134 == len(expected_names())
+    assert len(names) == 143 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -314,6 +324,18 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         # round 10: the proactive messages
         "eval proactive": CommandKind.LIGHT,
         "proactive log": CommandKind.READ,
+        # round 14: they write short records; serve, verify and a foreground tunnel hold a
+        # server or a tunnel in their own window (serve refuses to run beside the application,
+        # tunnel start leaves the tunnel to it, verify uses the port of the evaluation)
+        "model activate": CommandKind.LIGHT,
+        "model disable": CommandKind.LIGHT,
+        "model serve": CommandKind.LIGHT,
+        "model verify": CommandKind.LIGHT,
+        "model recommend": CommandKind.READ,
+        "model evaluate": CommandKind.LIGHT,
+        "model tunnel start": CommandKind.LIGHT,
+        "model tunnel stop": CommandKind.LIGHT,
+        "model tunnel status": CommandKind.READ,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])

@@ -14,7 +14,7 @@ from twin.app import Application
 from twin.engine.backend_select import Probe
 from twin.engine.safety.notifier import EmergencyNotice
 from twin.ops.emergency import SmtpEmergencyNotifier
-from twin.ops.health import StyleReading
+from twin.ops.health import HealthCheck, HealthLevel, StyleReading
 from twin.ops.mail import SMTP_PASSWORD_SECRET, SmtpMailer
 from twin.ops.wiring import (
     build_emergency_notifier,
@@ -149,3 +149,28 @@ def test_the_components_depend_on_nothing_so_they_start_first_and_stop_last(
     application = Application()
     register_ops(application, services, mailer=RecordingMailer(), notifier=RecordingNotifier())
     assert list(application.components[name].depends_on) == []
+
+
+async def test_a_probe_of_another_component_is_part_of_the_health_report(
+    services: Services,
+) -> None:
+    """R-SRV-002: the llama-server process of round 14 registers its check here."""
+
+    async def serving() -> HealthCheck:
+        return HealthCheck("style_serving", HealthLevel.WARN, "llama-server is restarting", 2.0)
+
+    async def broken() -> HealthCheck:
+        raise RuntimeError("probe bug")
+
+    kit = register_ops(
+        Application(),
+        services,
+        mailer=RecordingMailer(),
+        notifier=RecordingNotifier(),
+        probes=(("style_serving", serving), ("broken_probe", broken)),
+    )
+    report = await kit.collector.collect()
+    found = {check.name: check for check in report.checks}
+    assert found["style_serving"].level is HealthLevel.WARN and found["style_serving"].value == 2.0
+    assert found["broken_probe"].level is HealthLevel.FAIL
+    assert "probe crashed" in found["broken_probe"].detail

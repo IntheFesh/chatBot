@@ -29,9 +29,11 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from twin.config.runtime import THINKING_CHAT
+from twin.engine.style_models import StyleModels
+from twin.engine.style_runtime import StyleRuntime
 from twin.engine.types import InboundItem
 from twin.eval.samples import LENGTH_BINS, PERIODS, DrawResult, SampleDrawer
 from twin.eval.sandbox import (
@@ -49,6 +51,7 @@ from twin.eval.stats import ProportionTest, Rate, group_rates, two_proportion_te
 from twin.eval.store import EvalStore, ItemView, NewItem, RunView
 from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.onetime import BatchItem
+from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.memory.recent import Turn
 from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, JobQueue, job_handler
 from twin.ops.logging import get_logger
@@ -79,6 +82,50 @@ class EvalError(RuntimeError):
     """The evaluation cannot go on; the message says what to do first."""
 
 
+class EvaluationError(EvalError):
+    """The model cannot be evaluated; the message says what to do first (R-SRV-005)."""
+
+
+class ModelStyleSource(Protocol):
+    """Whoever owns the server of the model under evaluation (``twin.serving.evaluation``)."""
+
+    async def style_runtime(
+        self, llm: LlmRuntime, model_id: str
+    ) -> tuple[StyleRuntime, StyleModels]: ...
+
+
+_model_styles: ModelStyleSource | None = None
+
+
+def install_model_styles(source: ModelStyleSource | None) -> None:
+    """Make ``source`` the owner the pairs of a model evaluation ask in this process.
+
+    The running application and ``twin model evaluate --foreground`` install the pool of servers
+    they started; this module only knows the protocol, so it does not depend on the serving
+    package (which depends on this one).
+    """
+    global _model_styles
+    _model_styles = source
+
+
+def installed_model_styles() -> ModelStyleSource | None:
+    return _model_styles
+
+
+async def evaluation_style(
+    services: Services, llm: LlmRuntime, model_id: str
+) -> tuple[StyleRuntime, StyleModels]:
+    """The style backends for the pairs of a run drawn for ``model_id`` (used by the job)."""
+    source = _model_styles
+    if source is None:
+        raise EvaluationError(
+            "the pairs of a model evaluation need the model's server, which only "
+            f"`twin model evaluate {model_id} --resume <run> --foreground` or a running "
+            "application starts"
+        )
+    return await source.style_runtime(llm, model_id)
+
+
 # ------------------------------------------------------------------- readiness
 
 
@@ -103,11 +150,13 @@ def readiness_problems(services: Services, backends: Sequence[str]) -> list[str]
     return problems
 
 
-def check_backends(services: Services, backends: Sequence[str]) -> None:
+def check_backends(
+    services: Services, backends: Sequence[str], models: StyleModels | None = None
+) -> None:
     """Refuse a backend that is unknown or not deployed, naming it (R-EVAL-001)."""
     messages = [
         status.message
-        for status in (backend_status(services, name) for name in backends)
+        for status in (backend_status(services, name, models) for name in backends)
         if not status.available
     ]
     if messages:
@@ -216,9 +265,16 @@ async def plan_blind(
     *,
     seed: int | None = None,
     kit: SandboxKit | None = None,
+    models: StyleModels | None = None,
+    extra_params: Mapping[str, Any] | None = None,
 ) -> BlindPlan:
-    """Draw the contexts, store the pairs and queue the generation as one-time batches."""
-    check_backends(services, backends)
+    """Draw the contexts, store the pairs and queue the generation as one-time batches.
+
+    ``twin model evaluate`` compares the backends for one model: ``models`` pins that model for
+    the readiness check and ``extra_params`` (its ``model_id``) go into the run, so that the
+    generation and the release gate know which model the pairs belong to (R-SRV-005).
+    """
+    check_backends(services, backends, models)
     problems = readiness_problems(services, backends)
     if problems:
         raise EvalError("; ".join(problems))
@@ -239,7 +295,16 @@ async def plan_blind(
         thinking = str(services.runtime.get(THINKING_CHAT))
         prices = await price_pairs(services, sandbox_kit, drawn, backends, thinking)
         return _store_plan(
-            services, sandbox_kit, store, drawn, backends, n, chosen_seed, thinking, prices
+            services,
+            sandbox_kit,
+            store,
+            drawn,
+            backends,
+            n,
+            chosen_seed,
+            thinking,
+            prices,
+            extra_params or {},
         )
     finally:
         if own:
@@ -287,6 +352,7 @@ def _store_plan(
     seed: int,
     thinking: str,
     prices: dict[tuple[str, str], float],
+    extra_params: Mapping[str, Any],
 ) -> BlindPlan:
     cutoff = holdout_cutoff(services)
     run = store.create_run(
@@ -294,6 +360,7 @@ def _store_plan(
         mode="holdout",
         backends=backends,
         params={
+            **extra_params,
             "n": requested,
             "seed": seed,
             "thinking_mode": thinking,
@@ -439,14 +506,23 @@ async def generate_items(
     run = store.get_run(run_id)
     thinking = str(run.params.get("thinking_mode", "off"))
     summary = GenerateSummary()
-    kit = build_sandbox(services, mode=SandboxMode.HOLDOUT, batch_id=batch_id)
+    items = [store.item(item_id) for item_id in item_ids]
+    wanted = any(item.status == "pending" and item.backend in STYLE_BACKENDS for item in items)
+    model_id = run.params.get("model_id")
+    models: StyleModels | None = None
+    llm = build_llm_runtime(services)
+    style: StyleRuntime | None = None
+    if model_id and wanted:
+        # a run drawn for a model (twin model evaluate) talks to the server of that model, which
+        # is started for the evaluation and is not the active one (R-SRV-005)
+        style, models = await evaluation_style(services, llm, str(model_id))
+    kit = build_sandbox(services, mode=SandboxMode.HOLDOUT, batch_id=batch_id, llm=llm, style=style)
     try:
-        for item_id in item_ids:
-            item = store.item(item_id)
+        for item in items:
             if item.status != "pending":
                 summary.skipped += 1
                 continue
-            status = backend_status(services, item.backend)
+            status = backend_status(services, item.backend, models)
             if not status.available:
                 store.save_generated(
                     item.id, {"failure": FAIL_NOT_DEPLOYED}, cost_usd=0.0, status="failed"

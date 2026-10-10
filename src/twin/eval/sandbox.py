@@ -117,13 +117,19 @@ class BackendStatus:
     message: str = ""
 
 
-def backend_status(services: Services, name: str) -> BackendStatus:
-    """``style`` and ``hybrid`` need a registered, active model that this code can render."""
+def backend_status(
+    services: Services, name: str, models: StyleModels | None = None
+) -> BackendStatus:
+    """``style`` and ``hybrid`` need a registered, active model that this code can render.
+
+    ``models`` is another view of the registry: the evaluation of a model that is not active yet
+    (``twin model evaluate``) pins that model.
+    """
     if name == "deepseek":
         return BackendStatus(name, True)
     if name not in STYLE_BACKENDS:
         return BackendStatus(name, False, f"unknown backend {name!r}: use {', '.join(BACKENDS)}")
-    models = StyleModels(services.db, mode=services.settings.style_model.mode)
+    models = models or StyleModels(services.db, mode=services.settings.style_model.mode)
     active = models.active()
     if active is None:
         return BackendStatus(

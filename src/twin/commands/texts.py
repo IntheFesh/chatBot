@@ -67,6 +67,31 @@ STATUS_GATE_FORCED = "未通过门槛（强制启用）"
 STATUS_HEALTH_OK = "运行正常"
 STATUS_HEALTH_BAD = "不可用（{detail}）"
 STATUS_REMOTE_HOURLY = "提醒：风格模型在 AutoDL 远程实例上，按小时计费，不用时记得在控制台关机。"
+STATUS_REMOTE_RUNNING = (
+    "提醒：远程风格模型按小时计费，实例运行中，已运行 {span}；"
+    "不用时先 /后端 deepseek，再在电脑上运行 twin model tunnel stop，并到控制台关机。"
+)
+STATUS_SERVE_STATES = {
+    "starting": "正在加载模型",
+    "ready": "运行中",
+    "backoff": "崩溃后等待重启",
+    "blocked": "已被拒绝",
+    "external": "由另一个进程提供",
+    "stopped": "已停止",
+    "unavailable": "无法启动",
+}
+STATUS_SERVE = "风格模型服务：{state}{detail}{restarts}"
+STATUS_SERVE_RESTARTS = "，已重启 {count} 次"
+STATUS_SPEED = "风格模型速度：首 token 约 {first} 毫秒，每秒约 {tps} 个 token（{when} 测得）"
+STATUS_TUNNEL_STATES = {
+    "connecting": "正在连接",
+    "up": "已连上",
+    "backoff": "断线，等待重连",
+    "blocked": "被拒绝",
+    "external": "由另一个进程提供",
+    "stopped": "已关闭",
+}
+STATUS_TUNNEL = "隧道：{state}{detail}，断线重连 {count} 次"
 STATUS_UNCLEANED = (
     "提醒：有 {count} 次训练还没有清理 AutoDL 上的数据，请在电脑上运行 twin train remote cleanup。"
 )
@@ -98,6 +123,10 @@ BACKEND_REASONS = {
     ),
     "unhealthy": "风格模型现在连不上或不健康（{detail}），恢复后再试。",
     "template": "风格模型绑定的提示词模板这个版本的程序渲染不了（{detail}），不能使用。",
+    "tokenizer": (
+        "风格模型的分词核对没有通过（{detail}），不能使用；在电脑上运行 twin model verify 看差异。"
+    ),
+    "loading": "风格模型还在加载（{detail}），加载完再试。",
     "no_model": "没有启用的风格模型。",
 }
 

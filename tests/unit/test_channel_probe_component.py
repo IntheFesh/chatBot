@@ -313,4 +313,5 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
         "proactive",  # she writes first, never while she sleeps (round 10)
         "schedule",
         "state_watcher",
+        "style_serving",  # the model's server or tunnel, started and watched (round 14)
     ]

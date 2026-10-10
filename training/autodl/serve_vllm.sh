@@ -9,9 +9,13 @@
 #   POST /v1/completions   with "model": "twin-style" and "prompt": the string StylePromptBuilder
 #                          rendered (the server applies no chat template of its own)
 #   POST /tokenize         to compare the server's token ids with the local tokenizer
-# Versions (checked 2026-10-09): vLLM 0.26.0 requires torch 2.11.0, its builds list compute
-# capability 12.0 (RTX 5090 and RTX PRO 6000); whether the wheels run on these two cards could not
-# be tried without the hardware, so the first start prints the versions it ended up with.
+# Versions (checked 2026-10-10): vLLM 0.26.0 requires torch 2.11.0, torchvision 0.26.0 and
+# torchaudio 2.11.0.  The GitHub release page has the wheel "vllm-0.26.0+cu129" (there is no +cu128
+# and no +cu130); PyPI's default wheel of the same version is a CUDA 13 build, so it is never used.
+# The three PyTorch wheels come from the cu129 index of PyTorch.  Whether this combination runs on
+# the compute capability 12.0 of the RTX 5090 and the RTX PRO 6000 (and takes a LoRA adapter with
+# bitsandbytes 4-bit) could not be tried without the hardware, so the first start prints the
+# versions and architectures it ended up with.
 # --dry-run prints the command and exits.
 set -euo pipefail
 
@@ -60,17 +64,17 @@ use_data_disk
 [ -f "${ADAPTER_DIR}/adapter_model.safetensors" ] || die "no adapter in ${ADAPTER_DIR}; run export.sh first"
 
 install_vllm() {
-    if [ -x "${VENV}/bin/vllm" ] && "${VENV}/bin/python" -m pip show vllm 2>/dev/null | grep -q "^Version: ${TWIN_VLLM}"; then
+    if [ -x "${VENV}/bin/vllm" ] && "${VENV}/bin/python" -m pip show vllm 2>/dev/null | grep -q "^Version: ${TWIN_VLLM}+${TWIN_VLLM_CUDA_TAG}"; then
         return 0
     fi
     free_space_gate "installing vLLM" 20
     [ -x "${VENV}/bin/python" ] || "${TWIN_PYTHON}" -m venv "${VENV}"
-    "${VENV}/bin/python" -m pip install "torch==${TWIN_VLLM_TORCH}" --index-url "${TWIN_TORCH_INDEX}"
-    local wheel="https://github.com/vllm-project/vllm/releases/download/v${TWIN_VLLM}/vllm-${TWIN_VLLM}%2Bcu128-cp38-abi3-manylinux_2_28_x86_64.whl"
-    if ! with_turbo "${VENV}/bin/python" -m pip install "${wheel}" --extra-index-url "${TWIN_TORCH_INDEX}"; then
-        log "the CUDA 12.8 wheel could not be installed; trying vllm==${TWIN_VLLM} from PyPI"
-        "${VENV}/bin/python" -m pip install "vllm==${TWIN_VLLM}" --extra-index-url "${TWIN_TORCH_INDEX}"
-    fi
+    "${VENV}/bin/python" -m pip install "torch==${TWIN_VLLM_TORCH}" "torchvision==${TWIN_VLLM_TORCHVISION}" \
+        "torchaudio==${TWIN_VLLM_TORCHAUDIO}" --index-url "${TWIN_VLLM_TORCH_INDEX}"
+    local wheel="https://github.com/vllm-project/vllm/releases/download/v${TWIN_VLLM}/vllm-${TWIN_VLLM}%2B${TWIN_VLLM_CUDA_TAG}-cp38-abi3-manylinux_2_28_x86_64.whl"
+    # no fall-back to "pip install vllm==...": PyPI's default wheel is built for CUDA 13
+    with_turbo "${VENV}/bin/python" -m pip install "${wheel}" --extra-index-url "${TWIN_VLLM_TORCH_INDEX}" \
+        || die "the vLLM wheel ${wheel} could not be installed (see the messages above)"
 }
 
 install_vllm

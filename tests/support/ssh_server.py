@@ -41,6 +41,9 @@ class ServerState:
     fail_exec: bool = False  # refuse every command (hash tool fallback tests)
     logins: int = 0
     drops: int = 0
+    allow_forwarding: bool = False  # accept direct-tcpip requests (the tunnel of round 14)
+    forwards: list[tuple[str, int]] = field(default_factory=list)  # (host, port) asked for
+    connections: list[asyncssh.SSHServerConnection] = field(default_factory=list)
 
 
 class _Auth(asyncssh.SSHServer):
@@ -49,6 +52,17 @@ class _Auth(asyncssh.SSHServer):
 
     def connection_made(self, conn: asyncssh.SSHServerConnection) -> None:
         self._state.logins += 1
+        self._state.connections.append(conn)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._state.connections = [c for c in self._state.connections if not _is_closed(c)]
+
+    def connection_requested(
+        self, dest_host: str, dest_port: int, orig_host: str, orig_port: int
+    ) -> bool:
+        """Local port forwarding: the server connects to the destination for the client."""
+        self._state.forwards.append((dest_host, dest_port))
+        return self._state.allow_forwarding
 
     def begin_auth(self, username: str) -> bool:
         return True
@@ -69,6 +83,10 @@ class _Auth(asyncssh.SSHServer):
             and authorized is not None
             and key.export_public_key() == authorized.export_public_key()
         )
+
+
+def _is_closed(connection: asyncssh.SSHServerConnection) -> bool:
+    return bool(connection.is_closed()) if hasattr(connection, "is_closed") else False
 
 
 def _sftp_factory(state: ServerState) -> Any:
@@ -176,7 +194,10 @@ class LocalSSHServer:
     async def __aexit__(self, *exc_info: object) -> None:
         if self._server is not None:
             self._server.close()
-            await self._server.wait_closed()
+            # Python 3.12 waits for every accepted connection; a client that is gone for good must
+            # not hang the test
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._server.wait_closed(), 10.0)
 
     def fingerprint(self) -> str:
         return self.host_key.get_fingerprint("sha256")

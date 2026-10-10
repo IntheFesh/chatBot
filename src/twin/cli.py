@@ -23,9 +23,11 @@ from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
 from twin.engine.component import EngineComponent, register_engine
+from twin.engine.style_runtime import StyleRuntime
 from twin.eval.cli import eval_app
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
+from twin.llm.runtime import build_llm_runtime
 from twin.memory.cli import memory_app
 from twin.ops.backup.cli import backup_app
 from twin.ops.cli import jobs_app
@@ -53,6 +55,8 @@ from twin.schedule.component import register_schedule
 from twin.schedule.proactive.cli import proactive_app
 from twin.schedule.proactive.component import proactive_status_for, register_proactive
 from twin.services import CliContext, Services, get_cli_context, set_cli_context
+from twin.serving import cli as serving_cli  # noqa: F401 - adds the model commands of round 14
+from twin.serving.component import register_serving
 from twin.stickers.cli import stickers_app
 from twin.storage.cli import db_app
 from twin.training.cli import train_app
@@ -159,6 +163,10 @@ async def _serve(services: Services) -> None:
         reconnect=channel_component.reconnect if channel_component is not None else None,
     )
     engine_component: EngineComponent
+    # the style model: its server is up (or loading) before the engine asks it anything
+    llm = build_llm_runtime(services)
+    style = StyleRuntime.from_services(services, llm)
+    serving = register_serving(application, services, style=style, say=None, watcher=watcher)
     if channel_component is not None:  # channel.kind "ilink": the user's WeChat conversation
         channel: Channel = channel_component.channel
         engine_component = register_engine(
@@ -166,9 +174,11 @@ async def _serve(services: Services) -> None:
             services,
             channel,
             watcher=watcher,
-            after=(channel_component.name, "schedule"),
+            after=(channel_component.name, "schedule", serving.name),
             schedule=schedule_component,
             proactive=proactive_status_for(services, channel.session_state),
+            runtime=llm,
+            style=style,
         )
     else:  # channel.kind "console": the terminal in place of WeChat
         console = LocalConsoleChannel.from_services(
@@ -180,19 +190,22 @@ async def _serve(services: Services) -> None:
             services,
             console,
             watcher=watcher,
-            after=(CHANNEL_COMPONENT_NAME, "schedule"),
+            after=(CHANNEL_COMPONENT_NAME, "schedule", serving.name),
             on_finished=stop.set,
             restart_dispatch=False,
             schedule=schedule_component,
             proactive=proactive_status_for(services, console.session_state),
+            runtime=llm,
+            style=style,
         )
     register_proactive(application, services, engine_component)
-    style = engine_component.style
+    serving.set_say(engine_component.engine.notify)
     register_ops(
         application,
         services,
-        style=style.selector if style is not None else None,
+        style=style.selector,
         schedule=schedule_component,
+        probes=(("style_serving", serving.health_check),),
     )
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()

@@ -62,6 +62,11 @@ class QwenTokenizer:
     def decode(self, ids: list[int]) -> str:
         return str(self._tokenizer.decode(ids, skip_special_tokens=False))
 
+    def token_id(self, token: str) -> int | None:
+        """The id of an added (special) token such as ``<|im_start|>``; ``None`` if it has none."""
+        found = self._tokenizer.token_to_id(token)
+        return None if found is None else int(found)
+
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()

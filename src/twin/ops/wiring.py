@@ -14,7 +14,7 @@ SMTP account of ``ops.smtp`` and the credential ``smtp_password`` are put togeth
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -24,7 +24,7 @@ from twin.engine.safety.notifier import EmergencyNotifier
 from twin.ops.alert_delivery import AlertDelivery
 from twin.ops.backup.service import BackupService
 from twin.ops.emergency import SmtpEmergencyNotifier
-from twin.ops.health import HealthCollector, LiveSources, StyleReading
+from twin.ops.health import HealthCheck, HealthCollector, LiveSources, StyleReading
 from twin.ops.login_recovery import LoginRecovery
 from twin.ops.mail import SMTP_PASSWORD_SECRET, Mailer, SmtpMailer
 from twin.ops.monitor import HealthMonitor
@@ -97,6 +97,7 @@ def register_ops(
     started_at: datetime | None = None,
     busy: Callable[[], bool] | None = None,
     schedule: ScheduleComponent | None = None,
+    probes: Sequence[tuple[str, Callable[[], Awaitable[HealthCheck]]]] = (),
 ) -> OpsKit:
     """Add the operations components to ``application`` (see the module description)."""
     clock = services.clock
@@ -118,6 +119,8 @@ def register_ops(
             style=style_reading_of(style) if style is not None else None,
         ),
     )
+    for probe_name, probe in probes:  # e.g. the llama-server process of round 14
+        collector.register_probe(probe_name, probe)
     monitor = HealthMonitor(services, collector, started_at=started_at)
     backup = BackupService.from_services(services)
     scheduler = OpsScheduler(
