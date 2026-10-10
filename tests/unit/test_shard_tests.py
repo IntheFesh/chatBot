@@ -202,7 +202,7 @@ def test_more_shards_than_files_leave_some_empty() -> None:
 def test_the_committed_weights_balance_the_real_suite() -> None:
     files = shard.discover_test_files(REPO)
     table = shard.load_weights(REPO / "ci" / "test_weights.json")
-    for platform, count in (("linux", 3), ("windows", 4)):
+    for platform, count in (("linux", 3), ("windows", 5)):
         weighing = shard.weigh(files, table, platform, REPO)
         parts = shard.assign(weighing.weights, count)
         assert sorted(name for part in parts for name in part) == files
@@ -247,8 +247,8 @@ def test_every_file_of_the_real_suite_is_in_exactly_one_command_line_shard(
     capfdbinary: pytest.CaptureFixture[bytes],
 ) -> None:
     seen: list[str] = []
-    for index in range(1, 5):
-        assert shard.main(["--shard", str(index), "--of", "4", "--platform", "windows"]) == 0
+    for index in range(1, 6):
+        assert shard.main(["--shard", str(index), "--of", "5", "--platform", "windows"]) == 0
         seen += capfdbinary.readouterr().out.decode("utf-8").splitlines()
     assert sorted(seen) == shard.discover_test_files(REPO)
 
@@ -358,6 +358,29 @@ def test_updating_prunes_vanished_files_of_the_updated_tree(tmp_path: Path) -> N
     assert merged["linux"] == {names[0]: 1.0, names[1]: 2.0}
 
 
+def test_blending_keeps_a_moving_average_over_the_runs(tmp_path: Path) -> None:
+    names = make_tree(tmp_path, 3)
+    table = {"linux": {names[0]: 10.0}, "windows": {}}
+    merged = shard.updated_weights(
+        table, {names[0]: (20.0, 1), names[1]: (8.0, 1)}, "linux", tmp_path, blend=0.25
+    )
+    assert merged["linux"] == {names[0]: 12.5, names[1]: 8.0}  # a new file takes the measurement
+    for bad in (0.0, -1.0, 1.5):
+        with pytest.raises(shard.ShardError, match="--blend"):
+            shard.updated_weights(table, {names[0]: (1.0, 1)}, "linux", tmp_path, blend=bad)
+
+
+def test_the_blend_option_reaches_the_weights_file(tmp_path: Path) -> None:
+    make_tree(tmp_path, 4)
+    path = tmp_path / "ci" / "test_weights.json"
+    shard.save_weights({"linux": {"tests/unit/test_file_01.py": 10.0}, "windows": {}}, path)
+    report = junit(tmp_path, [("tests.unit.test_file_01", "t", 30.0)])
+    arguments = ["--update-weights", str(report), "--platform", "linux", "--root", str(tmp_path)]
+    assert shard.main([*arguments, "--weights", str(path), "--blend", "0.5"]) == 0
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["platforms"]["linux"] == {"tests/unit/test_file_01.py": 20.0}
+
+
 def test_the_weights_file_is_validated(tmp_path: Path) -> None:
     path = tmp_path / "weights.json"
     assert shard.load_weights(path) == {"linux": {}, "windows": {}}  # absent: nothing recorded
@@ -375,6 +398,7 @@ def test_the_committed_weights_file_is_valid_and_mentions_real_files() -> None:
     table = shard.load_weights(REPO / "ci" / "test_weights.json")
     files = set(shard.discover_test_files(REPO))
     for platform, recorded in table.items():
+        assert recorded, f"{platform}: no weights recorded"
         assert set(recorded) <= files, f"{platform}: weights of files that do not exist"
 
 
