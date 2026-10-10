@@ -51,6 +51,7 @@ CORRECTION_CHECK = "correction_check"
 CORRECTION_RULES = "correction_rules"
 CORRECTION_RULE_CHECK = "correction_rule_check"
 PROACTIVE_PLAN = "proactive_plan"
+CONSISTENCY_AUDIT = "consistency_audit"
 
 
 class TemplateError(RuntimeError):

@@ -13,6 +13,13 @@
 
 ``AsOfView(t)`` - the single door the training export and the evaluation sandbox read a past
 moment through - is in :mod:`twin.memory.asof`.
+
+The consistency audit (round 15) is the one evaluation that looks at the live memory instead of a
+past moment: it reads what is known now and, only after the user has said yes to each item,
+corrects what the bot itself invented.  What it needs besides the names above - the new-fact
+record, the sources' ranking (R-MEM-004), the core importance, the clock-text parser and the
+length of a life line entry's title - is re-exported here so that it does not reach into the
+memory's internals.
 """
 
 from __future__ import annotations
@@ -23,17 +30,24 @@ from typing import TYPE_CHECKING
 from twin.memory.asof import AsOfSource, AsOfView, LocalMoment
 from twin.memory.assemble import MemoryAssembler
 from twin.memory.blocks import BlockItem, MemoryBlock, MemoryQuery
+from twin.memory.corpus import CORE_IMPORTANCE
 from twin.memory.followups import FollowupStore
-from twin.memory.lifeline import LifelineStore, PlannedEvent
+from twin.memory.lifeline import LifelineStore, PlannedEvent, minutes_of
 from twin.memory.memory import Memory
 from twin.memory.records import LifelineRecord
+from twin.memory.store import NewFact
 from twin.memory.view import MemoryView
+from twin.memory.writer import LIFELINE_ACTIVITY_CHARS
 from twin.schedule.service import time_service_for
+from twin.storage.memory_models import SOURCE_PRIORITY
 
 if TYPE_CHECKING:
     from twin.services import Services
 
 __all__ = [
+    "CORE_IMPORTANCE",
+    "LIFELINE_ACTIVITY_CHARS",
+    "SOURCE_PRIORITY",
     "AsOfSource",
     "AsOfView",
     "BlockItem",
@@ -45,9 +59,11 @@ __all__ = [
     "MemoryBlock",
     "MemoryQuery",
     "MemoryView",
+    "NewFact",
     "PlannedEvent",
     "lifeline_at",
     "memory_view",
+    "minutes_of",
 ]
 
 

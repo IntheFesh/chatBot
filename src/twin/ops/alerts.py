@@ -183,6 +183,9 @@ SPECS: dict[str, AlertSpec] = {
     "dpo_ready": AlertSpec("偏好对已足够做 DPO", "可以运行 twin train export-dpo。", notify=False),
     "lifeline_corrected": AlertSpec("今天的生活线被修正过", "仅供参考。", notify=False),
     "channel_probe": AlertSpec("通道探针的进展", "查看 twin channel probe status。", notify=False),
+    "consistency_review": AlertSpec(
+        "前后一致审计找到了矛盾，等你决定", "运行 twin eval consistency --review。", notify=False
+    ),
 }
 
 # the names the earlier rounds use  ->  the category they belong to

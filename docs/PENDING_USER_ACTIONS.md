@@ -678,3 +678,35 @@
    - Windows 上才跑的测试：`uv run pytest tests/unit/test_serving_windows.py -q`（作业对象：杀掉父进程后服务器也会消失）。
 
 6. **没有做、也不属于这一步的**：用风格模型回复真实用户的长期稳定性观察（第 15 轮）、月度成本与最终验收（第 15、16 轮）；M3 门槛（第 10 轮）。
+
+## 第 15 轮 —— 评估收尾：前后一致审计（R-EVAL-004）、成本评估（R-EVAL-007）、汇总报告（R-EVAL-008）
+
+> 沙箱是 Linux，没有真实的 DeepSeek Key、没有一周真实的线上记录、没有你的逐条确认，也没有 M0 至 M5 的真实结果：审计的取数、围栏、JSON 校验与修复、确认流程、记忆修正的应用/拒绝、每周任务的调度与非高峰等待、成本门槛的边界、汇总报告的内容（含“未评估”与“不含聊天正文”）、迁移的往返都用合成数据、脚本化的 DeepSeek 回答（respx）和注入的时钟验证（DECISIONS D-530 至 D-544）。**因此本轮没有任何一条 `eval_runs` 或门槛记录是伪造的；`twin eval report` 在你自己跑出评估结果之前，M0 至 M5 全部写“未评估”。** `docs/CHANNEL_REPORT.md` 与 `docs/LLM_REPORT.md` 仍是“待实测”的模板，报告只说明它们的状态、不引用数字。**下面每一步都要在你的电脑上做。**
+
+1. **同步与升级数据库**
+   - 没有新依赖。`uv run twin db upgrade`：迁移 `0017_eval_kinds`（`consistency_findings`、`consistency_fixes` 两张表；`eval_runs.kind` 增加 `consistency`、`cost`、`report`；降级一步可回到 `0016_proactive_tables`，三种运行和两张表的数据会随之删除）。
+   - 新增三个配置键，都有默认值：`eval.consistency_days: 7`、`eval.consistency_reply_chars: 12000`、`eval.consistency_facts: 40`。月费用上限 15 美元、明显矛盾每周 1 次、每周一 04:20 的时刻都不是配置项（改它们等于改门槛）。
+   - 需要 DeepSeek Key（第 01 轮已存进凭据管理器的话不用再做）；没有的话 `twin eval consistency` 会告诉你要存哪一个。
+
+2. **前后一致审计（至少要有 7 天的真实使用记录之后做）**
+   - `uv run twin eval consistency --days 7`：把最近 7 天的生活线、机器人说过的关于她的话、相关事实（带来源与知道的日期）打码后交给 DeepSeek（`purpose=consistency`，思考模式，约几美分），列出可能的矛盾。**机器人说过的话只用来评估，不会进入风格样本、检索库或训练集。**
+   - 终端逐条决定：`y` 真矛盾且明显、`m` 真矛盾但不明显、`n` 不是矛盾、`s` 先跳过、`q` 保存退出（`--resume <运行号>` 接着做，`--review` 接最近一个等你的审计，不再调用 DeepSeek）。**“明显”由你来判**，模型给的严重度只是提示。每周明显矛盾 ≤ 1 次才算通过；窗口不足 7 天、还有没决定的、这段时间没有内容，都是“样本不足”，不是通过。
+   - 确认的矛盾之后会逐条给出记忆修正建议（作废或改写机器人编的事实/生活线条目），**你回答 `y` 才会改，不回答不会改**；真实记录、你说过的话、`/记住` 写的永远不会被改。已经发出去的回复改不了。建议若在你确认之前已经变了（记录被改过或失效），会标 `stale`，什么都不改。
+   - `uv run twin eval consistency --queue`：手动排一次到非高峰时段。应用在运行时，**每周一 04:20（机器人当地时间）会自己排一次**，找到矛盾后记一条 `consistency_review`（info 级，只有条数与命令，不弹窗、不发邮件）；你再用 `uv run twin eval consistency --review` 回来确认。电脑关机错过的那个周一，下次启动时补一次。
+   - **请告诉我**：真实输出里的矛盾质量（漏报、误报、引文对不对）——提示词 `consistency_audit.v1.md` 在沙箱里只用脚本化的回答测过格式与处理，找得准不准要看真实输出；以及一次审计的真实费用（`twin cost report` 里按用途的 `consistency` 一行）。
+
+3. **成本评估**
+   - 一个月过完以后：`uv run twin eval cost --month YYYY-MM`。日常账目 ≤ 15 美元才通过；`one_time`（建库、全量导入等 R-LLM-014 的一次性任务）单列、不计入；同时给出按用途/按模型的明细与缓存命中率。月未过完只给估算、不判通过，没有任何调用的月份也是“样本不足”。结果存成一条 `eval_runs(kind=cost)`。
+
+4. **汇总报告**
+   - `uv run twin eval report`：写 `data/reports/eval-<当地日期>.md`（同一天重复运行覆盖）。按 M0 至 M5 列出条件、当前值、样本与置信区间、结论、判定时间与证据（命令和 `eval_runs` 编号），再列盲测（按后端）、风格指标（线上与留出集）、记忆测试、一致性、主动消息审计、稳定性、成本（日常与一次性分列）。**它只读已存的结果，不重新判定**：要让某个里程碑出现结论，先运行 `uv run twin eval gate <M0…M5>`；没有记录的写“未评估”并给出要运行的命令。判定之后如果有更新的同类评估，报告会提示结论可能过期。
+   - 风格指标要先运行 `uv run twin eval style`（本轮起它会把结果存成一条 `style` 运行，报告才读得到）。
+   - 报告里没有任何聊天正文，只有数字、命令和运行编号，可以放心发给我。
+
+5. **还没有、必须由你完成的真实结果（本轮不可能在沙箱里产生）**
+   - M0：真实的通道探针（`uv run twin channel probe`）与 DeepSeek 探针（`uv run twin llm probe`）把 `docs/CHANNEL_REPORT.md`、`docs/LLM_REPORT.md` 从模板变成实测，再 `uv run twin eval gate M0`。
+   - M1/M2：`uv run twin eval blind`、`uv run twin eval memory` 之后 `twin eval gate M1`、`M2`。
+   - M3：7 个被监测的当地日之后 `twin eval gate M3`；M4：7 天稳定性之后 `twin eval gate M4`；M5：第 14 轮的 `twin eval gate M5`（未过则保留 DeepSeek）。
+   - 以上每一项的真实输出都请发给我；没有真实结果之前，汇总报告里就是“未评估”，这是预期的。
+
+6. **没有做、也不属于这一步的**：端到端场景与长时间运行验证、最终验收文档（第 16 轮）。

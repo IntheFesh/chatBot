@@ -101,7 +101,8 @@ style_model:
   top_p: 0.9
 autodl: { host: null, port: null, user: "root", auth: "password", key_path: null, workdir: "/root/autodl-tmp/twin" }
 training: { hybrid_plan_ratio: 0.30, dpo_min_pairs: 200, retrain_new_ratio: 0.10 }
-eval: { blind_n: 50, memory_questions: 20 }
+eval: { blind_n: 50, memory_questions: 20, consistency_days: 7, consistency_reply_chars: 12000,
+        consistency_facts: 40 }   # 第 15 轮新增：一致性审计的回看天数、交给模型的回复字数与事实条数
 commands: { confirm_window_min: 60, pause_max_h: 168, morning_hour: 8, import_poll_s: 5.0 }
 learning: { rules_max: 30, rules_interval_days: 7, rule_max_chars: 40, detect_corrections: true,
             check_interval_s: 3600.0 }   # 第 11 轮新增：commands 的 4 个键与 learning 的 5 个键

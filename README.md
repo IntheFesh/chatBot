@@ -75,6 +75,9 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\uninstall.ps1  # 停止
 | `twin purge --all\|--training-only` | 她要求时一键彻底删除（要键入确认短语；没有跳过确认的参数） | 独占 |
 | `twin rollback profile\|persona\|prompt-template\|style-model` | 回到旧版本，并写审计记录 | 轻量修改 |
 | `twin eval stability --days 7`、`twin ops drill network`、`twin eval gate M4` | 稳定性报告、断网演练步骤、M4 门槛 | 轻量修改 / 只读 |
+| `twin eval consistency [--days 7] [--review] [--resume 运行号] [--queue]` | 前后一致审计：DeepSeek 列出最近一周的可能矛盾，你在终端逐条决定，确认后才逐条改机器人编的记忆；每周一凌晨应用自己排一次 | 轻量修改 |
+| `twin eval cost [--month YYYY-MM]` | 月费用 ≤ 15 美元的评估（日常账目；一次性批任务单列），按用途/模型与缓存命中率 | 轻量修改 |
+| `twin eval report` | 汇总 M0–M5 与各项评估的已存结果到 `data/reports/eval-<日期>.md`（只读已存结果，没评估过的写“未评估”） | 轻量修改 |
 
 告警（登录失效、DeepSeek 连续失败、预算、备份失败、磁盘不足……）同时走 Windows 通知和邮件，邮件里没有任何聊天内容，二维码只在本机弹窗里出现。
 

@@ -9,7 +9,7 @@
 ``style``
     the six core style metrics of what the bot wrote against her profile: the last days of the
     real conversation (``--source live``) or the replies generated for a blind run
-    (``--source eval_items --run <id> --backend <name>``).
+    (``--source eval_items --run <id> --backend <name>``); the numbers are kept as a ``style`` run.
 ``memory``
     the memory test: twenty questions (ten from real records, ten from the conversation with the
     bot), asked in the sandbox, judged by DeepSeek and reviewed by you.  Same steps as ``blind``.
@@ -18,6 +18,15 @@
     ``--check`` only reads the last stored verdict.
 ``stability``
     the stability report of the last days (round 12, R-EVAL-006), kept as a ``stability`` run.
+``consistency``
+    the audit of the bot against itself (round 15, R-EVAL-004): DeepSeek lists the contradictions
+    between the life line, what she said about herself and the facts; you decide which are real
+    and which corrections of the memory to apply.  ``--review`` goes on with an audit that waits
+    for you (the weekly job leaves one), ``--queue`` queues the audit for the off-peak hours.
+``cost``
+    the cost of a month against the 15 US dollar ceiling (R-EVAL-007), kept as a ``cost`` run.
+``report``
+    every stored result in ``data/reports/eval-<date>.md`` (R-EVAL-008).
 ``runs``
     the recent evaluation runs.
 
@@ -48,6 +57,12 @@ from twin.eval.blind import (
     handle_eval_generate,
     plan_blind,
 )
+from twin.eval.consistency_audit import AuditOutcome, refresh_run, run_audit
+from twin.eval.consistency_fixes import FixApplier
+from twin.eval.consistency_jobs import queue_consistency_job
+from twin.eval.consistency_store import ConsistencyStore
+from twin.eval.consistency_ui import ConsistencyReview, ReviewOutcome
+from twin.eval.cost_gate import evaluate_cost, render_lines
 from twin.eval.gates import GateError, check_gate, run_gate
 from twin.eval.memory_test import (
     EVAL_MEMORY_JOB,
@@ -68,9 +83,13 @@ from twin.eval.report import (
 from twin.eval.samples import StickerDescriber
 from twin.eval.store import EvalStore, EvalStoreError, RunView
 from twin.eval.style_metrics import StyleError, style_of_items, style_of_live
+from twin.eval.summary_report import VERDICT_WORDS, write_report
 from twin.eval.ui import BlindSession, KeySource, TerminalKeys
+from twin.llm.errors import LlmError
 from twin.llm.onetime import BatchStatus
 from twin.llm.runtime import build_llm_runtime
+from twin.memory.api import Memory
+from twin.ops.cost import CostReportError, parse_month
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
@@ -340,6 +359,21 @@ def eval_style(
     except StyleError as exc:
         raise CliError(str(exc), ExitCode.FAILURE) from exc
     print_style_report(console, report)
+    kept = _store(services).create_run(
+        "style",
+        mode="live" if report.source == "live" else "holdout",
+        backends=[report.backend] if report.backend else [],
+        status="done",
+        verdict="passed" if report.passed else "failed",
+        params={
+            "source": report.source,
+            "days": report.days,
+            "blind_run": report.run_id,
+            "backend": report.backend,
+        },
+        summary=report.to_json(),
+    )
+    console.print(Text(f"评估记录：{kept.id}"))
     if not report.passed:
         raise typer.Exit(1)
 
@@ -462,6 +496,217 @@ def eval_proactive(
         raise typer.Exit(1)
 
 
+# ------------------------------------------------------------------- consistency
+
+
+def _describe_audit(console: Console, outcome: AuditOutcome) -> None:
+    run = outcome.run
+    evidence = run.summary.get("evidence") or {}
+    console.print(
+        Text(
+            f"一致性审计 {run.id}：回看 {run.params.get('days')} 天；生活安排 "
+            f"{evidence.get('lifeline', 0)} 条、她说过的话 {evidence.get('replies', 0)} 段、"
+            f"相关事实 {evidence.get('facts', 0)} 条"
+        )
+    )
+    if not outcome.called:
+        console.print(
+            Text("这段时间既没有生活安排也没有她说过的话：没有可审阅的内容，没有调用 DeepSeek。")
+        )
+        return
+    dropped = sum(outcome.dropped.values())
+    console.print(
+        Text(
+            f"DeepSeek 报告了 {outcome.findings + outcome.inherited + dropped} 条；"
+            f"等你决定 {outcome.findings} 条，沿用以前的决定 {outcome.inherited} 条，"
+            f"没通过检查而丢弃 {dropped} 条；花费 ${outcome.cost_usd:.4f}"
+        )
+    )
+
+
+def _review_outcome(console: Console, outcome: ReviewOutcome) -> None:
+    console.print(
+        Text(
+            f"本次：明显矛盾 {outcome.obvious}，不明显的矛盾 {outcome.minor}，不是矛盾 "
+            f"{outcome.rejected}，先跳过 {outcome.skipped}；修正：应用 {outcome.applied}，"
+            f"不改 {outcome.declined}，已过期 {outcome.stale}"
+        )
+    )
+
+
+def _print_audit_result(console: Console, run: RunView) -> None:
+    summary = run.summary
+    decisions = summary.get("decisions") or {}
+    fixes = summary.get("fixes") or {}
+    console.print(
+        Text(
+            f"确认的明显矛盾 {decisions.get('confirmed_obvious', 0)} 次"
+            f"（{run.params.get('days')} 天内最多 {summary.get('allowed_obvious')} 次），"
+            f"不明显的 {decisions.get('confirmed_minor', 0)} 次，"
+            f"判为不是矛盾 {decisions.get('rejected', 0)} 次，"
+            f"还没决定 {decisions.get('undecided', 0)} 次"
+        )
+    )
+    if fixes.get("proposed"):
+        console.print(
+            Text(f"还有 {fixes['proposed']} 条记忆修正建议没有决定：twin eval consistency --review")
+        )
+    if run.verdict is None:
+        console.print(
+            Text(f"一致性：待确认（twin eval consistency --resume {run.id}）", style="yellow")
+        )
+        return
+    console.print(
+        Text(
+            f"一致性：{VERDICT_WORDS[run.verdict]}。{summary.get('verdict_reason', '')}",
+            style="green" if run.verdict == "passed" else "red",
+        )
+    )
+
+
+async def _audit_now(services: Services, days: int | None) -> AuditOutcome:
+    runtime = build_llm_runtime(services)
+    try:
+        return await run_audit(services, runtime.client, days=days)
+    finally:
+        await runtime.client.aclose()
+
+
+def _run_to_review(store: EvalStore, cstore: ConsistencyStore) -> RunView | None:
+    """The newest audit that still waits for a decision on a contradiction or a correction."""
+    for run in store.list_runs("consistency", limit=50):
+        if run.status in ("cancelled", "failed"):
+            continue
+        if cstore.findings(run.id, status="proposed") or cstore.run_fixes(
+            run.id, status="proposed"
+        ):
+            return run
+    return None
+
+
+@eval_app.command("consistency")
+@command(CommandKind.LIGHT)
+def eval_consistency(
+    days: Annotated[
+        int | None,
+        typer.Option(
+            "--days",
+            min=1,
+            max=60,
+            help="How many days to look back (default: eval.consistency_days)",
+        ),
+    ] = None,
+    review: Annotated[
+        bool,
+        typer.Option(
+            "--review", help="Go on with the newest audit that waits for you; DeepSeek is not asked"
+        ),
+    ] = False,
+    resume: Annotated[str | None, RESUME_OPTION] = None,
+    queue: Annotated[
+        bool,
+        typer.Option(
+            "--queue", help="Queue the audit for the off-peak hours instead of running it now"
+        ),
+    ] = False,
+) -> None:
+    """Consistency audit: DeepSeek lists contradictions, you decide which are real (R-EVAL-004)."""
+    services = _services()
+    console = _interaction.console()
+    store = _store(services)
+    cstore = ConsistencyStore(services.db, services.clock)
+    if queue:
+        job_id = queue_consistency_job(services, days=days)
+        if job_id is None:
+            console.print(Text("已经有一次审计在排队或正在运行。"))
+        elif app_is_running(services):
+            console.print(Text(f"已排队（任务 {job_id}），应用会在非高峰时段执行。"))
+        else:
+            console.print(
+                Text(f"已排队（任务 {job_id}）：twin jobs run --until-idle 可在这里执行。")
+            )
+        return
+    if resume is not None:
+        run = _run_of(store, resume, "consistency")
+    elif review:
+        found = _run_to_review(store, cstore)
+        if found is None:
+            console.print(Text("没有等你决定的审计。"))
+            return
+        run = found
+    else:
+        try:
+            outcome = asyncio.run(_audit_now(services, days))
+        except LlmError as exc:
+            raise CliError(f"the audit could not be made: {exc}", ExitCode.FAILURE) from exc
+        _describe_audit(console, outcome)
+        run = outcome.run
+    memory = Memory(services)
+    session = ConsistencyReview(
+        cstore, FixApplier(memory, cstore), memory, run, console, _interaction.keys()
+    )
+    undecided, proposed = session.waiting()
+    left = False
+    if undecided or proposed:
+        result = session.run()
+        _review_outcome(console, result)
+        left = result.quit
+    run = refresh_run(store, cstore, run.id)
+    _print_audit_result(console, run)
+    if left:
+        console.print(Text(f"没做完：twin eval consistency --resume {run.id}"))
+        return
+    if run.verdict != "passed":
+        raise typer.Exit(1)
+
+
+# -------------------------------------------------------------------------- cost
+
+
+@eval_app.command("cost")
+@command(CommandKind.LIGHT)
+def eval_cost(
+    month: Annotated[
+        str | None, typer.Option("--month", help="Month as YYYY-MM (default: this month)")
+    ] = None,
+) -> None:
+    """The month's cost against 15 US dollars; one-time batches are shown apart (R-EVAL-007)."""
+    services = _services()
+    console = _interaction.console()
+    time = time_service_for(services)
+    try:
+        start = parse_month(month) if month else time.local_date().replace(day=1)
+    except CostReportError as exc:
+        raise CliError(str(exc), ExitCode.USAGE) from exc
+    evaluation = evaluate_cost(services, start)
+    for line in render_lines(evaluation):
+        console.print(Text(line))
+    if not evaluation.passed:
+        raise typer.Exit(1)
+
+
+# ------------------------------------------------------------------------ report
+
+
+@eval_app.command("report")
+@command(CommandKind.LIGHT)
+def eval_report() -> None:
+    """Write every stored evaluation result to data/reports/eval-<date>.md (R-EVAL-008)."""
+    services = _services()
+    console = _interaction.console()
+    written = write_report(services)
+    table = Table(title="里程碑")
+    for column in ("里程碑", "结论", "判定记录"):
+        table.add_column(column)
+    for code, item in written.milestones.items():
+        table.add_row(Text(code), Text(VERDICT_WORDS[item["status"]]), Text(item["run"] or "—"))
+    console.print(table)
+    if written.missing:
+        console.print(Text(f"尚未评估的项目 {len(written.missing)} 个，列在报告最后一节。"))
+    console.print(Text(f"报告已写入 {written.path}"))
+    console.print(Text(f"评估记录：{written.run.id}"))
+
+
 # ------------------------------------------------------------------------- runs
 
 
@@ -485,7 +730,11 @@ def eval_stability(
 def eval_runs(
     kind: Annotated[
         str | None,
-        typer.Option("--kind", help="blind, memory, style, gate, stability or proactive_audit"),
+        typer.Option(
+            "--kind",
+            help="blind, memory, style, gate, stability, proactive_audit, consistency, cost "
+            "or report",
+        ),
     ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many to list")] = 20,
 ) -> None:

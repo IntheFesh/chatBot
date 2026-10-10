@@ -34,6 +34,8 @@ def test_the_spec_names_the_tables_it_is_expected_to() -> None:
         assert table in names
     for table in ("health_snapshots", "backup_records", "eval_runs", "eval_items"):
         assert table in names
+    for table in ("consistency_findings", "consistency_fixes"):  # round 15
+        assert table in names
 
 
 @pytest.mark.parametrize("table", spec_tables())

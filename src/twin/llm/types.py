@@ -12,7 +12,9 @@ class Purpose(StrEnum):
     """Why a call is made (the ``purpose`` label of ``cost_ledger``, R-LLM-006).
 
     ``probe`` is added to the SPEC list for the M0 probe (R-LLM-013), whose cost is recorded
-    on the one-time account.
+    on the one-time account.  ``consistency`` is the weekly audit of the bot against itself
+    (R-EVAL-004): an offline call on the daily account, so that its few cents show up in
+    ``twin cost report`` under a name of their own and count against the monthly gate.
     """
 
     REPLY = "reply"
@@ -26,6 +28,7 @@ class Purpose(StrEnum):
     EVAL = "eval"
     TRAIN_PLAN = "train_plan"
     PROBE = "probe"
+    CONSISTENCY = "consistency"
 
 
 # purposes that run the model offline on the "offline_model" (R-LLM-001, SPEC deepseek.*)
@@ -37,6 +40,7 @@ OFFLINE_PURPOSES = frozenset(
         Purpose.STICKER_TAG,
         Purpose.EVAL,
         Purpose.TRAIN_PLAN,
+        Purpose.CONSISTENCY,
     }
 )
 # purposes that belong to the live conversation path
