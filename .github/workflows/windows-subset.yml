@@ -1,0 +1,43 @@
+name: windows-subset
+
+# Fast feedback for Windows-only failures: runs the tests listed in
+# ci/windows-subset.txt on windows-latest. It runs only when that file changes.
+on:
+  push:
+    paths:
+      - ci/windows-subset.txt
+
+concurrency:
+  group: windows-subset-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  subset:
+    name: subset (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install Python and dependencies
+        run: |
+          uv python install 3.12
+          uv sync --frozen
+
+      - name: Run the listed tests
+        run: |
+          mapfile -t selected < <(grep -v '^[[:space:]]*#' ci/windows-subset.txt | sed '/^[[:space:]]*$/d' | tr -d '\r')
+          if [ "${#selected[@]}" -eq 0 ]; then
+            echo "ci/windows-subset.txt lists no tests; nothing to run"
+            exit 0
+          fi
+          uv run pytest -q -m "not live" -p no:cacheprovider "${selected[@]}"
