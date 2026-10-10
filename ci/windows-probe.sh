@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Temporary probe (D-623): how often does life_sleep fail after life_one_day on Windows, and why?
+# Temporary probe (D-623): why does life_sleep fail after life_one_day on Windows with the real window?
 set -u
 export PYTHONPATH="$PWD/ci"
 L=tests/integration/life
-OPTS=(-q -p no:cacheprovider -m "not live" -rf --log-level=INFO)
-case "$PROBE_INDEX" in
-  0|1)  echo "== $PROBE_INDEX: life_one_day + life_sleep, real hidden window, 4 times"
-        for i in 1 2 3 4; do
-          echo "-- run $i"
-          uv run python -m pytest "${OPTS[@]}" $L/test_life_one_day.py $L/test_life_sleep.py 2>&1 | tail -n 400 | grep -a -v "^$" | tail -n 120
-        done ;;
-  2|3)  echo "== $PROBE_INDEX: life_one_day + life_sleep, no hidden window, 4 times"
-        for i in 1 2 3 4; do
-          echo "-- run $i"
-          uv run python -m pytest "${OPTS[@]}" -p probe_nowindow $L/test_life_one_day.py $L/test_life_sleep.py 2>&1 | tail -n 400 | grep -a -v "^$" | tail -n 120
-        done ;;
-esac
+OPTS=(-q -p no:cacheprovider -m "not live" -rf --tb=short --log-level=INFO
+      --log-format="%(asctime)s.%(msecs)03d %(levelname)s %(name)s %(message)s" --log-date-format="%H:%M:%S")
+for i in 1 2 3 4; do
+  echo "-- job $PROBE_INDEX run $i"
+  uv run python -m pytest "${OPTS[@]}" $L/test_life_one_day.py $L/test_life_sleep.py > "out-$i.txt" 2>&1
+  code=$?
+  tail -n 1 "out-$i.txt"
+  if [ "$code" -ne 0 ]; then
+    echo "=== FAILED RUN $i: the report"
+    n=$(grep -a -n "= FAILURES =" "out-$i.txt" | head -1 | cut -d: -f1)
+    tail -n +"${n:-1}" "out-$i.txt" | grep -a -v "httpx" | head -n 260
+  fi
+done
