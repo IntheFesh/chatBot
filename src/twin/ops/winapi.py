@@ -8,6 +8,8 @@ logic can be exercised on any platform with a test double, while
 
 from __future__ import annotations
 
+import itertools
+import os
 import sys
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -37,6 +39,21 @@ PROCESS_TERMINATE = 0x0001
 
 CtrlHandler = Callable[[int], bool]
 WindowHandler = Callable[[int, int, int], bool]
+
+_window_numbers = itertools.count(1)
+
+
+def next_window_class_name() -> str:
+    """A window class name no other window of this process has had (D-624).
+
+    A window class belongs to the process, not to the :class:`Win32` object that registered it, and
+    stays registered as long as its thread lives.  A name counted per object (``...-1`` for the
+    first window of *every* object) is taken again by the next object - a component started a
+    second time in one process, a test that simulates a crash by abandoning an application whose
+    window thread is still running - and ``RegisterClassW`` then fails with "class already
+    exists": no hidden window, no ``WM_POWERBROADCAST``.  The counter is of the process.
+    """
+    return f"wechat-twin-power-{os.getpid()}-{next(_window_numbers)}"
 
 
 class Win32(Protocol):
@@ -98,7 +115,6 @@ class Win32(Protocol):
 
 if sys.platform == "win32":  # pragma: win32-only
     import ctypes
-    import os
     from ctypes import wintypes
 
     class _WindowClass(ctypes.Structure):
@@ -190,7 +206,6 @@ if sys.platform == "win32":  # pragma: win32-only
             self._callbacks: dict[object, object] = {}  # keep ctypes callbacks alive
             self._u32: ctypes.WinDLL | None = None
             self._wndproc_type: Any = None
-            self._window_seq = 0
             self._classes: dict[int, str] = {}
 
         def create_mutex(self, name: str) -> tuple[int | None, int]:
@@ -286,8 +301,7 @@ if sys.platform == "win32":  # pragma: win32-only
 
         def create_message_window(self, on_message: WindowHandler) -> int | None:
             u32 = self._user32()
-            self._window_seq += 1
-            class_name = f"wechat-twin-power-{os.getpid()}-{self._window_seq}"
+            class_name = next_window_class_name()
             instance = self._k32.GetModuleHandleW(None)
 
             def procedure(hwnd: int, message: int, wparam: int, lparam: int) -> int:

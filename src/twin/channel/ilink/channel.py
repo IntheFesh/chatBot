@@ -227,6 +227,7 @@ class IlinkChannel(Channel):
         self._supervisor.spawn(
             "poll", lambda: self._poller.run(self._stop_event), restart_on_exit=True
         )
+        self._inbox_event.set()  # whatever the stopped poll committed is read, told or not (D-625)
         log.info("channel_reconnected")
 
     async def _notify(self, endpoint: str) -> None:

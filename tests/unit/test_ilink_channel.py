@@ -341,7 +341,10 @@ async def test_after_the_machine_slept_the_channel_connects_and_polls_afresh(
     await advance_until(h.clock, lambda: polls.call_count >= 1)
     old_client = h.channel._http.client
     seen = polls.call_count
+    h.channel._inbox_event.clear()  # nobody has announced anything to the consumer
     await h.channel.reconnect()
+    # whatever the stopped poll committed without announcing it is read now (D-625)
+    assert h.channel._inbox_event.is_set()
     assert started.call_count == 2  # the server is told that the bot is online again
     assert h.channel._http.client is not old_client
     assert old_client.is_closed

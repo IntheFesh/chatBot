@@ -18,6 +18,7 @@ to the start after one success.  Error -14 ends polling until the user logs in a
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 from collections import Counter
 from collections.abc import Callable
@@ -220,12 +221,32 @@ class IlinkPoller:
         )
         if messages:
             await self._collect(messages, credentials, batch)
-        if messages or batch.new_cursor:
+        await self._commit(batch, bool(messages))
+        return PollOutcome.MESSAGES if messages else PollOutcome.EMPTY
+
+    async def _commit(self, batch: BatchCommit, has_messages: bool) -> None:
+        """Steps 3 and 4: commit the batch, then wake the consumer - never one without the other.
+
+        The commit runs on a worker thread and lands even if the task that waits for it is
+        cancelled (the wake-up of the machine restarts the poll, ``IlinkChannel.reconnect``); the
+        wake-up call after it would then never run, and a message in the inbox that nobody is told
+        about waits for the next message or the next start (D-625).  So the two run as one unit
+        that a cancellation lets finish before it passes on.
+        """
+        unit = asyncio.ensure_future(self._commit_and_wake(batch, has_messages))
+        try:
+            await asyncio.shield(unit)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await unit
+            raise
+
+    async def _commit_and_wake(self, batch: BatchCommit, has_messages: bool) -> None:
+        if has_messages or batch.new_cursor:
             await asyncio.to_thread(self._store.commit_batch, batch)
         await asyncio.to_thread(self._store.record_poll_success)
         if batch.deliver and self._on_inbox is not None:
             self._on_inbox()
-        return PollOutcome.MESSAGES if messages else PollOutcome.EMPTY
 
     async def _collect(
         self, messages: list[Any], credentials: Credentials, batch: BatchCommit

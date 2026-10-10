@@ -88,6 +88,29 @@ def test_the_toast_is_shown_through_the_library_with_the_title_and_the_text(
     ]
 
 
+def test_the_cpp_runtime_is_loaded_before_the_toast_library_is_imported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``windows_toasts`` brings an old msvcp140.dll that ``torch`` cannot start with: the system
+    runtime has to be in the process first (D-621).  The library is only importable once the
+    preload has run, so a notifier that imported it first would fail here."""
+    order: list[str] = []
+    monkeypatch.setitem(sys.modules, "windows_toasts", None)  # an import now would fail
+
+    def preload() -> tuple[str, ...]:
+        order.append("preload")
+        module = types.ModuleType("windows_toasts")
+        module.WindowsToaster = FakeToaster  # type: ignore[attr-defined]
+        module.Toast = FakeToast  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "windows_toasts", module)
+        return ()
+
+    monkeypatch.setattr(notify_module, "preload_system_runtime", preload)
+    FakeToaster.created, FakeToaster.shown = [], []
+    WindowsToastNotifier().notify("t", "b")
+    assert order == ["preload"] and len(FakeToaster.shown) == 1
+
+
 def test_a_library_that_fails_or_is_missing_is_a_notify_error_with_a_code_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
