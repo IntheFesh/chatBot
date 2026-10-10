@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
@@ -257,6 +259,49 @@ async def test_incoming_waits_for_news_and_ends_when_the_channel_stops(
     finally:
         consumer.cancel()
     assert received == ["你好"]
+
+
+async def test_a_poll_cancelled_while_its_batch_is_committed_still_wakes_the_consumer(
+    api: respx.MockRouter, h: Harness, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Waking up from sleep restarts the poll (``IlinkChannel.reconnect``) and cancels the old one.
+    The commit is on a worker thread and lands even though the task that waits for it is cancelled;
+    what the cancelled task never got to do is wake the consumer, and a message in the inbox that
+    nobody is told about stays unanswered until the user writes again (D-625)."""
+    api.post(GET_UPDATES).respond(200, json=updates([hello(clock)], cursor="CURSOR-2"))
+    committing, release = threading.Event(), threading.Event()
+    original = h.store.commit_batch
+
+    def slow_commit(batch: Any) -> None:  # runs on the worker thread
+        committing.set()
+        assert release.wait(10)
+        original(batch)
+
+    monkeypatch.setattr(h.store, "commit_batch", slow_commit)
+    received: list[str] = []
+
+    async def consume() -> None:
+        async for incoming in h.channel.incoming():
+            received.append(incoming.text or "")
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.sleep(0.05)  # the consumer has found the inbox empty and waits
+        poll = asyncio.create_task(h.channel.poll_once())
+        assert await asyncio.to_thread(committing.wait, 10)  # the commit is on its way
+        poll.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poll
+        for _ in range(500):
+            if received:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        consumer.cancel()
+    assert received == ["你好"]
+    assert h.store.cursor() == "CURSOR-2"  # the commit itself had landed
 
 
 async def run_until_received(h: Harness, clock: ManualClock, received: list[str]) -> None:
