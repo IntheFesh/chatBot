@@ -34,9 +34,7 @@ def test_an_ordinary_day_is_shown_in_the_clock_times_of_its_zone() -> None:
     assert "睡眠·早晨：10-08 23:30 → 07:30（8小时00分；" in "\n".join(lines)
     assert "睡眠·夜晚：23:30 → 10-10 07:30（8小时00分；" in "\n".join(lines)
     assert any(line.startswith("  13:00 – 17:00  忙碌") for line in lines)  # her workday
-    assert any(
-        line.startswith("- 饭点：午饭 11:") or line.startswith("- 饭点：午饭 12:") for line in lines
-    )
+    assert any(line.startswith(("- 饭点：午饭 11:", "- 饭点：午饭 12:")) for line in lines)
     assert "- 状态时间线：" in lines and lines[-1].startswith("  ")
     assert not any(line.startswith("!!!") for line in lines)
     assert all(state in STATES.values() for state in ("深睡", "空闲")) and SOURCES

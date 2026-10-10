@@ -29,8 +29,8 @@ from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.memory.lifeline import SHARED_STEP, LifelineStore, PlannedEvent, shared_ids_of
 from twin.schedule.proactive.component import proactive_status_for
-from twin.schedule.proactive.status import ProactiveStatusSource
 from twin.schedule.proactive.settings import daily_range, is_enabled, is_paused
+from twin.schedule.proactive.status import ProactiveStatusSource
 from twin.schedule.proactive.store import RatingStore
 from twin.schedule.proactive.types import TriggerKind
 from twin.schedule.service import KIT_KEY

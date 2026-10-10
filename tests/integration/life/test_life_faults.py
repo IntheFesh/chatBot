@@ -93,7 +93,7 @@ async def test_the_model_down_ends_in_one_natural_answer_and_then_all_is_well(
     assert ("reply_failed", "warning") in world.alerts()
     assert not alerts_of(world, "engine_error")  # a failing model is not a failing engine
 
-    # ---- the model is back: the next message is answered as always ---------------------------------
+    # ---- the model is back: the next message is answered as always -------------------------------
     world.deepseek.failures.clear()
     await world.say("在吗")
     await world.run_until_idle()
@@ -157,7 +157,7 @@ async def test_a_generation_that_always_raises_ends_in_one_short_word_and_an_ale
     assert ("reply_failed", "warning") in world.alerts()
     assert world.out_rows()[0].backend == "fallback"
 
-    # ---- the fault is gone: the next message is answered ---------------------------------------------
+    # ---- the fault is gone: the next message is answered -----------------------------------------
     failing = False
     await world.say("在吗")
     await world.run_until_idle()
@@ -220,7 +220,7 @@ async def test_a_step_that_always_raises_gives_the_round_up_and_the_loop_lives_o
     assert world.persona_said == []  # nothing was said - and nothing about the trouble either
     assert world.idle() and world.assembly.engine.health().status.name == "OK"
 
-    # ---- the fault is gone: the next message is answered ---------------------------------------------
+    # ---- the fault is gone: the next message is answered -----------------------------------------
     failing = False
     await world.say("在吗")
     await world.run_until_idle()
@@ -252,7 +252,7 @@ async def test_the_planner_down_means_silence_and_the_schedule_goes_on(
     health = world.assembly.proactive.health()
     assert health.status.name == "OK"
 
-    # ---- the model is back: what the day still holds is sent ----------------------------------------
+    # ---- the model is back: what the day still holds is sent -------------------------------------
     world.deepseek.failures.clear()
     await world.run_until(world.local(21, 0))
     assert world.proactive_rows(outcomes=["sent"]), "she never wrote again after the model was back"
