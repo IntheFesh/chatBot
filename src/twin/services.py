@@ -112,6 +112,7 @@ class CliContext:
     log_level: str = "INFO"
     secrets: SecretStore | None = None  # injected by tests; otherwise the default store
     http_transport: httpx.BaseTransport | None = None  # injected by tests; network checks only
+    clock: Clock | None = None  # injected by tests; otherwise the system clock
     _settings: Settings | None = field(default=None, repr=False)
     _services: Services | None = field(default=None, repr=False)
 
@@ -131,7 +132,10 @@ class CliContext:
     def services(self) -> Services:
         if self._services is None:
             self._services = build_services(
-                self.settings(), root=self.paths().root, secrets=self.secret_store()
+                self.settings(),
+                root=self.paths().root,
+                secrets=self.secret_store(),
+                clock=self.clock,
             )
         return self._services
 

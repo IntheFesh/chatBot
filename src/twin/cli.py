@@ -132,6 +132,7 @@ def main(
             log_level=log_level,
             secrets=previous.secrets,
             http_transport=previous.http_transport,
+            clock=previous.clock,
         )
     )
 

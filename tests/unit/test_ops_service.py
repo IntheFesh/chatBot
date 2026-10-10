@@ -56,7 +56,7 @@ from twin.ops.taskscheduler import (
     decode_output,
     parse_task_xml,
 )
-from twin.services import CliContext, Services, set_cli_context
+from twin.services import CliContext, Services, get_cli_context, set_cli_context
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "ops" / "task.xml"
 SPEC = TaskSpec(
@@ -460,7 +460,12 @@ def home(services: Services, secret_store: SecretStore) -> Services:
 
 def twin(home: Services, *args: str) -> tuple[int, str]:
     options = ["--set", f"paths.data_dir={home.paths.data_dir}"]
-    result = runner.invoke(app, [*options, *args])
+    context = get_cli_context()
+    previous_clock, context.clock = context.clock, home.clock  # the command reads the test's time
+    try:
+        result = runner.invoke(app, [*options, *args])
+    finally:
+        get_cli_context().clock = previous_clock
     return result.exit_code, result.output
 
 
