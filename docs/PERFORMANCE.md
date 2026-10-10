@@ -150,7 +150,7 @@ uv run python scripts/soak.py --days 28 --accelerated        # 需要 26 天以�
 
 ## 5. 测试、覆盖率与网络守卫（R-NFR-004、R-NFR-005，第 16 轮 A）
 
-**覆盖率**（`src/twin` 的行覆盖率，沙箱，2026-10-10）。整套测试分三片并发运行（一个进程跑完约 1 小时，三片并发每片约 20 分钟），各片写自己的覆盖率数据，合并后交给门槛脚本：
+**覆盖率**（`src/twin` 的行覆盖率，沙箱，2026-10-10）。整套测试分三片并发运行（每片约 20 分钟，三片同时跑），各片写自己的覆盖率数据，合并后交给门槛脚本（6,417 个测试通过，21 个跳过；`live` 标记的 5 个没有选中）：
 
 ```
 # 三个终端（或后台）各跑一片：
@@ -167,23 +167,23 @@ uv run coverage combine cov.1 cov.2 cov.3 && uv run coverage json && uv run pyth
 | channel | 99.7 % | 4,281 / 4,296 | 通过 |
 | commands | 98.5 % | 1,485 / 1,508 | 通过 |
 | config | 99.1 % | 1,027 / 1,036 | 通过 |
-| engine | 98.6 % | 4,393 / 4,454 | 通过 |
+| engine | 98.6 % | 4,392 / 4,454 | 通过 |
 | eval | 98.6 % | 2,691 / 2,728 | 通过 |
 | ingest | 95.7 % | 2,770 / 2,894 | 通过 |
 | learning | 97.5 % | 658 / 675 | 通过 |
 | llm | 99.8 % | 2,786 / 2,792 | 通过 |
 | memory | 98.7 % | 3,836 / 3,886 | 通过 |
-| ops | 97.9 % | 5,691 / 5,814 | 通过 |
+| ops | 97.9 % | 5,692 / 5,814 | 通过 |
 | profile | 98.7 % | 4,335 / 4,391 | 通过 |
 | retrieval | 97.7 % | 1,462 / 1,497 | 通过 |
 | schedule | 97.8 % | 3,357 / 3,434 | 通过 |
-| serving | 96.2 % | 2,093 / 2,176 | 通过 |
+| serving | 96.2 % | 2,094 / 2,176 | 通过 |
 | stickers | 98.0 % | 1,480 / 1,510 | 通过 |
 | storage | 99.0 % | 2,509 / 2,534 | 通过 |
 | training | 95.3 % | 3,641 / 3,820 | 通过 |
-| **合计** | **98.1 %** | **49,057 / 50,013** | 门槛 85 %，通过 |
+| **合计** | **98.1 %** | **49,058 / 50,013** | 门槛 85 %，通过 |
 
-没有覆盖到的行分散在错误处理分支里，最多的三个模块是 `training/parity_check.py`（52 行，78.8 %）、`engine/machine.py`（35 行，96.2 %）、`ingest/importer.py`（32 行，91.9 %）。只在 Windows 上执行的分支沙箱里无法跑，列在 `docs/PENDING_USER_ACTIONS.md`。`live` 标记的测试（真实 DeepSeek、真实 llama-server 等）不在这个数字里。
+没有覆盖到的行分散在错误处理分支里，最多的三个模块是 `training/parity_check.py`（52 行，78.8 %）、`engine/machine.py`（36 行，96.0 %）、`ingest/importer.py`（32 行，91.9 %）。只在 Windows 上执行的分支沙箱里无法跑，列在 `docs/PENDING_USER_ACTIONS.md`。`live` 标记的测试（真实 DeepSeek、真实 llama-server 等）不在这个数字里。
 
 **其他质量检查**：`ruff format --check .` 与 `ruff check .` 通过；`mypy src/twin` 与 `mypy --platform win32 src/twin`（469 个文件）通过；`scripts/trace_check.py`、`scripts/privacy_scan.py` 通过。
 
