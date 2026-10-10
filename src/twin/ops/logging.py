@@ -11,9 +11,9 @@ The rule: **message content never appears in INFO-or-above logs.**  Callers use
 :func:`twin.llm.redaction.redact_text` at DEBUG.  Exceptions are logged as type plus a
 redacted, truncated message and bare stack locations, never with local values.
 
-Files: ``<logs_dir>/twin.log`` for the application and ``twin-cli.log`` for CLI
-invocations (separate files so two processes never rotate the same file), each
-10 MB x 10 rotated copies, one JSON object per line.
+Files: ``<logs_dir>/twin.log`` for the application, ``twin-supervise.log`` for the supervisor
+(``twin supervise``) and ``twin-cli.log`` for CLI invocations (separate files so two processes
+never rotate the same file), each 10 MB x 10 rotated copies, one JSON object per line.
 """
 
 from __future__ import annotations
@@ -181,7 +181,8 @@ class ConsoleFormatter(logging.Formatter):
         return line
 
 
-Role = Literal["run", "cli"]
+Role = Literal["run", "cli", "supervise"]
+_LOG_FILES = {"run": "twin.log", "cli": "twin-cli.log", "supervise": "twin-supervise.log"}
 
 
 def configure_logging(
@@ -203,7 +204,7 @@ def configure_logging(
     log_path: Path | None = None
     if logs_dir is not None:
         logs_dir.mkdir(parents=True, exist_ok=True)
-        log_path = logs_dir / ("twin.log" if role == "run" else "twin-cli.log")
+        log_path = logs_dir / _LOG_FILES[role]
     numeric = level if isinstance(level, int) else logging.getLevelName(level.upper())
     if not isinstance(numeric, int):
         raise ValueError(f"unknown log level {level!r}")

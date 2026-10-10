@@ -25,7 +25,7 @@ from twin.channel.binding import confirm_binding, mask_user_id
 from twin.channel.console import Prompter
 from twin.channel.ilink.channel import IlinkChannel
 from twin.channel.ilink.http import IlinkHttp
-from twin.channel.ilink.login import IlinkLogin, LoginError
+from twin.channel.ilink.login import IlinkLogin, LoginError, LoginResult, LoginUI
 from twin.channel.ilink.qr import open_in_viewer, remove_old_pngs, render_terminal, save_png
 from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.state import ChannelStateStore
@@ -77,6 +77,41 @@ class LoginOutcome:
     bound: bool
 
 
+async def login_with_ui(
+    services: Services, ui: LoginUI, *, http_client: httpx.AsyncClient | None = None
+) -> LoginResult:
+    """Scan-to-login with ``ui`` and store the credentials (the shared core of every login).
+
+    The account that scanned must be the bound one, if there is one: otherwise nothing is saved
+    and :class:`LoginError` says so.  ``twin channel login`` and the recovery window of the
+    running application (:mod:`twin.ops.login_recovery`) both come through here.
+    """
+    store = IlinkStore(ChannelStateStore(services.db), services.clock)
+    http = IlinkHttp(http_client)
+    try:
+        result = await IlinkLogin(http, services.clock, ui).run()
+    finally:
+        await http.aclose()
+    bound = await asyncio.to_thread(store.bound_user)
+    if bound and result.ilink_user_id and result.ilink_user_id != bound.user_id:
+        raise LoginError(
+            f"the account that scanned ({mask_user_id(result.ilink_user_id)}) is not the "
+            f"bound account ({mask_user_id(bound.user_id)}); nothing was changed. "
+            "Run `twin channel unbind` first if you really want to switch accounts."
+        )
+    await asyncio.to_thread(
+        store.save_credentials,
+        Credentials(
+            bot_token=result.bot_token,
+            ilink_bot_id=result.ilink_bot_id,
+            ilink_user_id=result.ilink_user_id,
+            api_base_url=result.api_base_url,
+            saved_at=services.clock.now_utc().isoformat(),
+        ),
+    )
+    return result
+
+
 async def run_login(
     services: Services,
     prompter: Prompter,
@@ -93,29 +128,10 @@ async def run_login(
     logged_in_now = False
     if credentials is None or auth.state is not AuthState.OK or force:
         ui = ConsoleLoginUI(prompter, services.paths.tmp_dir, open_viewer=open_viewer)
-        http = IlinkHttp(http_client)
         try:
-            result = await IlinkLogin(http, services.clock, ui).run()
+            await login_with_ui(services, ui, http_client=http_client)
         finally:
-            await http.aclose()
             ui.cleanup()
-        bound = await asyncio.to_thread(store.bound_user)
-        if bound and result.ilink_user_id and result.ilink_user_id != bound.user_id:
-            raise LoginError(
-                f"the account that scanned ({mask_user_id(result.ilink_user_id)}) is not the "
-                f"bound account ({mask_user_id(bound.user_id)}); nothing was changed. "
-                "Run `twin channel unbind` first if you really want to switch accounts."
-            )
-        await asyncio.to_thread(
-            store.save_credentials,
-            Credentials(
-                bot_token=result.bot_token,
-                ilink_bot_id=result.ilink_bot_id,
-                ilink_user_id=result.ilink_user_id,
-                api_base_url=result.api_base_url,
-                saved_at=services.clock.now_utc().isoformat(),
-            ),
-        )
         logged_in_now = True
         prompter.say("Logged in. The credentials are stored encrypted.")
     else:

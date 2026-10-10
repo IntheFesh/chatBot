@@ -24,7 +24,7 @@ from twin.app import (
     ShutdownSignals,
     TaskSupervisor,
 )
-from twin.ops.alerts import DbAlertSink
+from twin.ops.alerts import AlertService
 from twin.ops.winapi import (
     CTRL_BREAK_EVENT,
     CTRL_C_EVENT,
@@ -171,7 +171,7 @@ async def test_run_waits_for_the_stop_event_then_shuts_down() -> None:
 async def test_a_crashing_task_is_restarted_with_exponential_backoff_and_alerts(
     db: Database, clock: ManualClock
 ) -> None:
-    alerts = DbAlertSink(db, clock)
+    alerts = AlertService(db, clock)
     supervisor = TaskSupervisor("demo", clock, alerts, backoff_base_s=1, backoff_cap_s=60)
     attempts: list[int] = []
     healthy = asyncio.Event()

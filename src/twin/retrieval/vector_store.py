@@ -151,6 +151,15 @@ class VectorTable:
         """Every stored row as a dictionary (for checks and repairs; large tables are big)."""
         return list(self._open().to_arrow().to_pylist()) if self.exists() else []
 
+    def ids(self) -> list[str]:
+        """The source ids of every stored row (only the id column is read, R-OPS-003)."""
+        if not self.exists():
+            return []
+        table = self._open()
+        size = max(int(table.count_rows()), 1)
+        found = table.search().select([self._schema.id_column]).limit(size).to_arrow()
+        return [str(value) for value in found.column(self._schema.id_column).to_pylist()]
+
     # ----------------------------------------------------------------- writing
 
     def create(self, dimension: int) -> None:

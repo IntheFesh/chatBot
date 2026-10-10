@@ -376,7 +376,7 @@ async def test_a_crisis_is_answered_out_of_the_role_with_the_help_line_and_an_al
     assert first.backend == "safety"
     with world.services.db.session() as session:
         alerts = [(a.category, a.severity) for a in session.scalars(select(Alert))]
-    assert ("crisis", "critical") in alerts
+    assert ("crisis_detected", "critical") in alerts
 
 
 async def test_an_ordinary_conversation_logs_no_words_of_it(

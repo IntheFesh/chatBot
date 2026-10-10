@@ -13,6 +13,7 @@ backups) until a later round's backup policy deletes them.
 from __future__ import annotations
 
 import binascii
+from collections.abc import Iterable
 from typing import Any
 
 import orjson
@@ -102,12 +103,37 @@ class KeyStore:
             ring.retire(key_id)
         self._write_index_from(ring)
 
+    def delete_retired(self, ring: KeyRing, key_ids: Iterable[int]) -> list[int]:
+        """Delete retired keys from the credential store (R-STO-003).
+
+        Only for keys nothing needs any more: the caller (the backup retention) has checked that
+        no kept backup and no live value depends on them.  The key index is rewritten first, so
+        a credential that cannot be deleted is left behind unlisted instead of listed and gone.
+        """
+        wanted = sorted(set(key_ids))
+        for key_id in wanted:
+            if key_id not in ring.retired_ids:
+                raise KeyStoreError(f"key {key_id} is not retired; only retired keys are deleted")
+        for key_id in wanted:
+            ring.forget(key_id)
+        self._write_index_from(ring)
+        for key_id in wanted:
+            self._secrets.delete(key_secret_name(key_id))
+        return wanted
+
     def delete_all(self) -> int:
-        """Delete every database key credential (used by the purge command)."""
+        """Delete every database key credential (used by the purge command).
+
+        Also when the key index is damaged: the credentials ``db-key-1`` to ``db-key-99`` are then
+        deleted by name, so that a purge never leaves a usable key behind.
+        """
+        try:
+            ids = list(self._read_index()["ids"]) if self.exists() else []
+        except KeyStoreError:
+            ids = list(range(1, 100))
         deleted = 0
-        if self.exists():
-            for key_id in self._read_index()["ids"]:
-                deleted += int(self._secrets.delete(key_secret_name(key_id)))
+        for key_id in ids:
+            deleted += int(self._secrets.delete(key_secret_name(key_id)))
         self._secrets.delete(INDEX_NAME)
         return deleted
 

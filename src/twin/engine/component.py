@@ -74,6 +74,7 @@ from twin.memory.memory import Memory
 from twin.memory.recent import BotMessage, HistoryWindow
 from twin.ops.logging import get_logger
 from twin.ops.state_watch import StateWatcher
+from twin.ops.wiring import build_emergency_notifier
 from twin.profile.api import load_profile
 from twin.schedule.component import ScheduleComponent
 from twin.schedule.events import Resumed
@@ -158,6 +159,7 @@ def build_engine(
     """
     services.secrets.require(DEEPSEEK_SECRET)
     settings = services.settings
+    notifier = notifier or build_emergency_notifier(services)  # R-SAFE-001: the one fixed mail
     llm = runtime or build_llm_runtime(services)
     styled = style or StyleRuntime.from_services(services, llm)
     llm.budget.set_style_status(styled.selector)  # R-LLM-008: the last level hands over to it
@@ -260,6 +262,11 @@ class EngineComponent:
         self._restart = restart_dispatch
         self._supervisor = TaskSupervisor(self.name, services.clock, services.alerts)
         self.handled = 0
+
+    @property
+    def style(self) -> StyleRuntime | None:
+        """The style model's runtime (the health check asks its selector)."""
+        return self._style
 
     @property
     def router(self) -> CommandRouter | None:

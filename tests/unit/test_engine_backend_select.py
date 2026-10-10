@@ -146,7 +146,7 @@ async def test_without_a_usable_model_the_replies_go_to_deepseek_and_an_alert_sa
     choice = await selector_for(services, ScriptedStyleClient()).choose()
     assert choice.name == "deepseek" and choice.requested == "style" and choice.fell_back
     assert choice.reason == f"fallback:{code}"
-    assert alerts(services) == [("style_fallback", "warning")]
+    assert alerts(services) == [("style_model_down", "warning")]
     assert services.runtime.get(BACKEND_ACTIVE) == "style"  # the user's choice is untouched
 
 
@@ -165,7 +165,7 @@ async def test_a_server_that_does_not_answer_is_a_fallback_with_a_full_record(
     history = services.runtime.history(BACKEND_FALLBACK)  # the audit trail of every switch
     assert [(h.by, h.old, bool(h.new)) for h in history if not h.created] == [("auto", None, True)]
     again = await selector.choose()  # a second reply does not raise a second alert
-    assert again.name == "deepseek" and alerts(services) == [("style_fallback", "warning")]
+    assert again.name == "deepseek" and alerts(services) == [("style_model_down", "warning")]
 
 
 async def test_a_style_server_that_fails_while_answering_is_a_fallback_at_once(
@@ -180,7 +180,7 @@ async def test_a_style_server_that_fails_while_answering_is_a_fallback_at_once(
     )
     selector.record("style", failed)
     assert (await selector.choose()).reason == "fallback:error"
-    assert alerts(services) == [("style_fallback", "warning")]
+    assert alerts(services) == [("style_model_down", "warning")]
 
 
 async def test_a_failing_planner_is_not_the_style_model_failing(services: Services) -> None:
@@ -211,7 +211,7 @@ async def test_hard_violations_in_a_row_cause_a_fallback_and_a_good_reply_starts
     selector.record("style", two_bad)  # four in a row now
     choice = await selector.choose()
     assert choice.name == "deepseek" and choice.reason == "fallback:violations"
-    assert alerts(services) == [("style_fallback", "warning")]
+    assert alerts(services) == [("style_model_down", "warning")]
 
 
 async def test_a_reply_that_the_style_model_got_right_on_its_second_try_resets_the_count(
@@ -259,7 +259,7 @@ async def test_ten_healthy_minutes_bring_the_style_model_back_and_say_so(
     choice = await selector.choose()
     assert choice.name == "style" and not choice.fell_back
     assert services.runtime.get(BACKEND_FALLBACK) is None
-    assert alerts(services) == [("style_fallback", "warning"), ("style_recovered", "info")]
+    assert alerts(services) == [("style_model_down", "warning"), ("style_model_down", "info")]
     changes = [(h.by, bool(h.new)) for h in services.runtime.history(BACKEND_FALLBACK)]
     assert changes[-2:] == [("auto", True), ("auto", False)]  # switched away, switched back
 
@@ -312,7 +312,7 @@ async def test_choosing_deepseek_ends_a_fallback_without_a_notice(services: Serv
     selector.note_user_choice()
     assert services.runtime.get(BACKEND_FALLBACK) is None
     assert (await selector.choose()).name == "deepseek"
-    assert alerts(services) == [("style_fallback", "warning")]  # no "recovered" for a choice
+    assert alerts(services) == [("style_model_down", "warning")]  # no "recovered" for a choice
 
 
 # ---------------------------------------------------------- the budget and the gate
@@ -436,7 +436,7 @@ async def test_the_monitor_looks_at_the_model_while_nobody_is_talking(
         client.healthy = False
         await clock.advance(31)
         await wait_until(lambda: services.runtime.get(BACKEND_FALLBACK) is not None)
-        assert alerts(services) == [("style_fallback", "warning")]
+        assert alerts(services) == [("style_model_down", "warning")]
         assert monitor.health().status is HealthStatus.DEGRADED
         client.healthy = True
         # eleven minutes in the monitor's own steps: after each, the monitor has looked at the

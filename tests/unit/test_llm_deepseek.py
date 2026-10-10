@@ -47,6 +47,7 @@ from twin.llm.errors import (
     StructuredOutputError,
     UnknownModelError,
 )
+from twin.llm.health import LlmHealth
 from twin.llm.images import ImageInput
 from twin.llm.layout import CacheMonitor, PromptLayout
 from twin.llm.ledger import LedgerRecord, LedgerStore
@@ -86,6 +87,7 @@ class Rig:
         batches: Any = None,
         failure_threshold: int = 10,
         deadline_slack_s: float = 5.0,
+        health: LlmHealth | None = None,
     ) -> None:
         clock.set_time(FRIDAY_PEAK)
         self.db = db
@@ -130,6 +132,7 @@ class Rig:
             rng=random.Random(7),
             save_calibration=lambda est: self.saved.append(est.factor),
             deadline_slack_s=deadline_slack_s,
+            health=health,
         )
 
     def read_key(self) -> str:
@@ -816,6 +819,26 @@ async def test_the_circuit_opens_after_ten_failures_and_probes_after_five_minute
     mock(api, ok(content="back"))
     result = await rig.client.chat([user("x")], purpose="reply")
     assert result.content == "back" and rig.breaker.state is BreakerState.CLOSED
+
+
+async def test_every_attempt_and_the_state_of_the_breaker_reach_the_health_record(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    health = LlmHealth(clock)
+    rig = Rig(db, clock, retry=RetryPolicy(max_retries=0), failure_threshold=3, health=health)
+    mock(api, ok(content="fine"), error(500), error(500), error(500))
+    await rig.client.chat([user("x")], purpose="reply")
+    assert (health.snapshot(900).calls, health.snapshot(900).failures) == (1, 0)
+    for _ in range(3):
+        with pytest.raises(RetriesExhaustedError):
+            await rig.client.chat([user("x")], purpose="reply")
+    snapshot = health.snapshot(900)
+    assert (snapshot.calls, snapshot.failures, snapshot.circuit_open) == (4, 3, True)
+    assert snapshot.error_rate == 0.75
+    clock.tick(301)
+    mock(api, ok(content="back"))
+    await rig.client.chat([user("x")], purpose="reply")  # the probe works: the breaker closes
+    assert not health.snapshot(900).circuit_open and health.snapshot(900).calls == 5
 
 
 async def test_client_errors_do_not_trip_the_breaker(

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from twin.llm.budget import BudgetManager, StyleBackendStatus
 from twin.llm.capabilities import CapabilityStore, LlmCapabilities
 from twin.llm.deepseek import DeepSeekClient
+from twin.llm.health import llm_health_of
 from twin.llm.layout import CacheMonitor
 from twin.llm.ledger import LedgerStore
 from twin.llm.onetime import OneTimeBatches
@@ -126,6 +127,7 @@ def build_llm_runtime(services: Services, *, style: StyleBackendStatus | None = 
         budget=budget,
         batches=batches,
         save_calibration=save_calibration,
+        health=llm_health_of(services),
     )
     return LlmRuntime(
         pricing=pricing,

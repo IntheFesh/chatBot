@@ -233,6 +233,20 @@ class LedgerStore:
         groups = self._grouped(start, end, lambda row: "total", account=account, purpose=purpose)
         return groups[0] if groups else _empty("total")
 
+    def by_peak(
+        self, start: datetime, end: datetime, *, account: str | None = "daily"
+    ) -> dict[str, SpendSummary]:
+        """Spending at peak prices (key ``peak``) and at off-peak prices (``offpeak``)."""
+        groups: dict[str, SpendSummary] = {
+            "peak": _empty("peak"),
+            "offpeak": _empty("offpeak"),
+        }
+        with self._db.session() as session:
+            for row in self._rows(session, start, end, account=account):
+                key = "peak" if row.peak else "offpeak"
+                groups[key] = _add(groups[key], row)
+        return groups
+
     def cache_hit_ratio(
         self, start: datetime, end: datetime, *, purpose: str | None = None
     ) -> float:

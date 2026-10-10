@@ -415,6 +415,35 @@ async def test_a_read_timeout_is_a_quiet_empty_result(api: respx.MockRouter, h: 
     assert h.alerts.alerts == []
 
 
+async def test_a_poll_that_waited_out_its_time_is_a_working_connection(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    """R-OPS-003: a quiet long poll must keep the "last successful poll" fresh."""
+    api.post(GET_UPDATES).mock(side_effect=httpx.ReadTimeout("nothing to say"))
+    assert h.store.poll_status().last_ok_at is None
+    assert await h.channel.poll_once() is PollOutcome.TIMEOUT
+    assert h.store.poll_status().last_ok_at == h.clock.now_utc()
+
+
+async def test_the_success_time_is_written_at_most_once_a_minute_and_at_once_after_failures(
+    api: respx.MockRouter, h: Harness, clock: ManualClock
+) -> None:
+    h.store.record_poll_success()
+    first = h.store.poll_status().last_ok_at
+    assert first == clock.now_utc()
+    clock.tick(30)
+    h.store.record_poll_success()
+    assert h.store.poll_status().last_ok_at == first  # too soon: nothing is written
+    clock.tick(31)
+    h.store.record_poll_success()
+    assert h.store.poll_status().last_ok_at == clock.now_utc()  # a minute has passed
+    h.store.record_poll_failure("network", None, "down")
+    clock.tick(1)
+    h.store.record_poll_success()  # recovering from a failure is written at once
+    status = h.store.poll_status()
+    assert status.last_ok_at == clock.now_utc() and status.consecutive_failures == 0
+
+
 @pytest.mark.parametrize(
     "failure",
     [

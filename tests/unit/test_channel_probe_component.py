@@ -297,14 +297,18 @@ async def test_twin_run_adds_the_probe_next_to_the_channel(
     monkeypatch.setattr(Application, "run", record)
     await _serve(services)
     assert seen == [
+        "alert_delivery",  # toast and mail for the alerts (round 12)
         "backend_monitor",  # the style model's health, looked at while nobody talks (round 09)
         "channel",
         "channel_probe",
         "engine",
+        "health_monitor",  # the minute-by-minute health snapshots (round 12)
         "heartbeat",
         "import_report",  # says how an import started from the chat ended (round 11)
         "job_worker",
         "learning",  # queues the weekly consolidation of the correction rules (round 11)
+        "login_recovery",  # the QR window when the login is lost (round 12)
+        "ops_scheduler",  # the daily backup and the monthly cost report (round 12)
         "power_events",
         "schedule",
         "state_watcher",

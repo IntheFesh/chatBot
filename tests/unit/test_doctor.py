@@ -61,10 +61,14 @@ def test_all_checks_pass_on_a_healthy_setup(tmp_path: Path) -> None:
         "ilink-api",
         "ilink-cdn",
         "vector-model",
+        "deepseek-net",
+        "gpu",
+        "scheduled-task",
+        "power-plan",
     }
     # these depend on the day (does the holiday library know next year?), on a key the user has
     # not stored yet and on the network (the test network is offline); they warn but never fail
-    advisory = {"holiday-calendar", "deepseek-key", "ilink-api", "ilink-cdn"}
+    advisory = {"holiday-calendar", "deepseek-key", "deepseek-net", "ilink-api", "ilink-cdn"}
     assert all(r.status is CheckStatus.OK for r in results if r.name not in advisory), [
         r for r in results if r.status is not CheckStatus.OK
     ]

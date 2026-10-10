@@ -16,6 +16,8 @@
 ``gate``
     the milestone verdict ``M0`` to ``M5`` (exit code 0 passed, 1 not passed, 2 not reached yet);
     ``--check`` only reads the last stored verdict.
+``stability``
+    the stability report of the last days (round 12, R-EVAL-006), kept as a ``stability`` run.
 ``runs``
     the recent evaluation runs.
 
@@ -370,10 +372,27 @@ def eval_gate(
 # ------------------------------------------------------------------------- runs
 
 
+@eval_app.command("stability")
+@command(CommandKind.LIGHT)
+def eval_stability(
+    days: Annotated[float, typer.Option("--days", min=0.01, help="Window in days")] = 7.0,
+) -> None:
+    """The stability report of the last days, from the health snapshots (R-EVAL-006)."""
+    from twin.ops.stability import render_lines, run_stability
+
+    services = _services()
+    report, run = run_stability(services, days)
+    for line in render_lines(report):
+        typer.echo(line)
+    typer.echo(f"saved as evaluation run {run.id}; `twin eval gate M4` reads it")
+
+
 @eval_app.command("runs")
 @command(CommandKind.READ)
 def eval_runs(
-    kind: Annotated[str | None, typer.Option("--kind", help="blind, memory, style or gate")] = None,
+    kind: Annotated[
+        str | None, typer.Option("--kind", help="blind, memory, style, gate or stability")
+    ] = None,
     limit: Annotated[int, typer.Option("--limit", min=1, help="How many to list")] = 20,
 ) -> None:
     """List the recent evaluation runs."""

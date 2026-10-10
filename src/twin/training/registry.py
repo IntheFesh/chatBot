@@ -261,6 +261,42 @@ def get_model(db: Database, model_id: str) -> ModelView:
         return _view(row)
 
 
+def find_model(db: Database, reference: str) -> ModelView:
+    """A model from its id, the start of its id, or its run id (when that names one model)."""
+    models = list_models(db)
+    exact = [m for m in models if m.id == reference]
+    found = exact or [m for m in models if m.id.startswith(reference) or m.run_id == reference]
+    if not found:
+        raise RegistryError(f"no model {reference!r} in the registry; see `twin model list`")
+    if len(found) > 1:
+        names = ", ".join(m.id for m in found[:6])
+        raise RegistryError(f"{reference!r} names {len(found)} models ({names}); use a full id")
+    return found[0]
+
+
+def rollback_model(db: Database, reference: str) -> tuple[ModelView | None, ModelView]:
+    """Make an older registered model the one in use (``twin rollback style-model``, R-OPS-010).
+
+    Of each file kind (a GGUF, a LoRA adapter) one model is active; the chosen one becomes the
+    active one of its kind and is enabled.  ``gate_passed`` stays as it was: going back to a model
+    never turns a model that did not pass the release gate into one that did (R-SRV-005).
+    Returns ``(the model that was active, the model that is)``.
+    """
+    chosen = find_model(db, reference)
+    with db.transaction() as session:
+        rows = list(
+            session.scalars(
+                select(ModelRegistryEntry).where(ModelRegistryEntry.kind == chosen.kind)
+            )
+        )
+        previous = next((_view(row) for row in rows if row.active), None)
+        for row in rows:
+            row.active = row.id == chosen.id
+            if row.id == chosen.id:
+                row.enabled = True
+    return previous, get_model(db, chosen.id)
+
+
 def resolve_model_path(models_dir: Path, view: ModelView) -> Path:
     """The file of a registered model (stored relative to the models directory when inside it)."""
     stored = Path(view.path)

@@ -112,6 +112,34 @@ def test_delete_all_removes_every_key_credential(
     assert keystore.delete_all() == 0
 
 
+def test_retired_keys_can_be_deleted_for_good_but_only_retired_ones(
+    keystore: KeyStore, credentials: SecretStore
+) -> None:
+    ring = keystore.create_initial()
+    keystore.add_key(ring)
+    with pytest.raises(KeyStoreError, match="not retired"):
+        keystore.delete_retired(ring, [1])  # still in use for decryption
+    with pytest.raises(KeyStoreError, match="not retired"):
+        keystore.delete_retired(ring, [2])  # the current key is never deleted
+    keystore.retire(ring, [1])
+    assert keystore.delete_retired(ring, [1, 1]) == [1]
+    assert not credentials.exists(key_secret_name(1)) and credentials.exists(key_secret_name(2))
+    reloaded = keystore.load()
+    assert reloaded.key_ids == (2,) and reloaded.retired_ids == frozenset() and ring.key_ids == (2,)
+    assert keystore.delete_retired(ring, []) == []
+
+
+def test_delete_all_also_works_when_the_key_index_is_damaged(
+    keystore: KeyStore, credentials: SecretStore
+) -> None:
+    ring = keystore.create_initial()
+    keystore.add_key(ring)
+    credentials.set(INDEX_NAME, "{not json")
+    assert keystore.delete_all() == 2  # the keys are found by their names
+    assert not credentials.exists(key_secret_name(1)) and not credentials.exists(key_secret_name(2))
+    assert not credentials.exists(INDEX_NAME)
+
+
 # ------------------------------------------------------------------ rotation
 
 

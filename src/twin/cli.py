@@ -21,19 +21,29 @@ from twin.config.cli import config_app, secrets_app, settings_app
 from twin.config.loader import ConfigError, parse_overrides
 from twin.config.mask import masked_settings
 from twin.config.settings import ConfigFileError
-from twin.engine.component import register_engine
+from twin.engine.component import EngineComponent, register_engine
 from twin.eval.cli import eval_app
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
 from twin.memory.cli import memory_app
+from twin.ops.backup.cli import backup_app
 from twin.ops.cli import jobs_app
 from twin.ops.components import build_application
 from twin.ops.console import ensure_utf8
+from twin.ops.cost_cli import cost_app
 from twin.ops.doctor import CheckStatus, DoctorContext, exit_code, run_checks
+from twin.ops.drill import ops_app
+from twin.ops.health_cli import health_command
 from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR
+from twin.ops.jobobject import ProcessJob
 from twin.ops.logging import configure_logging, get_logger, shutdown_logging
 from twin.ops.power import default_power_manager
 from twin.ops.process_model import CliError, CommandKind, command
+from twin.ops.purge_cli import purge_command
+from twin.ops.rollback_cli import rollback_app
+from twin.ops.service_cli import service_app, supervise_command
+from twin.ops.setup_cli import setup_command
+from twin.ops.wiring import register_ops
 from twin.profile.cli import profile_app, routine_app
 from twin.profile.persona.cli import persona_app
 from twin.retrieval.cli import retrieval_app
@@ -72,6 +82,15 @@ app.add_typer(plan_app, name="plan")
 app.add_typer(train_app, name="train")
 app.add_typer(model_app, name="model")
 app.add_typer(eval_app, name="eval")
+app.command("supervise")(supervise_command)
+app.add_typer(service_app, name="service")
+app.command("setup")(setup_command)
+app.command("health")(health_command)
+app.add_typer(cost_app, name="cost")
+app.add_typer(backup_app, name="backup")
+app.command("purge")(purge_command)
+app.add_typer(rollback_app, name="rollback")
+app.add_typer(ops_app, name="ops")
 
 log = get_logger("twin.cli")
 
@@ -135,8 +154,9 @@ async def _serve(services: Services) -> None:
         watcher,
         reconnect=channel_component.reconnect if channel_component is not None else None,
     )
+    engine_component: EngineComponent
     if channel_component is not None:  # channel.kind "ilink": the user's WeChat conversation
-        register_engine(
+        engine_component = register_engine(
             application,
             services,
             channel_component.channel,
@@ -149,7 +169,7 @@ async def _serve(services: Services) -> None:
             services, input=StreamInput(sys.stdin), output=StreamOutput(sys.stdout)
         )
         application.register(LocalChannelComponent(console))
-        register_engine(
+        engine_component = register_engine(
             application,
             services,
             console,
@@ -159,6 +179,13 @@ async def _serve(services: Services) -> None:
             restart_dispatch=False,
             schedule=schedule_component,
         )
+    style = engine_component.style
+    register_ops(
+        application,
+        services,
+        style=style.selector if style is not None else None,
+        schedule=schedule_component,
+    )
     signals = ShutdownSignals(asyncio.get_running_loop(), stop)
     power = default_power_manager()
     power.start()
@@ -175,6 +202,8 @@ def run() -> None:
     context = get_cli_context()
     services = context.services()
     log_path = configure_logging(services.paths.logs_dir, level=context.log_level, role="run")
+    # children (llama-server, round 14) end with this process, however it ends (R-OPS-001)
+    ProcessJob().adopt_current_process()
     try:
         typer.echo("effective configuration:")
         typer.echo(

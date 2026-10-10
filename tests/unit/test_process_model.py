@@ -148,13 +148,33 @@ def expected_names() -> list[str]:
         "eval memory",
         "eval gate",
         "eval runs",
+        "supervise",
+        "setup",
+        "health",
+        "purge",
+        "eval stability",
+        "service install",
+        "service uninstall",
+        "service start",
+        "service stop",
+        "service status",
+        "cost report",
+        "backup now",
+        "backup list",
+        "backup verify",
+        "backup restore",
+        "rollback profile",
+        "rollback persona",
+        "rollback prompt-template",
+        "rollback style-model",
+        "ops drill network",
     ]
 
 
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 112 == len(expected_names())
+    assert len(names) == 132 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -268,6 +288,27 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "eval memory": CommandKind.LIGHT,
         "eval gate": CommandKind.LIGHT,
         "eval runs": CommandKind.READ,
+        # round 12: residency, backups, deletion and rollbacks
+        "supervise": CommandKind.EXCLUSIVE,
+        "setup": CommandKind.LIGHT,
+        "health": CommandKind.READ,
+        "purge": CommandKind.EXCLUSIVE,
+        "eval stability": CommandKind.LIGHT,
+        "service install": CommandKind.EXCLUSIVE,
+        "service uninstall": CommandKind.EXCLUSIVE,
+        "service start": CommandKind.LIGHT,
+        "service stop": CommandKind.LIGHT,
+        "service status": CommandKind.READ,
+        "cost report": CommandKind.READ,
+        "backup now": CommandKind.LIGHT,
+        "backup list": CommandKind.READ,
+        "backup verify": CommandKind.READ,
+        "backup restore": CommandKind.EXCLUSIVE,
+        "rollback profile": CommandKind.LIGHT,
+        "rollback persona": CommandKind.LIGHT,
+        "rollback prompt-template": CommandKind.LIGHT,
+        "rollback style-model": CommandKind.LIGHT,
+        "ops drill network": CommandKind.READ,
     }
     for name, kind in expected.items():
         spec = get_spec(names[name])
@@ -275,6 +316,9 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
     run_spec = get_spec(names["run"])
     assert run_spec is not None
     assert run_spec.acquires == (LOCK_RUN,) and run_spec.tolerates == (LOCK_SUPERVISOR,)
+    supervise_spec = get_spec(names["supervise"])  # the supervisor holds its own lock for good
+    assert supervise_spec is not None and supervise_spec.kind is CommandKind.EXCLUSIVE
+    assert supervise_spec.acquires == (LOCK_SUPERVISOR,) and supervise_spec.tolerates == (LOCK_RUN,)
     for polling in ("channel listen", "channel echo-test", "chat"):  # they must exclude `twin run`
         spec = get_spec(names[polling])
         assert spec is not None and spec.acquires == (LOCK_RUN,), polling
