@@ -29,7 +29,8 @@ from tests.support.eval_world import (
 from tests.support.export_world import World
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
-from twin.eval.cli import use_interaction
+from twin.eval.blind import MIN_VALID, BlindPlan
+from twin.eval.cli import describe_plan, use_interaction
 from twin.eval.store import EvalStore, NewItem
 from twin.eval.ui import LineKeys
 from twin.services import Services, build_services
@@ -137,6 +138,81 @@ def test_a_backend_that_is_not_deployed_is_refused_with_a_message(
     code, out, _ = run("blind", "--backend", "gpt")
     assert code == 1 and "unknown backend" in out
     assert EvalStore(cli_world.services.db, cli_world.services.clock).list_runs() == []
+
+
+def test_the_default_draw_leaves_room_over_the_gate_minimum(
+    cli_world: World, api: respx.MockRouter
+) -> None:
+    """R17-15 (D-662): ``twin eval blind`` without ``--n`` draws ``eval.blind_n``, not 50.
+
+    The gate counts valid judgements only and a skipped, failed or fallen-back pair is none, so
+    a draw of exactly ``MIN_VALID`` pairs could not pass the first time it had a single skip.
+    Before the fix the command drew its own constant, 50, whatever the setting said.
+    """
+    settings = cli_world.services.settings.eval
+    assert settings.blind_n == 65 and settings.blind_n >= 1.2 * MIN_VALID
+    code, _, screen = run("blind", "--seed", "3")
+    assert code == 0, screen
+    store = EvalStore(cli_world.services.db, cli_world.services.clock)
+    (planned,) = store.list_runs("blind")
+    assert planned.params["n"] == settings.blind_n
+
+
+def test_the_draw_follows_the_setting_and_an_explicit_n_wins(
+    cli_world: World, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-15 (D-662): the one place that decides the default is ``eval.blind_n``."""
+    monkeypatch.setenv("TWIN_EVAL__BLIND_N", "12")
+    code, _, screen = run("blind", "--seed", "3")
+    assert code == 0 and "12 个上下文" in screen, screen
+    code, _, screen = run("blind", "--n", "7", "--seed", "4")
+    assert code == 0 and "7 个上下文" in screen, screen
+    store = EvalStore(cli_world.services.db, cli_world.services.clock)
+    assert sorted(r.params["n"] for r in store.list_runs("blind")) == [7, 12]
+
+
+def _plan_of(world: World, samples: int, requested: int | None = None) -> BlindPlan:
+    store = EvalStore(world.services.db, world.services.clock)
+    run_view = store.create_run("blind", mode="holdout", backends=["deepseek"], status="planned")
+    return BlindPlan(
+        run=run_view,
+        samples=samples,
+        pairs=samples,
+        estimated_usd=0.0,
+        requested=requested if requested is not None else samples,
+    )
+
+
+def _plan_text(world: World, plan: BlindPlan, **options: str) -> str:
+    screen = io.StringIO()
+    console = Console(file=screen, width=200, color_system=None, highlight=False)
+    describe_plan(console, world.services, plan, **options)
+    return screen.getvalue()
+
+
+def test_the_plan_says_how_many_valid_judgements_the_gate_needs(cli_world: World) -> None:
+    """R17-15 (D-662): the screen names the minimum and the room the draw leaves."""
+    shown = _plan_text(cli_world, _plan_of(cli_world, 65))
+    assert f"≥ {MIN_VALID} 对" in shown and "每个后端抽 65 对" in shown and "余量 15 对" in shown
+    assert "跳过、失败、回退到别的后端的不计" in shown and "注意" not in shown
+    exact = _plan_text(cli_world, _plan_of(cli_world, MIN_VALID))
+    assert "余量 0 对" in exact and "注意" not in exact
+
+
+def test_a_draw_below_the_gate_minimum_is_warned_about(cli_world: World) -> None:
+    """R17-15 (D-662): fewer pairs than the gate needs cannot pass, however well they are judged.
+
+    The model evaluation (``twin model evaluate``) prints the same plan: its own resume command
+    is shown with the warning.
+    """
+    shown = _plan_text(
+        cli_world,
+        _plan_of(cli_world, 8, requested=65),
+        resume_command="twin model evaluate r-1",
+    )
+    assert f"不到 {MIN_VALID} 对" in shown and "M1/M4/M5" in shown and "余量" not in shown
+    assert "只有 8 个可用的上下文（要求 65）" in shown  # the draw was short as well
+    assert "twin model evaluate r-1 --resume" in shown
 
 
 def test_resuming_a_run_that_does_not_exist_or_is_not_a_blind_run_is_an_error(

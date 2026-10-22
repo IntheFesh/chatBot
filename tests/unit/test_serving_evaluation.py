@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -40,7 +41,8 @@ from twin.serving.evaluation import (
     tunnel_known_hosts,
 )
 from twin.serving.gate_m5 import MODEL_PARAM
-from twin.serving.server import ServerTimings
+from twin.serving.runtime import model_path
+from twin.serving.server import ServerTimings, same_model_file, served_model_path
 from twin.serving.tunnel import TunnelManager, TunnelState, TunnelTimings
 from twin.storage.models import Job
 from twin.training.registry import get_model
@@ -249,41 +251,158 @@ async def test_a_server_that_does_not_come_up_is_an_error_not_a_hang(
         await llm.client.aclose()
 
 
-async def test_the_server_of_the_application_is_used_when_it_serves_this_very_file(
-    candidate: ServingWorld, api: respx.MockRouter
-) -> None:
-    outside = await asyncio.create_subprocess_exec(
+async def start_server_of(
+    candidate: ServingWorld, file: Path, port: int
+) -> asyncio.subprocess.Process:
+    """A simulated llama-server of another process, serving ``file`` on ``port`` (it is up)."""
+    process = await asyncio.create_subprocess_exec(
         *[
             *sim_prefix("--sim-tokenizer", str(candidate.tokenizer_json)),
             "-m",
-            str(candidate.model_file),
+            str(file),
             "--port",
-            str(candidate.port),
+            str(port),
         ],
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    client = LlamaCppCompletionClient(
-        f"http://127.0.0.1:{candidate.port}", clock=candidate.services.clock
-    )
-    pool = pool_for(candidate)
-    llm = build_llm_runtime(candidate.services)
+    client = LlamaCppCompletionClient(f"http://127.0.0.1:{port}", clock=candidate.services.clock)
     try:
         for _ in range(600):
             if (await client.health()).ok:
-                break
+                return process
             await asyncio.sleep(0.05)
-        else:
-            raise AssertionError("the simulated server did not come up")
+        raise AssertionError("the simulated server did not come up")
+    except BaseException:
+        process.kill()
+        await process.wait()
+        raise
+    finally:
+        await client.aclose()
+
+
+def file_of_another_run(candidate: ServingWorld) -> Path:
+    """The file of an earlier training run of the same profile and quant: the same name."""
+    other = candidate.model_file.parent.parent / "r-0" / candidate.model_file.name
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_bytes(candidate.model_file.read_bytes())
+    assert other.name == candidate.model_file.name and other != candidate.model_file
+    return other
+
+
+async def test_the_server_of_the_application_is_used_when_it_serves_this_very_file(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    outside = await start_server_of(candidate, candidate.model_file, candidate.port)
+    pool = pool_for(candidate)
+    llm = build_llm_runtime(candidate.services)
+    try:
         style, _ = await pool.style_runtime(llm, candidate.model_id)
         assert (await style.client.health()).ok  # the pool uses the running server
+        # R17-7 (D-664): it is the application's server that is used, not a second one
+        prepared = pool._prepared[candidate.model_id]
+        assert prepared.endpoint == candidate.services.settings.style_model.endpoint
+        assert prepared.manager is None and prepared.task is None
         await style.aclose()
     finally:
         await pool.aclose()
         await llm.client.aclose()
-        await client.aclose()
         outside.kill()
         await outside.wait()
+
+
+async def test_the_pool_does_not_use_the_application_server_of_another_run(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R17-7 (D-664): the application serves the model of an earlier run; the file name is the same.
+
+    Before the fix the pool took that server for the candidate's and every pair "of the new
+    model" was written by the old one.
+    """
+    config = candidate.services.settings.style_model
+    other = file_of_another_run(candidate)
+    outside = await start_server_of(candidate, other, candidate.port)
+    pool = pool_for(candidate)
+    llm = build_llm_runtime(candidate.services)
+    try:
+        style, _ = await asyncio.wait_for(pool.style_runtime(llm, candidate.model_id), 60)
+        prepared = pool._prepared[candidate.model_id]
+        assert prepared.endpoint != config.endpoint
+        assert prepared.endpoint == f"http://127.0.0.1:{config.serve.eval_port}"
+        assert prepared.manager is not None  # the pool started a server of its own
+        served = await served_model_path(prepared.endpoint)
+        assert same_model_file(served, candidate.model_file)
+        # and the application's server was left alone, still serving the earlier model
+        theirs = await served_model_path(config.endpoint)
+        assert same_model_file(theirs, other)
+        assert outside.returncode is None
+        await style.aclose()
+    finally:
+        await pool.aclose()
+        await llm.client.aclose()
+        outside.kill()
+        await outside.wait()
+
+
+async def test_a_server_of_another_run_on_the_evaluation_port_is_not_taken_a_free_port_is(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R17-7 (D-664): a leftover server of an earlier evaluation is neither adopted nor refused."""
+    config = candidate.services.settings.style_model
+    eval_port = config.serve.eval_port
+    other = file_of_another_run(candidate)
+    outside = await start_server_of(candidate, other, eval_port)
+    pool = pool_for(candidate)
+    llm = build_llm_runtime(candidate.services)
+    try:
+        style, _ = await asyncio.wait_for(pool.style_runtime(llm, candidate.model_id), 60)
+        prepared = pool._prepared[candidate.model_id]
+        assert prepared.endpoint not in {config.endpoint, f"http://127.0.0.1:{eval_port}"}
+        assert prepared.manager is not None
+        served = await served_model_path(prepared.endpoint)
+        assert same_model_file(served, candidate.model_file)
+        theirs = await served_model_path(f"http://127.0.0.1:{eval_port}")
+        assert same_model_file(theirs, other)  # untouched
+        await style.aclose()
+    finally:
+        await pool.aclose()
+        await llm.client.aclose()
+        outside.kill()
+        await outside.wait()
+
+
+async def test_a_leftover_server_of_this_very_model_on_the_evaluation_port_is_used(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R17-7 (D-664): the same path on the evaluation port is the candidate's own server."""
+    eval_port = candidate.services.settings.style_model.serve.eval_port
+    outside = await start_server_of(candidate, candidate.model_file, eval_port)
+    pool = pool_for(candidate)
+    llm = build_llm_runtime(candidate.services)
+    try:
+        style, _ = await asyncio.wait_for(pool.style_runtime(llm, candidate.model_id), 60)
+        prepared = pool._prepared[candidate.model_id]
+        assert prepared.endpoint == f"http://127.0.0.1:{eval_port}" and prepared.manager is None
+        assert (await style.client.health()).ok
+        await style.aclose()
+    finally:
+        await pool.aclose()
+        await llm.client.aclose()
+        assert outside.returncode is None  # the pool did not stop what it did not start
+        outside.kill()
+        await outside.wait()
+
+
+def test_the_path_of_a_model_is_absolute_and_resolved(candidate: ServingWorld) -> None:
+    """R17-7 (D-664): the path that goes to ``llama-server -m`` is the one it will report."""
+    model = get_model(candidate.services.db, candidate.model_id)
+    path = model_path(candidate.services, model)
+    assert path.is_absolute() and path == candidate.model_file.resolve()
+    run = candidate.model_file.parent.name  # the registry stores ``<run>/<file>``
+    assert model.path == f"{run}/{candidate.model_file.name}"
+    roundabout = dataclasses.replace(model, path=f"{run}/../{model.path}")
+    assert ".." not in model_path(candidate.services, roundabout).parts
+    assert model_path(candidate.services, roundabout) == path
 
 
 async def test_the_evaluation_port_must_differ_from_the_port_of_the_application(

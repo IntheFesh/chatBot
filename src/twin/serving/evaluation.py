@@ -11,7 +11,9 @@ servers of its own:
 * the **servers** (:class:`EvaluationServers`) are started when a job needs them and ended with
   their owner: the local ``llama-server`` of the candidate on ``style_model.serve.eval_port`` (the
   server of the running application on its own port is not touched - unless it already serves this
-  very file, then it is used), or the SSH tunnel to the instance in vLLM mode.  Each is compared
+  very file, the whole path and not just the file name, then it is used; a server on the
+  evaluation port that serves another file is not touched either: the evaluation takes a free
+  port instead, R17-7, D-664), or the SSH tunnel to the instance in vLLM mode.  Each is compared
   with the training tokenizer before a single prompt is sent (a model whose tokens differ is
   refused);
 * the **style runtime** for the sandbox renders with the versions the model is locked to
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +83,13 @@ log = get_logger("twin.serving.evaluation")
 EVAL_LOG: Final = "llama-server-eval.log"
 TUNNEL_WAIT_S: Final = 90.0
 STOP_WAIT_S: Final = 20.0
+
+
+def free_loopback_port() -> int:
+    """A port on 127.0.0.1 that nobody listens on right now (the system picks it)."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 @dataclass
@@ -257,6 +267,9 @@ class EvaluationServers:
             await asyncio.to_thread(self._check_file, model, path)
         except ServeError as exc:
             raise EvaluationError(str(exc)) from exc
+        # only the very file (the whole path, which `_check_file` has just verified against the
+        # registry) is served by a server that is already there; a retrained model of the same
+        # profile and quant has the same file name and is another file (R17-7, D-664)
         if same_model_file(await served_model_path(config.endpoint), path):
             log.info("evaluation_uses_running_server", model=model.id)
             return _Prepared(config.endpoint)
@@ -265,6 +278,13 @@ class EvaluationServers:
             raise EvaluationError(
                 "style_model.serve.eval_port must differ from the port of style_model.endpoint"
             )
+        taken = await served_model_path(f"http://127.0.0.1:{port}")
+        if taken is not None:
+            if same_model_file(taken, path):  # left behind by an evaluation of this very model
+                log.info("evaluation_uses_leftover_server", model=model.id, port=port)
+                return _Prepared(f"http://127.0.0.1:{port}")
+            port = free_loopback_port()  # the port serves another file: not ours to take
+            log.info("evaluation_port_taken", model=model.id, port=port)
         local = build_local_server(
             services,
             model,

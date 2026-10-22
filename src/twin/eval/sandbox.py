@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from twin.channel.base import MediaNotAllowed, QuoteTarget
 from twin.channel.policy import StickerAllowList
+from twin.channel.probe.summary import load_channel_probe_summary, measured_capabilities
 from twin.clock import Clock, ensure_aware
 from twin.config.runtime import ThinkingMode
 from twin.engine.dataview import LiveDataSource, ReplyDataView
@@ -58,11 +59,13 @@ from twin.eval.channel import InMemoryChannel, SentMessage
 from twin.eval.isolation import isolated_writes
 from twin.eval.liveview import EvalLiveSource
 from twin.eval.render import Candidate, candidate_from_bubbles
+from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.scope import call_scope
 from twin.llm.types import ChatMessage, LedgerTag, Purpose
 from twin.memory.asof import AsOfSource
 from twin.memory.recent import Turn
+from twin.ops.jobs import JobDeferred
 from twin.ops.logging import get_logger
 from twin.stickers.catalog import StickerCatalog
 from twin.stickers.library import StickerLibraryAllowList
@@ -77,6 +80,9 @@ BACKENDS = ("deepseek", "style", "hybrid")
 STYLE_BACKENDS = ("style", "hybrid")
 CONTEXT_TURNS = 8  # merged turns of the conversation every backend is given (R-EVAL-009)
 SEED_MODULUS = 2**31
+# What the evaluation hands back to its job instead of saving the pair as failed (R17-21, D-660):
+# a paused batch (``BatchPausedError`` is a ``JobDeferred``), the open breaker, a refusing budget.
+DEFERRALS: tuple[type[Exception], ...] = (JobDeferred, CircuitOpenError, BudgetDeniedError)
 
 
 class SandboxMode(StrEnum):
@@ -261,16 +267,21 @@ class EvalSandbox:
             return await self._pipeline.preview(self.context(request), self.view(request.at))
 
     async def reply(self, request: SandboxRequest) -> SandboxReply:
-        """Make the reply the bot would have given, deliver it to the in-memory channel."""
+        """Make the reply the bot would have given, deliver it to the in-memory channel.
+
+        A paused batch, an open breaker or a refusing budget is **raised** (``JobDeferred``,
+        ``CircuitOpenError``, ``BudgetDeniedError``) instead of becoming a fallback draft: the
+        job of the evaluation goes back to the queue and the pair stays pending (R17-21).
+        """
         self._clock.set(request.at)
         context = self.context(request)
         data = self.view(request.at)
         with isolated_writes():
             if self._tag is not None:
                 with call_scope(Purpose.EVAL, self._tag):
-                    draft = await self._pipeline.run(context, data)
+                    draft = await self._pipeline.run(context, data, propagate=DEFERRALS)
             else:
-                draft = await self._pipeline.run(context, data)
+                draft = await self._pipeline.run(context, data, propagate=DEFERRALS)
             delivered, candidate, skipped = await self._deliver(draft, request.inbound)
         return SandboxReply(draft, candidate, delivered, request.backend, skipped)
 
@@ -362,9 +373,12 @@ def build_sandbox(
     style_runtime = style or StyleRuntime.from_services(services, runtime)
     pipeline = ReplyPipeline.from_services(services, runtime, extra_backends=style_runtime.backends)
     clock = SampleClock(services.clock)
-    channel = InMemoryChannel(
+    with services.db.session() as session:
+        measured = measured_capabilities(load_channel_probe_summary(session))
+    channel = InMemoryChannel(  # the capabilities of the running channel: no quotes (R17-16)
         clock=clock,
         media_policy=allow if allow is not None else StickerLibraryAllowList(services.db),
+        measured=measured,
     )
     tag = LedgerTag("one_time", batch_id) if batch_id else None
     past = AsOfSource(services) if mode is SandboxMode.HOLDOUT else None

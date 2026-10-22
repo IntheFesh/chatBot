@@ -120,6 +120,76 @@ def test_an_unwatched_day_in_the_middle_starts_the_count_again(books: Books) -> 
     assert verdict == "insufficient" and "已连续观察 3 天，还差 4 天" in summary
 
 
+def test_a_week_with_proactive_switched_off_is_insufficient_not_passed(books: Books) -> None:
+    """R17-14 (D-663): seven quiet days with the switch off are no evidence that she writes.
+
+    Before the fix such a week passed: every day was "observed" and "inside its range 0-0".
+    """
+    for back in range(1, 8):
+        books.day(books.ago(back), (), enabled=False)
+    books.rate(5)
+    verdict, summary = verdict_of(books)
+    assert verdict == "insufficient"
+    assert summary == "观察期未满：已连续观察 0 天，还差 7 天（其中 7 天主动消息关闭，不计入观察）"
+
+
+def test_a_range_of_zero_to_zero_is_insufficient_too(books: Books) -> None:
+    for back in range(1, 8):
+        books.day(books.ago(back), (), low=0, high=0, enabled=True)
+    books.rate(5)
+    assert verdict_of(books)[0] == "insufficient"
+
+
+def test_days_switched_off_inside_the_week_start_the_count_again(books: Books) -> None:
+    books.good_week(days=3, last=1)
+    books.day(books.ago(4), (), enabled=False)
+    books.good_week(days=3, last=5)
+    books.rate(5)
+    verdict, summary = verdict_of(books)
+    assert verdict == "insufficient" and "已连续观察 3 天，还差 4 天" in summary
+    assert "其中 1 天主动消息关闭" in summary
+
+
+def test_a_message_sent_with_the_switch_off_is_still_a_violation_in_the_checks(
+    books: Books,
+) -> None:
+    """The streak is not the only thing the audit reads: sending while off breaks the range 0-0."""
+    books.good_week(days=6, last=2)
+    books.day(books.ago(1), (Sent(9),), enabled=False)
+    books.rate(5)
+    audit = audit_recent(
+        books.log,
+        books.ratings,
+        books.services.settings.proactive,
+        books.time,
+        books.clock,
+        days=M3_DAYS,
+    )
+    assert not audit.compliant and "不在 0-0 范围内" in audit.days[-1].problems[0]
+    verdict, checks, summary = judge_audit(audit)
+    assert verdict == "insufficient"  # the week is not complete: that is said first
+    count = next(check for check in checks if check.name == "每天次数在设定范围内")
+    assert not count.passed and "发 1 条（0-0）" in count.detail
+    assert "其中 1 天主动消息关闭" in summary
+
+
+def test_the_checks_name_the_days_that_do_not_count(books: Books) -> None:
+    books.good_week(days=6, last=2)
+    books.day(books.ago(1), (), enabled=False)
+    audit = audit_recent(
+        books.log,
+        books.ratings,
+        books.services.settings.proactive,
+        books.time,
+        books.clock,
+        days=7,
+    )
+    _, checks, _ = judge_audit(audit)
+    streak = next(check for check in checks if check.name == "连续观察 7 个当地日")
+    assert not streak.passed and "其中 1 天主动消息关闭" in streak.detail
+    assert streak.value == 0.0
+
+
 def test_an_empty_installation_has_no_observed_days(books: Books) -> None:
     verdict, summary = verdict_of(books)
     assert verdict == "insufficient" and "已连续观察 0 天，还差 7 天" in summary

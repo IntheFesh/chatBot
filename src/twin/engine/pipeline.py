@@ -198,8 +198,22 @@ class ReplyPipeline:
 
     # ------------------------------------------------------------------------- run
 
-    async def run(self, context: ReplyContext, data: ReplyDataView) -> ReplyDraft:
-        """Produce the reply to ``context`` (see the module description)."""
+    async def run(
+        self,
+        context: ReplyContext,
+        data: ReplyDataView,
+        *,
+        propagate: tuple[type[Exception], ...] = (),
+    ) -> ReplyDraft:
+        """Produce the reply to ``context`` (see the module description).
+
+        A backend that raises ends the sequence with ``needs_fallback`` (the engine retries later,
+        minutes apart).  A caller that cannot wait like that - the evaluation, whose job goes back
+        to the queue when the breaker is open, the budget refuses or its batch is paused - names
+        the errors it wants to see in ``propagate``; they leave ``run`` untouched and the style
+        backend is not replaced by DeepSeek for them (R17-21, D-660).  The live engine passes
+        nothing: its behaviour is as it was.
+        """
         started = self._clock.monotonic()
         state = _Run()
         material, gathering = await self._gather(context, data)
@@ -228,6 +242,8 @@ class ReplyPipeline:
             request = BackendRequest(context, data, material, notes, position, non_thinking)
             try:
                 result = await backend.generate(request)
+            except propagate:
+                raise
             except Exception as exc:  # a failed call ends the sequence; the engine retries later
                 log.warning("backend_failed", backend=backend.name, reason=type(exc).__name__)
                 state.actions.append(PostAction("backend_error", detail=type(exc).__name__))

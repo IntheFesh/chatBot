@@ -69,7 +69,6 @@ JOB_PRIORITY = 120
 JOB_SIZE = 10  # pairs per job
 REPLY_COMPLETION_TOKENS = 600  # the DeepSeek backend's cap on a reply (an upper bound)
 PLAN_COMPLETION_TOKENS = 400  # the planner's cap of the hybrid backend
-DEFAULT_N = 50
 MIN_VALID = 50  # R-EVAL-001: a gate counts only with this many valid judgements
 
 FAIL_FELL_BACK = "fell_back"

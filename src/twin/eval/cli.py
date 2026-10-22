@@ -48,8 +48,8 @@ from rich.table import Table
 from rich.text import Text
 
 from twin.eval.blind import (
-    DEFAULT_N,
     EVAL_GENERATE_JOB,
+    MIN_VALID,
     BlindPlan,
     EvalError,
     blind_report,
@@ -221,6 +221,23 @@ def describe_plan(
                 style="yellow",
             )
         )
+    if plan.samples < MIN_VALID:
+        console.print(
+            Text(
+                f"注意：每个后端只抽 {plan.samples} 对，不到 {MIN_VALID} 对：即使全部判完，"
+                "M1/M4/M5 的盲测门槛也不会通过（用 --n 或 eval.blind_n 多抽一些，"
+                "或等留出集变长）",
+                style="yellow",
+            )
+        )
+    else:
+        console.print(
+            Text(
+                f"盲测门槛要求每个后端有效判断 ≥ {MIN_VALID} 对"
+                "（跳过、失败、回退到别的后端的不计）；"
+                f"本次每个后端抽 {plan.samples} 对，余量 {plan.samples - MIN_VALID} 对"
+            )
+        )
     if plan.strata:
         console.print(Text("分层：" + "、".join(f"{k} {v}" for k, v in plan.strata.items())))
     console.print(Text(f"生成费用估算 ${plan.estimated_usd:.4f}（一次性批任务，按峰值价估算）"))
@@ -249,7 +266,9 @@ def eval_blind(
     backend: Annotated[
         str, typer.Option("--backend", help="deepseek, style, hybrid or all")
     ] = "deepseek",
-    n: Annotated[int, typer.Option("--n", min=1, help="Contexts to draw")] = DEFAULT_N,
+    n: Annotated[
+        int | None, typer.Option("--n", min=1, help="Contexts to draw (default: eval.blind_n)")
+    ] = None,
     resume: Annotated[str | None, RESUME_OPTION] = None,
     seed: Annotated[int | None, SEED_OPTION] = None,
     foreground: Annotated[bool, FOREGROUND_OPTION] = False,
@@ -260,7 +279,8 @@ def eval_blind(
     store = _store(services)
     if resume is None:
         try:
-            plan = asyncio.run(plan_blind(services, expand_backends(backend), n, seed=seed))
+            contexts = n if n is not None else services.settings.eval.blind_n
+            plan = asyncio.run(plan_blind(services, expand_backends(backend), contexts, seed=seed))
         except EvalError as exc:
             raise CliError(str(exc), ExitCode.FAILURE) from exc
         describe_plan(console, services, plan)

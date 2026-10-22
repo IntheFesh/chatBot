@@ -9,6 +9,7 @@ import pytest
 import respx
 from sqlalchemy import select
 
+from tests.support.clock import ManualClock
 from tests.support.eval_world import DeepSeekScript, eval_worker, open_kit, sample_of
 from tests.support.export_world import World
 from twin.eval.blind import (
@@ -25,6 +26,8 @@ from twin.eval.samples import DrawResult
 from twin.eval.stats import binomial_z, two_proportion_test
 from twin.eval.store import EvalStore, NewItem
 from twin.eval.ui import presentation_order
+from twin.llm.errors import CircuitOpenError
+from twin.llm.reliability import CircuitBreaker
 from twin.llm.runtime import build_llm_runtime
 from twin.ops.jobs import JobQueue
 from twin.services import Services
@@ -271,3 +274,74 @@ def test_pairs_of_one_context_are_a_whole_pass_apart_in_the_order_they_are_shown
     assert presentation_order(items) == shown  # the order is stable: a resumed run keeps it
     one = presentation_order([i for i in items if i.backend == "deepseek"])
     assert [i.sample_key for i in one] == contexts  # one backend: the order of the run
+
+
+def _generation_jobs(world: World, batch: str) -> list[str]:
+    jobs = JobQueue(world.services.db, world.services.clock).list_jobs(job_type=EVAL_GENERATE_JOB)
+    return [i for job in jobs if job.batch_id == batch for i in job.payload["item_ids"]]
+
+
+async def test_a_paused_batch_hands_the_job_back_and_the_pairs_stay_pending(
+    world: World, api: respx.MockRouter, script: DeepSeekScript, clock: ManualClock
+) -> None:
+    """R17-21 (D-660): a pair is not failed because its batch was paused for overspending.
+
+    Before the fix the pipeline turned ``BatchPausedError`` into ``fallback:backend_error``; the
+    pair was saved as failed and a resumed job (which only takes pending pairs) never made it.
+    """
+    planned = await plan(world, 10, 4)
+    batch = planned.batch_ids[0]
+    batches = build_llm_runtime(world.services).batches
+    batches.approve(batch)
+    script.prompt_tokens = 50_000_000  # the first call spends far above the cap: the batch pauses
+    worker = eval_worker(world.services)
+    summary = await worker.run_until_idle()
+    assert summary.deferred >= 1 and summary.failed == 0 and summary.retried == 0
+    assert batches.status(batch).paused
+    store = EvalStore(world.services.db, world.services.clock)
+    statuses = [store.item(i).status for i in _generation_jobs(world, batch)]
+    assert statuses.count("generated") == 1  # the call that overspent was the first reply
+    assert set(statuses) == {"generated", "pending"}  # none was failed by the pause
+    calls = len(script.requests)
+    # the user approves the batch again; the job takes what is left
+    batches.approve(batch)
+    script.prompt_tokens = 400
+    await clock.advance(2 * 3600.0)
+    summary = await worker.run_until_idle()
+    assert summary.failed == 0 and len(script.requests) > calls
+    statuses = [store.item(i).status for i in _generation_jobs(world, batch)]
+    assert set(statuses) == {"generated"}
+
+
+async def test_an_open_breaker_defers_the_job_and_a_resume_generates_the_remaining_pairs(
+    world: World,
+    api: respx.MockRouter,
+    script: DeepSeekScript,
+    clock: ManualClock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R17-21 (D-660): the open breaker gives the job back; no pair is failed by it."""
+    planned = await plan(world, 10, 4)
+    runtime = build_llm_runtime(world.services)
+    for planned_batch in planned.batch_ids:
+        runtime.batches.approve(planned_batch)
+    state = {"open": True}
+    real = CircuitBreaker.before_call
+
+    def before_call(self: CircuitBreaker) -> None:
+        if state["open"]:
+            raise CircuitOpenError(30.0)
+        real(self)
+
+    monkeypatch.setattr(CircuitBreaker, "before_call", before_call)
+    worker = eval_worker(world.services)
+    summary = await worker.run_until_idle()
+    assert summary.deferred >= 1 and summary.failed == 0 and summary.done == 0
+    store = EvalStore(world.services.db, world.services.clock)
+    assert script.requests == []
+    assert {i.status for i in store.items(planned.run.id)} == {"pending"}
+    state["open"] = False
+    await clock.advance(600.0)
+    summary = await worker.run_until_idle()
+    assert summary.failed == 0 and summary.done >= 1
+    assert {i.status for i in store.items(planned.run.id)} == {"generated"}

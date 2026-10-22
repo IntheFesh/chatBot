@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime
 
 import pytest
+from sqlalchemy import select
 
 from tests.support.embedding import H, Msg, U, day, write_dialogue
 from twin.eval.samples import (
@@ -19,6 +20,7 @@ from twin.eval.samples import (
 from twin.profile.holdout import holdout_cutoff
 from twin.retrieval.windows import LocalPlace
 from twin.services import Services
+from twin.storage.chat_models import Message, Sticker
 
 LATE_REPLY = "只在留出期里才出现的回复"
 
@@ -176,6 +178,50 @@ def test_a_reply_the_bot_could_not_have_written_is_never_drawn(services: Service
     assert drawn.excluded["reply_not_reproducible"] >= 2  # the picture and the voice message
     assert drawn.excluded["reply_has_event_text"] >= 2  # the typed placeholders
     assert len(drawn.samples) >= 20  # the ordinary ones are all there
+
+
+def test_a_real_reply_with_a_quote_is_not_drawn(services: Services) -> None:
+    """R17-16 (D-661): her quote reply is not drawn - the running channel cannot send quotes.
+
+    The bot never quotes on WeChat, so a pair whose real side starts with ``[引用：…]`` is
+    decided by that line alone.  A quote message without the quoted words shows as plain text
+    and is no tell, so it is drawn.
+    """
+    services.settings.retrieval.holdout_ratio = 0.9
+    episodes = [(day(n, 3 + n % 20), episode(n)) for n in range(40)]
+    episodes.append((day(40, 12), [U("今晚吃什么"), H("吃火锅吧", kind="quote")]))
+    episodes.append((day(41, 12), [U("明天呢"), H("明天再说", kind="quote")]))
+    write_dialogue(services, episodes)
+    with services.db.transaction(bump_state=False) as session:
+        row = next(m for m in session.scalars(select(Message)) if m.text == "吃火锅吧")
+        row.quote = {"quoteContent": "今晚吃什么"}  # the other one quotes nothing
+    drawn = SampleDrawer(services).draw(500, seed=1)
+    texts = {line.text for s in drawn.samples for line in s.real.lines}
+    assert "吃火锅吧" not in texts and "明天再说" in texts
+    assert all(s.real.quote is None for s in drawn.samples)
+    assert drawn.excluded["reply_has_quote"] == 1
+    assert len(drawn.samples) >= 20  # the ordinary ones are all there
+
+
+def test_a_real_reply_with_an_undescribed_sticker_is_not_drawn(services: Services) -> None:
+    """R17-16 (D-661): ``[表情包：未标注]`` is on her side only (the bot sends described ones)."""
+    services.settings.retrieval.holdout_ratio = 0.9
+    plain, described, in_context = "a" * 32, "b" * 32, "c" * 32
+    episodes = [(day(n, 3 + n % 20), episode(n)) for n in range(40)]
+    episodes.append((day(40, 12), [U("看我"), H("好看吧"), H(kind="sticker", md5=plain)]))
+    episodes.append((day(41, 12), [U("再看"), H("嘿嘿"), H(kind="sticker", md5=described)]))
+    episodes.append(
+        (day(42, 12), [U("来"), Msg("u", kind="sticker", md5=in_context), U("在吗"), H("在呢")])
+    )
+    write_dialogue(services, episodes)
+    with services.db.transaction(bump_state=False) as session:
+        session.get(Sticker, described).description = "笑得很开心的猫"  # type: ignore[union-attr]
+    drawn = SampleDrawer(services).draw(500, seed=1)
+    texts = {line.text for s in drawn.samples for line in s.real.lines}
+    assert "好看吧" not in texts and "嘿嘿" in texts
+    assert drawn.excluded["reply_undescribed_sticker"] == 1
+    assert "在呢" in texts  # an undescribed sticker in the context is shown to both sides alike
+    assert plain not in {m for s in drawn.samples for m in s.real.stickers}
 
 
 def test_a_context_that_does_not_end_with_the_user_is_not_drawn(services: Services) -> None:

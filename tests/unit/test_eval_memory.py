@@ -20,12 +20,14 @@ from tests.support.export_world import World
 from tests.support.memory import add_fact
 from twin.eval.isolation import changes, snapshot
 from twin.eval.memory_test import (
+    EVAL_MEMORY_JOB,
     JUDGE_SYSTEM,
     PER_SOURCE,
     QUESTION_SYSTEM,
     TOTAL,
     MemorySession,
     MemorySummary,
+    ask_items,
     eligible_facts,
     finish_run,
     leaked,
@@ -35,6 +37,8 @@ from twin.eval.memory_test import (
 )
 from twin.eval.store import EvalStore, ItemView, NewItem
 from twin.eval.ui import LineKeys
+from twin.llm.errors import CircuitOpenError
+from twin.llm.reliability import CircuitBreaker
 from twin.llm.runtime import build_llm_runtime
 from twin.memory.manage import MemoryManager
 from twin.ops.jobs import JobQueue
@@ -246,6 +250,49 @@ async def test_the_questions_are_asked_in_live_mode_judged_and_booked_as_evaluat
     spent = sum(runtime.ledger.batch_spent_usd(b) for b in plan.batch_ids)
     assert 0 < spent <= plan.estimated_usd
     assert script.errors == [] and len(script.requests) == 3 * TOTAL  # question, answer, verdict
+
+
+async def test_an_open_breaker_at_the_bots_answer_defers_the_job_and_no_question_is_lost(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-21 (D-660): the bot's answer is made by the sandbox; its deferral must reach the job.
+
+    The breaker opens for the second call, the bot's answer (the first call wrote the question).
+    Before the fix the pipeline turned it into a fallback draft, the question was judged as "no
+    answer" (wrong) and saved: a lost sample that nobody asks again.
+    """
+    add_memory_facts(world)
+    script = memory_script()
+    calls = {"made": 0}
+    real = CircuitBreaker.before_call
+
+    def before_call(self: CircuitBreaker) -> None:
+        calls["made"] += 1
+        if calls["made"] == 2:
+            raise CircuitOpenError(30.0)
+        real(self)
+
+    monkeypatch.setattr(CircuitBreaker, "before_call", before_call)
+    router = serve(script)
+    try:
+        plan = await plan_memory(world.services, seed=3)
+        runtime = build_llm_runtime(world.services)
+        for batch in plan.batch_ids:
+            runtime.batches.approve(batch)
+        queue = JobQueue(world.services.db, world.services.clock)
+        job = queue.list_jobs(job_type=EVAL_MEMORY_JOB)[0]
+        ids = [str(i) for i in job.payload["item_ids"]]
+        with pytest.raises(CircuitOpenError):  # what handle_eval_memory hands back to the queue
+            await ask_items(world.services, plan.run.id, ids, str(job.payload["batch_id"]))
+        store = EvalStore(world.services.db, world.services.clock)
+        assert {store.item(i).status for i in ids} == {"pending"}  # nothing was saved as lost
+        summary = await ask_items(world.services, plan.run.id, ids, str(job.payload["batch_id"]))
+    finally:
+        router.stop()
+    assert summary.failed == 0 and summary.asked == len(ids)
+    items = [store.item(i) for i in ids]
+    assert {i.status for i in items} == {"generated"}
+    assert all(i.payload["answered"] is True for i in items)
 
 
 async def test_the_user_reviews_the_verdicts_and_can_overturn_them(world: World) -> None:

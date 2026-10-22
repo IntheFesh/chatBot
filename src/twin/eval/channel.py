@@ -10,8 +10,12 @@ stand-in for one - and keeps what the other channels keep:
 * **the same picture allow list** (R-SAFE-006): bytes go out only when the media policy knows
   their SHA-256, and must be an image of the declared type, otherwise
   :class:`~twin.channel.base.MediaNotAllowed`;
-* **quotes**: the channel accepts them (``supports_quote``), so the style measurements of the
-  sandbox include the quote rate the running channel cannot show.
+* **the capabilities of the running channel** (R17-16, D-661): no quotes (``supports_quote`` is
+  ``False``, as on the iLink and the console channel; a quote that is passed anyway raises
+  :class:`~twin.channel.base.CapabilityNotSupported`), and the window, quota and GIF result of
+  the M0 probe reported as the iLink channel reports them.  A sandbox that could quote would let
+  the pipeline write ``[引用：…]``, which the bot never sends in production: the one line that
+  gives a blind-test candidate away.
 
 What it does instead of sending: every message is appended to :attr:`sent` (text, the quote that
 went with it, or the SHA-256 and type of a picture) and handed to nobody.  A test or the sandbox
@@ -30,6 +34,7 @@ from typing import Literal
 
 from twin.channel.base import (
     AuthState,
+    CapabilityNotSupported,
     Channel,
     ChannelCapabilities,
     InboundMessage,
@@ -50,6 +55,8 @@ from twin.clock import Clock
 
 EVAL_USER_ID = "eval-sandbox-user"
 QUOTA = 1_000_000  # nothing is delivered, so nothing runs out
+NOT_SUPPORTED_QUOTE = "the evaluation channel has no quotes, like the WeChat protocol"
+Measured = tuple[float | None, int | None, bool | None]  # (window hours, message count, GIF moves)
 
 
 @dataclass(frozen=True)
@@ -76,12 +83,14 @@ class InMemoryChannel(Channel):
         clock: Clock,
         media_policy: OutboundMediaPolicy | None = None,
         user_id: str = EVAL_USER_ID,
-        supports_quote: bool = True,
+        supports_quote: bool = False,
+        measured: Measured = (None, None, None),
     ) -> None:
         self._clock = clock
         self._media_policy: OutboundMediaPolicy = media_policy or DenyAllMediaPolicy()
         self._user_id = user_id
         self._supports_quote = supports_quote
+        self._measured = measured
         self.guard = RecipientGuard(lambda: self._user_id)
         self.sent: list[SentMessage] = []
         self.typing = False
@@ -151,6 +160,8 @@ class InMemoryChannel(Channel):
         recipient: str | None = None,
         bypass: SendBypass | None = None,
     ) -> OutboundResult:
+        if quote is not None and not self._supports_quote:
+            raise CapabilityNotSupported(NOT_SUPPORTED_QUOTE)
         self.guard.resolve(recipient)
         if not text.strip():
             return OutboundResult.failure(OutboundKind.REJECTED, "empty_text")
@@ -183,12 +194,13 @@ class InMemoryChannel(Channel):
     # -------------------------------------------------------- introspection
 
     def capabilities(self) -> ChannelCapabilities:
+        window_h, quota, gif = self._measured
         return ChannelCapabilities(
             supports_quote=self._supports_quote,
             supports_typing=True,
-            gif_animated=None,
-            proactive_window_h=None,
-            outbound_quota=QUOTA,
+            gif_animated=gif,
+            proactive_window_h=window_h,
+            outbound_quota=quota,
             max_text_chars=TEXT_CHUNK_LIMIT,
         )
 

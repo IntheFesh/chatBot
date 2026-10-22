@@ -1,7 +1,9 @@
 """The judge of the M3 gate: "有作息、会主动" (SPEC section 26, R-EVAL-010, R-EVAL-005).
 
 The rule is fixed (and pinned by tests): in the **last seven completed local days** the
-scheduler watched every day (it ran: the day has its mark), and the audit
+scheduler watched every day (it ran: the day has its mark) **with proactive messages on** (the
+switch not off, the range above ``0``: R17-14, D-663 - a quiet week with the switch off is "not
+enough yet", never "passed"), and the audit
 (:mod:`twin.eval.proactive_audit`) finds
 
 * no message in the core of her deep sleep,
@@ -21,12 +23,18 @@ evidence, so the verdict can be checked later (``twin eval gate M3 --check`` onl
 from __future__ import annotations
 
 from twin.eval.gates import Check, GateContext, GateVerdict, Verdict, gate_judge
-from twin.eval.proactive_audit import Audit, audit_recent
+from twin.eval.proactive_audit import Audit, DayAudit, audit_recent
 from twin.schedule.proactive.store import ProactiveLogStore, RatingStore
 from twin.schedule.service import time_service_for
 
 M3_DAYS = 7
 M3_MIN_RATING = 4.0
+
+
+def _span(day: DayAudit) -> str:
+    """The range a day was held to, as ``low-high`` (``0-0`` with the switch off)."""
+    bounds = day.effective_range
+    return f"{bounds[0]}-{bounds[1]}" if bounds is not None else "未知"
 
 
 def judge_audit(audit: Audit, days: int = M3_DAYS) -> tuple[Verdict, list[Check], str]:
@@ -36,12 +44,16 @@ def judge_audit(audit: Audit, days: int = M3_DAYS) -> tuple[Verdict, list[Check]
     ]
     mean = audit.rating_mean
     rated = len(audit.ratings)
+    inactive = (
+        f"（其中 {audit.inactive_days} 天主动消息关闭，不计入观察）" if audit.inactive_days else ""
+    )
     checks = [
         Check(
             f"连续观察 {days} 个当地日",
             audit.complete,
             f"已连续观察 {audit.streak}/{len(audit.days)} 天"
-            + ("" if audit.complete else f"，还差 {audit.missing_days} 天"),
+            + ("" if audit.complete else f"，还差 {audit.missing_days} 天")
+            + inactive,
             float(audit.streak),
             float(days),
             len(audit.days),
@@ -58,7 +70,7 @@ def judge_audit(audit: Audit, days: int = M3_DAYS) -> tuple[Verdict, list[Check]
             "每天次数在设定范围内",
             audit.count_ok,
             "；".join(
-                f"{day.day:%m-%d} 发 {day.sent} 条（{day.low}-{day.high}）"
+                f"{day.day:%m-%d} 发 {day.sent} 条（{_span(day)}）"
                 for day in audit.days
                 if not day.observed or not day.count_ok
             )
@@ -103,7 +115,7 @@ def judge_audit(audit: Audit, days: int = M3_DAYS) -> tuple[Verdict, list[Check]
         return (
             "insufficient",
             checks,
-            f"观察期未满：已连续观察 {audit.streak} 天，还差 {audit.missing_days} 天",
+            f"观察期未满：已连续观察 {audit.streak} 天，还差 {audit.missing_days} 天{inactive}",
         )
     if not audit.compliant:
         return "failed", checks, "审计不合规：" + "；".join(problems or ["边缘消息超过每周上限"])
