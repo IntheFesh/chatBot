@@ -36,6 +36,10 @@ JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 PROCESS_SET_QUOTA = 0x0100
 PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+STILL_ACTIVE = 259  # the exit code GetExitCodeProcess reports for a process that has not ended
+ERROR_ACCESS_DENIED = 5
+FILETIME_UNIX_EPOCH = 116444736000000000  # 1970-01-01 in 100 ns steps since 1601-01-01
 
 CtrlHandler = Callable[[int], bool]
 WindowHandler = Callable[[int, int, int], bool]
@@ -110,6 +114,14 @@ class Win32(Protocol):
 
     def assign_to_job(self, job: int, process: int) -> bool:
         """``AssignProcessToJobObject``."""
+        ...
+
+    def process_alive(self, pid: int) -> bool:
+        """Whether process ``pid`` exists and has not ended (``OpenProcess`` + exit code)."""
+        ...
+
+    def process_started_at(self, pid: int) -> float | None:
+        """When process ``pid`` was created (epoch seconds); ``None`` if it cannot be read."""
         ...
 
 
@@ -201,6 +213,19 @@ if sys.platform == "win32":  # pragma: win32-only
             self._k32.AssignProcessToJobObject.restype = wintypes.BOOL
             self._k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
             self._k32.OpenProcess.restype = wintypes.HANDLE
+            self._k32.GetExitCodeProcess.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            self._k32.GetExitCodeProcess.restype = wintypes.BOOL
+            self._k32.GetProcessTimes.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+                ctypes.POINTER(wintypes.FILETIME),
+            ]
+            self._k32.GetProcessTimes.restype = wintypes.BOOL
             self._k32.GetCurrentProcess.argtypes = []
             self._k32.GetCurrentProcess.restype = wintypes.HANDLE
             self._callbacks: dict[object, object] = {}  # keep ctypes callbacks alive
@@ -379,6 +404,42 @@ if sys.platform == "win32":  # pragma: win32-only
 
         def assign_to_job(self, job: int, process: int) -> bool:
             return bool(self._k32.AssignProcessToJobObject(job, process))
+
+        def process_alive(self, pid: int) -> bool:
+            ctypes.set_last_error(0)
+            handle = self._k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                # no such process, or one this user may not look at (it exists all the same)
+                return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+            try:
+                code = wintypes.DWORD()
+                if not self._k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return True  # cannot tell: a job is not taken over on a guess
+                return code.value == STILL_ACTIVE
+            finally:
+                self._k32.CloseHandle(handle)
+
+        def process_started_at(self, pid: int) -> float | None:
+            handle = self._k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if not handle:
+                return None
+            try:
+                created = wintypes.FILETIME()
+                ended = wintypes.FILETIME()
+                kernel = wintypes.FILETIME()
+                user = wintypes.FILETIME()
+                if not self._k32.GetProcessTimes(
+                    handle,
+                    ctypes.byref(created),
+                    ctypes.byref(ended),
+                    ctypes.byref(kernel),
+                    ctypes.byref(user),
+                ):
+                    return None
+                ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+                return (ticks - FILETIME_UNIX_EPOCH) / 10_000_000
+            finally:
+                self._k32.CloseHandle(handle)
 
     def load_win32() -> Win32:
         """The real Win32 binding."""

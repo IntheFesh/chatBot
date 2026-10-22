@@ -16,7 +16,16 @@ from tests.support.memory import add_fact, add_followup
 from tests.support.synth_chat import MessageWriter
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
+from twin.memory.jobs import (
+    REINDEX_JOB,
+    handle_memory_reindex,
+    queue_memory_reindex,
+    read_reindex_state,
+)
 from twin.memory.memory import Memory
+from twin.ops.foreground import run_jobs_until_idle
+from twin.ops.instance_lock import LOCK_RUN, InstanceLock
+from twin.ops.jobs import HandlerRegistry, JobQueue
 from twin.ops.process_model import CommandKind, ExitCode, get_spec, iter_commands
 from twin.services import Services, build_services
 
@@ -78,7 +87,7 @@ def test_every_memory_command_declares_what_kind_of_command_it_is() -> None:
         "memory remember": CommandKind.LIGHT,
         "memory forget": CommandKind.LIGHT,
         "memory summarize": CommandKind.HEAVY,
-        "memory reindex": CommandKind.LIGHT,
+        "memory reindex": CommandKind.HEAVY,
     }
 
 
@@ -268,14 +277,71 @@ def test_summarize_queues_the_jobs_once(data_dir: Path) -> None:
     assert wrong.exit_code == int(ExitCode.USAGE) and "--scope must be" in wrong.output
 
 
-def test_reindex_encodes_what_has_no_vector(data_dir: Path) -> None:
-    def fill(services: Services) -> None:
-        memory = Memory(services)
-        add_fact(memory, "她养了一只猫", BASE, embed=False)
-        add_fact(memory, "她喜欢吃火锅", BASE + timedelta(minutes=1), embed=False)
+def two_facts_without_vectors(services: Services) -> None:
+    memory = Memory(services)
+    add_fact(memory, "她养了一只猫", BASE, embed=False)
+    add_fact(memory, "她喜欢吃火锅", BASE + timedelta(minutes=1), embed=False)
 
-    with_services(fill)
-    result = cli("memory", "reindex")
+
+def test_reindex_encodes_what_has_no_vector(data_dir: Path) -> None:
+    with_services(two_facts_without_vectors)
+    result = cli("memory", "reindex", "--foreground")
     assert result.exit_code == 0, result.output
     assert "encoded 2 record(s)" in result.output
-    assert "encoded" in cli("memory", "reindex").output
+    assert "encoded 2 record(s)" in cli("memory", "reindex", "--foreground").output  # again
+
+
+def test_reindex_only_queues_one_job_and_does_no_work_in_the_command(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-29 (D-713): it drops and re-encodes both vector tables - the application does that."""
+    with_services(two_facts_without_vectors)
+
+    def forbidden(self: Memory) -> None:
+        raise AssertionError("the command must not re-encode in its own process")
+
+    monkeypatch.setattr(Memory, "reindex", forbidden)
+    first = cli("memory", "reindex")
+    assert first.exit_code == 0, first.output
+    assert "queued (job " in first.output and "the running application executes it" in first.output
+    second = cli("memory", "reindex")
+    assert "already waiting" in second.output  # one job, however often it is typed
+
+    def jobs(services: Services) -> list[tuple[str, str]]:
+        return [(j.type, j.status) for j in JobQueue(services.db, services.clock).list_jobs()]
+
+    assert with_services(jobs) == [("memory_reindex", "pending")]
+    assert with_services(read_reindex_state) is None
+
+
+def test_reindex_in_the_foreground_yields_to_a_running_application(data_dir: Path) -> None:
+    with_services(two_facts_without_vectors)
+    lock = with_services(
+        lambda services: InstanceLock(LOCK_RUN, locks_dir=services.paths.locks_dir)
+    )
+    assert lock.acquire()
+    try:
+        result = cli("memory", "reindex", "--foreground")
+    finally:
+        lock.release()
+    assert result.exit_code == 0, result.output
+    assert "the application is running and will execute the job" in result.output
+    assert with_services(read_reindex_state) is None
+
+
+async def test_the_reindex_job_gives_the_result_of_the_synchronous_call(
+    services: Services, embedder: HashingBackend
+) -> None:
+    """The handler is the old command body in a thread: same count, state recorded."""
+    two_facts_without_vectors(services)
+    queued = queue_memory_reindex(services)
+    assert not queued.already_queued
+    registry = HandlerRegistry()
+    registry.register(REINDEX_JOB, handle_memory_reindex)
+    summary = await run_jobs_until_idle(services, registry)
+    assert summary.done == 1
+    state = read_reindex_state(services)
+    assert state is not None and state["state"] == "done" and state["encoded"] == 2
+    assert Memory(services).reindex().encoded == state["encoded"]  # what the old command printed
+    job = JobQueue(services.db, services.clock).get(queued.job_id)
+    assert job is not None and job.status == "done"

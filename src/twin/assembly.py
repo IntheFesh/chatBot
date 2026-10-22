@@ -89,6 +89,9 @@ def assemble(
     engine_component: EngineComponent
     # the style model: its server is up (or loading) before the engine asks it anything
     llm = build_llm_runtime(services)
+    # `twin secrets set/delete deepseek_api_key` bumps the state version: a replaced key is in
+    # use from the next request on, not after the first 401 (D-702)
+    watcher.subscribe(llm.on_state_change)
     style = StyleRuntime.from_services(services, llm)
     serving = register_serving(application, services, style=style, say=None, watcher=watcher)
     channel: Channel

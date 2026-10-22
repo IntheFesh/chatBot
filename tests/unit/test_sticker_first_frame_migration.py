@@ -18,8 +18,11 @@ AFTER = "0019_sticker_first_frame"
 INDEX = "ix_stickers_first_frame_sha256"
 
 
+PARENT = "0018_jobs_error_detail"
+
+
 def before() -> str:
-    """The revision this one follows (whatever batch of the round put its own in between)."""
+    """The revision this one follows."""
     history = migrate.revision_history()
     return history[history.index(AFTER) - 1]
 
@@ -36,11 +39,11 @@ def indexes(path: Path, table: str) -> dict[str, list[str]]:
         connection.close()
 
 
-def test_the_revision_is_in_the_one_linear_history_after_the_eval_kinds() -> None:
+def test_the_revision_follows_the_jobs_error_detail_in_the_one_linear_history() -> None:
     history = migrate.revision_history()
     assert len(history) == len(set(history))  # one chain, no branch
-    assert AFTER in history and history.index(AFTER) > history.index("0017_eval_kinds")
-    assert migrate.head_revision() in history
+    assert history.index(AFTER) == history.index(PARENT) + 1 == history.index("0017_eval_kinds") + 2
+    assert before() == PARENT and migrate.head_revision() in history
 
 
 def test_it_adds_the_column_and_the_index_and_nothing_else(tmp_path: Path) -> None:

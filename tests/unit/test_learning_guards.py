@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import run_with_plans
 from tests.support.export_world import World, build_world
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.learning.pairs import PairRecord, PreferencePairStore, PromptSample
@@ -211,9 +212,12 @@ def test_a_rejected_reply_is_in_the_dpo_file_and_never_in_the_sft_set(
         template_version=lf_template.TEMPLATE_VERSION,
         persona_version="live:v1",
     )
-    sft = TrainingSetExporter(
-        services, TOKENIZER, ExportOptions(out_dir=tmp_path / "sft", plan_ratio=0.0)
-    ).run()
+    sft = run_with_plans(
+        services,
+        TrainingSetExporter(
+            services, TOKENIZER, ExportOptions(out_dir=tmp_path / "sft", plan_ratio=0.0)
+        ),
+    )
     assert sft.dataset is not None
     for name in sft.dataset.data_files():  # neither the reply nor the wording is a sample
         text = sft.dataset.file_path(name).read_text(encoding="utf-8")

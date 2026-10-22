@@ -299,7 +299,7 @@ def test_only_the_crisis_answer_sends_urgent() -> None:
     calls: dict[str, list[str]] = {"send_urgent_text": [], "urgent=True": []}
     for path in sorted(SRC.rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        where = str(path.relative_to(SRC))
+        where = path.relative_to(SRC).as_posix()
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)

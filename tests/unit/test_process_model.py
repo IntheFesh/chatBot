@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated
 
@@ -10,9 +11,11 @@ import typer
 from typer.testing import CliRunner
 
 from tests.support.clock import ManualClock
+from tests.support.win32 import FakeWin32
 from twin.cli import app
 from twin.config.secrets import SecretStore
-from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR, InstanceLock
+from twin.ops.foreground import foreground_run_lock
+from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, LOCK_SUPERVISOR, InstanceLock
 from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue
 from twin.ops.process_model import (
     CliError,
@@ -273,7 +276,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "memory remember": CommandKind.LIGHT,
         "memory forget": CommandKind.LIGHT,
         "memory summarize": CommandKind.HEAVY,
-        "memory reindex": CommandKind.LIGHT,
+        "memory reindex": CommandKind.HEAVY,  # round 17 item 29: queued, the application runs it
         "timezone show": CommandKind.READ,
         "timezone set": CommandKind.LIGHT,
         "timezone history": CommandKind.READ,
@@ -285,7 +288,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "train bundle": CommandKind.LIGHT,
         "train export": CommandKind.HEAVY,
         "train export-status": CommandKind.READ,
-        "train export-dpo": CommandKind.LIGHT,
+        "train export-dpo": CommandKind.HEAVY,  # round 17 item 29: it makes every pair again
         "train retrain-check": CommandKind.LIGHT,
         "train remote connect": CommandKind.LIGHT,
         "train remote upload": CommandKind.LIGHT,
@@ -436,6 +439,101 @@ def test_exclusive_command_releases_locks_it_acquired(home_services: Services) -
         _guard_locks(stack, spec, locks_dir)
         assert InstanceLock(LOCK_RUN, locks_dir=locks_dir).is_held_elsewhere()
     assert not InstanceLock(LOCK_RUN, locks_dir=locks_dir).is_held_elsewhere()
+
+
+def can_take(locks_dir: Path, name: str) -> bool:
+    """Whether another holder could take the lock now (it is given back at once)."""
+    lock = InstanceLock(name, locks_dir=locks_dir)
+    taken = lock.acquire()
+    lock.release()
+    return taken
+
+
+def exclusive_sample(
+    services: Services, secret_store: SecretStore, seen: dict[str, list[bool]]
+) -> typer.Typer:
+    """An EXCLUSIVE command that records, from inside its body, which locks others could take."""
+    locks_dir = services.paths.locks_dir
+    run_spec = get_spec(dict(iter_commands(app))["run"])
+    assert run_spec is not None
+    sample = typer.Typer()
+
+    @sample.command("exclusive")
+    @command(CommandKind.EXCLUSIVE, consent=False)
+    def exclusive(fail: Annotated[bool, typer.Option()] = False) -> None:
+        seen["during"] = [can_take(locks_dir, name) for name in ALL_LOCKS]
+        # the run lock as `twin run` would ask for it: it is refused while this command works
+        with ExitStack() as stack:
+            try:
+                _guard_locks(stack, run_spec, locks_dir)
+            except CliError as exc:
+                seen["twin_run"] = [exc.code is ExitCode.BUSY]
+        if fail:
+            raise CliError("the body failed")
+
+    set_cli_context(
+        CliContext(
+            overrides={"paths": {"data_dir": str(services.paths.data_dir)}}, secrets=secret_store
+        )
+    )
+    return sample
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_an_exclusive_command_holds_both_locks_until_it_ends(
+    services: Services, secret_store: SecretStore, fail: bool
+) -> None:
+    """R17-28 (D-710): the check is a hold, not a look; it ends with the command, also on error.
+
+    Before: the wrapper only probed ("is it held elsewhere?") and let go at once, so between the
+    check and the work - and during a ``typer.confirm`` - ``twin run`` could start.
+    """
+    seen: dict[str, list[bool]] = {}
+    sample = exclusive_sample(services, secret_store, seen)
+    result = runner.invoke(sample, ["--fail"] if fail else [])
+    assert result.exit_code == (1 if fail else 0), result.output
+    assert seen["during"] == [False, False]  # neither lock could be taken inside the body
+    assert seen["twin_run"] == [True]  # and `twin run` is refused with BUSY meanwhile
+    locks_dir = services.paths.locks_dir
+    assert [can_take(locks_dir, name) for name in ALL_LOCKS] == [True, True]  # all given back
+
+
+def test_an_exclusive_command_that_cannot_get_the_second_lock_gives_back_the_first(
+    home_services: Services,
+) -> None:
+    spec = CommandSpec(CommandKind.EXCLUSIVE, (), (), True)
+    locks_dir = home_services.paths.locks_dir
+    supervisor = hold(home_services, LOCK_SUPERVISOR)
+    try:
+        with ExitStack() as stack:
+            with pytest.raises(CliError, match="'supervisor' instance is running") as info:
+                _guard_locks(stack, spec, locks_dir)
+            assert info.value.code is ExitCode.BUSY
+    finally:
+        supervisor.release()
+    assert can_take(locks_dir, LOCK_RUN) and can_take(locks_dir, LOCK_SUPERVISOR)
+
+
+def test_the_windows_mutexes_are_held_and_given_back_the_same_way(tmp_path: Path) -> None:
+    """The mutex backend: a second ``CreateMutexW`` of the name says ALREADY_EXISTS while held."""
+    spec = CommandSpec(CommandKind.EXCLUSIVE, (), (), True)
+    win32 = FakeWin32()
+
+    def second(name: str) -> bool:
+        lock = InstanceLock(name, locks_dir=tmp_path, platform="win32", win32=win32)
+        taken = lock.acquire()
+        lock.release()
+        return taken
+
+    with ExitStack() as stack:
+        _guard_locks(stack, spec, tmp_path, platform="win32", win32=win32)
+        assert [second(name) for name in ALL_LOCKS] == [False, False]
+        assert win32.registry == {
+            "Local\\wechat-twin-run": 1,
+            "Local\\wechat-twin-supervisor": 1,
+        }
+    assert [second(name) for name in ALL_LOCKS] == [True, True]
+    assert set(win32.registry.values()) == {0}  # every handle was closed
 
 
 def test_twin_run_tolerates_the_supervisor_lock_but_not_a_second_run(
@@ -625,6 +723,78 @@ def test_foreground_heavy_work_runs_with_the_same_worker_when_the_app_is_stopped
     enqueue_heavy(services, [JobSpec("heavy_task", {"n": 7}, priority=5)], foreground=True)
     assert ran == [7]
     assert "done=1" in capsys.readouterr().out
+
+
+def test_foreground_heavy_work_holds_the_run_lock_until_it_has_finished(
+    services: Services, heavy_registry: HandlerRegistry
+) -> None:
+    """R17-27 (D-711): ``twin run`` is refused (BUSY) while the foreground worker is working."""
+    seen: dict[str, object] = {}
+    locks_dir = services.paths.locks_dir
+    run_spec = get_spec(dict(iter_commands(app))["run"])
+    assert run_spec is not None
+
+    async def handler(ctx: JobContext) -> None:
+        seen["free_inside"] = can_take(locks_dir, LOCK_RUN)
+        with ExitStack() as stack:
+            try:
+                _guard_locks(stack, run_spec, locks_dir)
+            except CliError as exc:
+                seen["twin_run"] = exc.code
+
+    heavy_registry.register("heavy_task", handler)
+    enqueue_heavy(services, [JobSpec("heavy_task", {})], foreground=True)
+    assert seen == {"free_inside": False, "twin_run": ExitCode.BUSY}
+    assert can_take(locks_dir, LOCK_RUN)
+
+
+def test_a_heavy_command_that_finds_the_application_running_ends_with_busy(
+    services: Services, secret_store: SecretStore
+) -> None:
+    """The refusal of the foreground lock is the exit code the wrapper gives every lock refusal."""
+    sample = typer.Typer()
+
+    @sample.command("foreground")
+    @command(CommandKind.HEAVY, consent=False)
+    def foreground() -> None:
+        with foreground_run_lock(services):
+            raise AssertionError("must not get in")
+
+    set_cli_context(
+        CliContext(
+            overrides={"paths": {"data_dir": str(services.paths.data_dir)}}, secrets=secret_store
+        )
+    )
+    application = hold(services, LOCK_RUN)
+    try:
+        result = runner.invoke(sample, [])
+    finally:
+        application.release()
+    assert result.exit_code == ExitCode.BUSY, result.output
+    assert "the application is running and executes the queued jobs itself" in result.output
+
+
+def test_foreground_heavy_work_does_not_take_over_the_applications_running_job(
+    services: Services, heavy_registry: HandlerRegistry, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran: list[str] = []
+
+    async def handler(ctx: JobContext) -> None:
+        ran.append(ctx.job.id)
+
+    heavy_registry.register("heavy_task", handler)
+    queue = JobQueue(services.db, services.clock)
+    busy = queue.enqueue("heavy_task", {"n": 1})
+    queue.claim_next({"heavy_task"}, offpeak_allowed=True, worker_id="4242-application")
+    lock = hold(services, LOCK_RUN)
+    try:
+        enqueue_heavy(services, [JobSpec("heavy_task", {"n": 2})], foreground=True)
+    finally:
+        lock.release()
+    assert ran == []
+    job = queue.get(busy)
+    assert job is not None and job.status == "running"
+    assert "will execute the queued job" in capsys.readouterr().out
 
 
 def test_foreground_heavy_work_leaves_execution_to_a_running_application(

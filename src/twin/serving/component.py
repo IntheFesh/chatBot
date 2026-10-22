@@ -47,7 +47,7 @@ from twin.engine.style_runtime import ConfiguredStyleClient, StyleRuntime
 from twin.llm.style_client import StyleHealth, StyleModelClient
 from twin.ops.health import HealthCheck, HealthLevel
 from twin.ops.jobobject import ProcessJob
-from twin.ops.logging import get_logger
+from twin.ops.logging import exception_summary, get_logger
 from twin.ops.state_watch import StateWatcher
 from twin.serving.evaluation import EvaluationServers, install_servers, tunnel_known_hosts
 from twin.serving.llamacpp import ServeError
@@ -335,7 +335,7 @@ class StyleServingComponent:
             await asyncio.to_thread(verify_model_file, model, path, full=False)
         except ServeError as exc:
             self._unavailable = str(exc)
-            log.warning("server_unavailable", reason=str(exc)[:200])
+            log.warning("server_unavailable", reason=exception_summary(exc))
             return
         self._unavailable = None
         local = build_local_server(
@@ -393,7 +393,7 @@ class StyleServingComponent:
             )
         except RemoteError as exc:
             self._unavailable = str(exc)
-            log.warning("tunnel_unavailable", reason=str(exc)[:200])
+            log.warning("tunnel_unavailable", reason=exception_summary(exc))
             return
         self._unavailable = None
         probe = client_for(config, services.clock)

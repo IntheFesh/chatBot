@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -23,8 +25,11 @@ from twin.llm.redaction import (
     find_tokens,
     is_valid_id_card,
     luhn_valid,
+    prompt_redactor,
     redact,
+    redact_prompt,
     redact_text,
+    use_prompt_redactor,
 )
 
 # ----------------------------------------------------------------- per kind
@@ -39,6 +44,13 @@ from twin.llm.redaction import (
         (f"call {us_phone()} now", "phone"),
         ("312-555-0198", "phone"),
         ("+1 312.555.0198", "phone"),
+        # R17-9: a number that ends a sentence is still a number
+        ("call me at 312-555-0123.", "phone"),
+        ("+1 312.555.0123.", "phone"),
+        ("(312) 555-0123.", "phone"),
+        ("312.555.0123.", "phone"),
+        ("312-555-0123。", "phone"),
+        ("Tel. 312-555-0123.", "phone"),
         (f"mail me at {email_address('a.b+tag')} please", "email"),
         (f"加我 {wxid_short()} 吧", "wxid"),
         (f"群 {chatroom()}", "wxid"),
@@ -145,6 +157,11 @@ def test_leading_function_words_are_not_swallowed_by_an_address() -> None:
         "版本 3.12.13",
         "12345678901234",
         "pi=3.14159",
+        # R17-9: the sentence-final dot is allowed after a number, a decimal point is not
+        "192.168.100.1234",
+        "312-555-0123.5",
+        "10.234.567.8901",
+        "2.312-555-0123",
         "你好，世界",
         "",
     ],
@@ -367,3 +384,115 @@ def test_consistent_redaction_maps_one_number_to_one_token(
     second = redactor.redact_text(f"{after}，{number}，{before}")
     assert "[手机号#1]" in first and "[手机号#1]" in second
     assert "[手机号#2]" not in first + second
+
+
+# ------------------------------------------------- R17-9: North American numbers at a sentence end
+
+
+@st.composite
+def _us_phones(draw: st.DrawFn) -> str:
+    """A NANP number in the spellings people type (hyphen, dot, parentheses, ``+1``, plain)."""
+    area = draw(st.integers(min_value=200, max_value=999))
+    exchange = draw(st.integers(min_value=200, max_value=999))
+    line = draw(st.integers(min_value=0, max_value=9999))
+    style = draw(st.sampled_from(["hyphen", "dot", "paren", "plus1", "plus1dot", "plain"]))
+    if style == "hyphen":
+        return f"{area}-{exchange}-{line:04d}"
+    if style == "dot":
+        return f"{area}.{exchange}.{line:04d}"
+    if style == "paren":
+        return f"({area}) {exchange}-{line:04d}"
+    if style == "plus1":
+        return f"+1 {area}-{exchange}-{line:04d}"
+    if style == "plus1dot":
+        return f"+1 {area}.{exchange}.{line:04d}"
+    return f"{area}{exchange}{line:04d}"
+
+
+_SENTENCE_END = st.sampled_from(["", ".", "。", "!", "?", ",", ". ", ".\n", "。\n", ")."])
+_LEAD = st.sampled_from(["", "Tel. ", "Tel.", "call me at ", "电话：", "（"])
+
+
+@settings(max_examples=300, deadline=None)
+@given(_clean_text, _LEAD, _us_phones(), _SENTENCE_END, _clean_text)
+def test_r17_9_a_north_american_number_is_replaced_at_the_end_of_a_sentence(
+    before: str, lead: str, number: str, ending: str, after: str
+) -> None:
+    """R17-9: ``call me at 312-555-0123.`` used to pass untouched (the dot guard was too wide)."""
+    separator = "，" if before else ""
+    text = f"{before}{separator}{lead}{number}{ending}{after}"
+    result = redact(text)
+    assert result.text == f"{before}{separator}{lead}{REPLACEMENTS['phone']}{ending}{after}"
+    assert [span.kind for span in result.spans] == ["phone"]
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    st.integers(min_value=200, max_value=999),
+    st.integers(min_value=200, max_value=999),
+    st.integers(min_value=0, max_value=9999),
+    st.sampled_from([0, 2, 3, 4, 5, 6, 7, 8, 9]),  # "1." in front is the country code
+    st.sampled_from(["-", "."]),
+)
+def test_r17_9_a_digit_after_the_dot_means_it_was_a_decimal_point_not_a_number(
+    area: int, exchange: int, line: int, digit: int, sep: str
+) -> None:
+    """R17-9: the dot may end a sentence; a dot followed by a digit continues a longer number."""
+    text = f"x {area}{sep}{exchange}{sep}{line:04d}.{digit}"
+    assert redact_text(text) == text
+    dotted_prefix = f"{digit}.{area}{sep}{exchange}{sep}{line:04d}"
+    assert redact_text(dotted_prefix) == dotted_prefix
+
+
+# ----------------------------------------- R17-20: the redactor of the prompts of the style model
+
+
+def test_the_prompt_redactor_is_one_numbered_redactor_for_the_whole_process() -> None:
+    """R17-20: the same instance every time, with the numbered placeholders of the training set."""
+    with use_prompt_redactor() as fresh:
+        assert prompt_redactor() is fresh is prompt_redactor()
+        assert isinstance(fresh, ConsistentRedactor)
+        assert redact_prompt(f"打 {mobile()}") == "打 [手机号#1]"
+        assert redact_prompt(f"{us_phone()} 和 {mobile()}") == "[手机号#2] 和 [手机号#1]"
+        assert fresh.counts() == {"phone": 2}
+
+
+def test_borrowing_the_prompt_redactor_puts_the_previous_one_back() -> None:
+    before = prompt_redactor()
+    with use_prompt_redactor(ConsistentRedactor()) as borrowed:
+        assert borrowed is not before and prompt_redactor() is borrowed
+        with pytest.raises(RuntimeError, match="boom"), use_prompt_redactor():
+            raise RuntimeError("boom")
+        assert prompt_redactor() is borrowed  # the inner borrow was undone, even by an error
+    assert prompt_redactor() is before
+
+
+def test_numbers_asked_from_many_threads_stay_one_per_entity() -> None:
+    redactor = ConsistentRedactor()
+    numbers = [f"1380013{index:04d}" for index in range(40)]
+    results: list[list[str]] = [[] for _ in range(8)]
+
+    def work(slot: int) -> None:
+        for number in numbers:
+            results[slot].append(redactor.redact_text(f"号码{number}。"))
+
+    threads = [threading.Thread(target=work, args=(slot,)) for slot in range(len(results))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert redactor.counts() == {"phone": len(numbers)}
+    for slot in results:  # every thread saw the same token for the same number
+        assert slot == results[0]
+    assert len(set(results[0])) == len(numbers)
+
+
+@settings(max_examples=100, deadline=None)
+@given(st.lists(_phone_numbers(), min_size=1, max_size=6), _clean_text)
+def test_r17_20_numbered_prompt_placeholders_are_the_ones_the_training_redactor_writes(
+    numbers: list[str], filler: str
+) -> None:
+    """Whatever is in the prompt, the process redactor and a dataset redactor agree on the text."""
+    text = "，".join(f"{filler}{number}" for number in numbers)
+    with use_prompt_redactor():
+        assert redact_prompt(text) == ConsistentRedactor().redact_text(text)

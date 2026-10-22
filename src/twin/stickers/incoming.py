@@ -170,7 +170,7 @@ async def describe_incoming_sticker(
     )
     if source is None:
         return StickerDescription(key, record.tags if record else (), None, "none")
-    owned = client is None
+    # the process's one client (D-701): a caller that passes its own keeps closing it itself
     runtime = build_llm_runtime(services) if client is None else None
     active = client if client is not None else (runtime.client if runtime else None)
     if active is None:
@@ -183,7 +183,4 @@ async def describe_incoming_sticker(
     except (TimeoutError, LlmError, ValueError, OSError) as exc:
         log.warning("incoming_sticker_not_described", reason=type(exc).__name__)
         return StickerDescription(key, (), None, "none")
-    finally:
-        if owned:
-            await active.aclose()
     return _from_record(cached, "vision")

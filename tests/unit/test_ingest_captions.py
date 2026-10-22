@@ -278,9 +278,14 @@ async def test_a_failed_description_is_retried_and_finished_ones_are_kept(
     assert stored == ["第一张"]
 
 
-async def test_when_the_daily_budget_is_exhausted_a_single_request_waits(
+async def test_when_the_daily_budget_is_exhausted_a_single_request_is_still_described(
     services: Services, imported: SynthExport, api: respx.MockRouter
 ) -> None:
+    """R17-17 (D-115): only proactive messages stop at the last budget level (R-LLM-008).
+
+    The old test pinned a refusal of ``caption`` that the SPEC does not have: the job was
+    deferred to "a better day".  The money is still bounded by the ratios and the alerts.
+    """
     asset_id = image_assets(services)[0]
     CaptionService(services).queue_caption(asset_id)
     services.settings.budget.daily_usd = 0.10
@@ -297,11 +302,13 @@ async def test_when_the_daily_budget_is_exhausted_a_single_request_waits(
             at=services.clock.now_utc(),
         )
     )
+    assert runtime.budget.current_level() == 4
     route = api.post(API).mock(return_value=caption_reply())
     summary = await run_queue(services)
-    assert summary.deferred == 1 and summary.failed == 0 and route.call_count == 0
+    assert summary.done == 1 and summary.deferred == 0 and summary.failed == 0
+    assert route.call_count == 1
     (job,) = JobQueue(services.db, services.clock).list_jobs(job_type=CAPTION_JOB)
-    assert job.status == "pending" and job.attempts == 0  # waits for a better day, no attempt lost
+    assert job.status == "done" and job.attempts == 1
 
 
 # ---------------------------------------------------------------- get_caption

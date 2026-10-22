@@ -14,7 +14,7 @@ The column is nullable (a GIF stored before this revision has no variant until t
 ``sha256``.
 
 Revision ID: 0019_sticker_first_frame
-Revises: 0017_eval_kinds
+Revises: 0018_jobs_error_detail
 Create Date: 2026-10-22
 """
 
@@ -24,7 +24,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0019_sticker_first_frame"
-down_revision: str | None = "0017_eval_kinds"
+down_revision: str | None = "0018_jobs_error_detail"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

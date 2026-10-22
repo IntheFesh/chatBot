@@ -20,8 +20,10 @@ on the instance (R-ARCH-006).
     the last export ended;
 ``export-dpo``
     writes the preference pairs of ``/不像 <正确说法>`` (the only reader of ``preference_pairs``) as
-    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset (LIGHT:
-    no model is called);
+    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset (HEAVY:
+    it queues the ``training_export_dpo`` job and ``--foreground`` runs it here when the
+    application is stopped; no model is called, but it makes the system segment of every pair
+    again and scans the file; ``export-status`` shows how it ended, round 17 item 29, D-713);
 ``retrain-check``
     compares her messages now with the ones the last training covered (R-TRN-012) and raises
     the ``retrain_suggested`` alert when it is time (the post-import hook calls the same code).
@@ -50,14 +52,18 @@ from twin.services import Services, get_cli_context
 from twin.training import bundle_crypto
 from twin.training.bundle import BundleError, build_bundle, verify_bundle
 from twin.training.dataset_dir import DatasetError, file_sha256, load_dataset_dir
-from twin.training.dpo_export import export_dpo
 from twin.training.export import ExportError
 from twin.training.export_job import (
+    DPO_STATE_KEY,
+    EXPORT_DPO_JOB,
     EXPORT_JOB,
+    DpoRequest,
     ExportRequest,
     handle_training_export,
+    handle_training_export_dpo,
     local_range,
     queue_export,
+    queue_export_dpo,
     read_state,
 )
 from twin.training.layout import RemoteLayout
@@ -295,6 +301,46 @@ def format_stats(stats: dict[str, Any]) -> list[str]:
     return lines
 
 
+def format_dpo_state(state: dict[str, Any]) -> list[str]:
+    """The lines ``export-dpo`` and ``export-status`` print about the last DPO export (no text)."""
+    kind = state.get("state")
+    lines = [f"export-dpo: {kind} ({state.get('at', '?')})"]
+    if kind == "failed":
+        lines.append(f"  {state.get('message', '')}")
+        return lines
+    if kind != "done":
+        return lines
+    lines.append(
+        f"  dataset {state.get('dataset_version')}: {state.get('pairs')} preference pair(s) "
+        "in dpo_train.jsonl"
+    )
+    lines.append(f"  in {state.get('directory')}")
+    if state.get("regenerated"):
+        lines.append(
+            f"  {state.get('regenerated')} system segment(s) made again for the card "
+            f"{state.get('persona_version')} and the template {state.get('template_version')} "
+            "the adapter is locked to"
+        )
+    skipped = state.get("skipped") or {}
+    if skipped:
+        lines.append("  left out: " + ", ".join(f"{why} {n}" for why, n in sorted(skipped.items())))
+    if not state.get("enough"):
+        lines.append(
+            f"  DPO needs at least {state.get('minimum')} pairs; with fewer, dpo.sh skips the step "
+            "(more come with /不像 <正确说法>)"
+        )
+    lines.append("  next: twin train bundle --profile <profile> --dataset <that directory>")
+    return lines
+
+
+async def _export_dpo_in_foreground(services: Services) -> None:
+    registry = HandlerRegistry()
+    registry.register(EXPORT_DPO_JOB, handle_training_export_dpo)
+    summary = await run_jobs_until_idle(services, registry)
+    if summary.failed or summary.retried:
+        typer.echo(f"the DPO export did not finish: {'; '.join(summary.failures) or 'see the log'}")
+
+
 async def _export_in_foreground(services: Services) -> None:
     registry = HandlerRegistry()
     registry.register(EXPORT_JOB, handle_training_export)
@@ -358,10 +404,14 @@ def export_status_command() -> None:
             typer.echo(line)
     counts = PlanStore(services.db).counts()
     typer.echo("plans: " + ", ".join(f"{name} {number}" for name, number in counts.items()))
+    dpo_state = read_state(services, key=DPO_STATE_KEY)
+    if dpo_state is not None:
+        for line in format_dpo_state(dpo_state):
+            typer.echo(line)
 
 
 @train_app.command("export-dpo")
-@command(CommandKind.LIGHT)
+@command(CommandKind.HEAVY)
 def export_dpo_command(
     dataset: Annotated[
         Path | None,
@@ -372,32 +422,33 @@ def export_dpo_command(
     out: Annotated[
         Path | None, typer.Option("--out", help="Write the new dataset here (default: next to it)")
     ] = None,
+    foreground: Annotated[
+        bool, typer.Option("--foreground", help="Run here when the application is stopped")
+    ] = False,
 ) -> None:
-    """Write the preference pairs of /不像 as the DPO file of a new dataset version."""
+    """Write the preference pairs of /不像 as the DPO file of a new dataset version (queued)."""
     services = get_cli_context().services()
-    with _failures():
-        result = export_dpo(services, dataset=dataset, out_dir=out)
-    meta = result.dataset.meta
-    typer.echo(
-        f"dataset {meta.dataset_version}: {result.pairs} preference pair(s) in dpo_train.jsonl"
+    request = DpoRequest(
+        dataset.resolve() if dataset else None,  # the application has another working directory
+        out.resolve() if out else None,
     )
-    typer.echo(f"in {result.dataset.path}")
-    if result.regenerated:
-        typer.echo(
-            f"{result.regenerated} system segment(s) made again for the card "
-            f"{meta.persona_version} and the template {meta.template_version} "
-            "the adapter is locked to"
-        )
-    if result.skipped:
-        typer.echo(
-            "left out: " + ", ".join(f"{why} {n}" for why, n in sorted(result.skipped.items()))
-        )
-    if not result.enough:
-        typer.echo(
-            f"DPO needs at least {result.minimum} pairs; with fewer, dpo.sh skips the step "
-            "(more come with /不像 <正确说法>)"
-        )
-    typer.echo("next: twin train bundle --profile <profile> --dataset <that directory>")
+    queued = queue_export_dpo(services, request)
+    verb = "a DPO export is already waiting" if queued.already_queued else "queued"
+    typer.echo(f"{verb} (job {queued.job_id})")
+    if not foreground:
+        typer.echo("the running application executes it; see `twin train export-status`")
+        return
+    if app_is_running(services):
+        typer.echo("the application is running and will execute the job")
+        return
+    asyncio.run(_export_dpo_in_foreground(services))
+    state = read_state(services, key=DPO_STATE_KEY)
+    if state is None:
+        raise CliError("the DPO export left no record; see `twin jobs list`", ExitCode.FAILURE)
+    for line in format_dpo_state(state):
+        typer.echo(line)
+    if state.get("state") != "done":
+        raise CliError("the DPO export failed", ExitCode.FAILURE)
 
 
 @train_app.command("retrain-check")

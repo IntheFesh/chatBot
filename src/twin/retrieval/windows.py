@@ -23,6 +23,13 @@ in ``example_windows`` are looked up in ``messages`` again whenever a window is 
 
 Streaming.  :class:`WindowAssembler` walks the messages once in time order and keeps only the
 last few turns, so a conversation of millions of messages needs a few kilobytes.
+
+Two options make the context the one the live prompt keeps (the training export, D-642):
+``clear_at_segment=False`` lets the context go on across a pause longer than
+``segment_gap_min`` (the running bot reads the last turns whatever the pause was), and
+``merge_sides=True`` stores merged turns - consecutive bursts of one side are one turn, as
+``normalize_context`` makes them - so the window holds that many *merged* turns.  The defaults
+are the retrieval library's.
 """
 
 from __future__ import annotations
@@ -160,12 +167,26 @@ class _Turn:
 
 
 class WindowAssembler:
-    """Walks the conversation in time order and emits a window for each of her bursts."""
+    """Walks the conversation in time order and emits a window for each of her bursts.
 
-    def __init__(self, burst_gap_s: float, segment_gap_s: float, context_turns: int) -> None:
+    ``clear_at_segment`` (default) starts the context afresh after a pause longer than the
+    segment gap; ``merge_sides`` makes the context hold merged turns (see the module description).
+    """
+
+    def __init__(
+        self,
+        burst_gap_s: float,
+        segment_gap_s: float,
+        context_turns: int,
+        *,
+        clear_at_segment: bool = True,
+        merge_sides: bool = False,
+    ) -> None:
         self._segmenter = BurstSegmenter(burst_gap_s, segment_gap_s)
         self._context: deque[_Turn] = deque(maxlen=context_turns)
         self._open: _Turn | None = None
+        self._clear_at_segment = clear_at_segment
+        self._merge_sides = merge_sides
 
     def _close(self) -> WindowDraft | None:
         turn, self._open = self._open, None
@@ -174,7 +195,10 @@ class WindowAssembler:
         draft = None
         if turn.her:
             draft = _window_of(turn.messages, [t.messages for t in self._context])
-        self._context.append(turn)
+        if self._merge_sides and self._context and self._context[-1].her == turn.her:
+            self._context[-1].messages.extend(turn.messages)
+        else:
+            self._context.append(turn)
         return draft
 
     def add(self, message: Message) -> WindowDraft | None:
@@ -188,7 +212,7 @@ class WindowAssembler:
             self._open.messages.append(row)
             return None
         draft = self._close()
-        if boundary.new_segment:
+        if boundary.new_segment and self._clear_at_segment:
             self._context.clear()
         self._open = _Turn(her, [row])
         return draft

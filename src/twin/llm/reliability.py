@@ -220,13 +220,21 @@ class CircuitBreaker:
                 listener()
 
     def record_failure(self) -> None:
+        """Count a failure; ``on_open`` listeners hear it only when the breaker *opens*.
+
+        A failed half-open probe starts another waiting period silently: it is the same outage,
+        and announcing it again would make every listener count one opening twice (round 17,
+        D-701: the health record's "open" flag stuck for ever).
+        """
         self._failures += 1
+        was_closed = self._opened_at is None
         was_half_open = self._probe_in_flight
         self._probe_in_flight = False
-        if was_half_open or (self._opened_at is None and self._failures >= self.failure_threshold):
+        if was_half_open or (was_closed and self._failures >= self.failure_threshold):
             self._opened_at = self._clock.monotonic()
-            for listener in self._on_open:
-                listener(self._failures)
+            if was_closed:
+                for listener in self._on_open:
+                    listener(self._failures)
 
     def abandon(self) -> None:
         """A call ended without an answer (cancelled): free the half-open probe slot."""

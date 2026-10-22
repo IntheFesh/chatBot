@@ -12,12 +12,16 @@ routine, the memory block as it was known then.  Nothing after ``t`` can reach a
 (R-TRN-013).  The messages of the conversation itself are read through
 :mod:`twin.training.export_blocks`, i.e. through :mod:`twin.ingest.corpus` and only before ``t``.
 
-*What becomes a sample.*  A block whose target has nothing left after the lines the bot could not
-send are deleted, a block that does not follow a turn of the user (it opened the conversation, or
-she wrote twice in a row) and a block that does not fit 2,048 tokens even after all older context
-is dropped are not samples; each reason is counted.  A sample that is too long loses its oldest
-context, never its target: LLaMA-Factory would otherwise cut the end of the prompt, the assistant
-opener included (``training/README.md``).
+*What becomes a sample.*  Every reply block of hers whose target still has something in it after
+the lines the bot could not send are deleted - except a block that does not fit 2,048 tokens even
+after all older context is dropped; each reason is counted.  The context is what the running bot
+would read: the last eight merged turns, **whatever the pauses between them were** (D-642), so a
+reply 200 minutes after the user's message is a sample like any other.  A prompt must end with a
+turn of the user's: when the context does not (she opened the conversation, wrote twice in a row,
+or wrote after a long silence), the sample is a *proactive* one and the last turn is the fixed cue
+the proactive path uses (:data:`~twin.engine.style_prompt.PROACTIVE_CUE_TEXT`), as online.  A
+sample that is too long loses its oldest context, never its target: LLaMA-Factory would otherwise
+cut the end of the prompt, the assistant opener included (``training/README.md``).
 
 *Splits.*  By time: the samples from :func:`~twin.profile.holdout.holdout_cutoff` on are the test
 set, the last 5 % of the rest the validation set, the earlier ones train.
@@ -28,9 +32,15 @@ what is left (personal data, event text in a target) before the set is declared 
 the written files are scanned again.
 
 *Plans.*  ``training.hybrid_plan_ratio`` of the training and validation samples carry a plan
-(:mod:`twin.training.plans`).  When some of them have none yet, the export stops after a first
-pass, hands the missing inputs back, and writes nothing; once the plans exist the same command
-completes.
+(:mod:`twin.training.plans`), and so does every proactive one of them: online the proactive path
+always hands the style model a plan (D-643).  When some of them have none yet, the export stops
+after a first pass, hands the missing inputs back, and writes nothing; once the plans exist the
+same command completes.
+
+*Her state on waking.*  The prompt says she has just woken (``WOKE_UP_LINE``) when the user wrote
+while the routine had her deep asleep and she answers awake, and for a proactive sample in the
+greeting window after her sleep, as the engine and the greeting trigger do (D-644).  A plan
+carries the sticker tag of the target as ``sticker_hint``, as the online planner would write it.
 """
 
 from __future__ import annotations
@@ -39,7 +49,7 @@ import json
 import shutil
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -51,10 +61,11 @@ from twin.engine.style_prompt import (
     StyleTurn,
     TokenBudget,
     normalize_context,
+    with_proactive_cue,
 )
 from twin.ingest.corpus import her_message_count
 from twin.llm.redaction import ConsistentRedactor, redact, redact_text
-from twin.memory.asof import AsOfSource
+from twin.memory.asof import AsOfSource, AsOfView
 from twin.profile.holdout import HoldoutError, holdout_cutoff
 from twin.profile.persona.render import RenderedPersona
 from twin.stickers.catalog import StickerCatalog
@@ -77,6 +88,7 @@ from twin.training.parity_cases import (
     TAG_MULTILINE,
     TAG_PLAN,
     TAG_PRELUDE,
+    TAG_PROACTIVE,
     TAG_QUOTE,
     TAG_SINGLE,
     TAG_STICKER,
@@ -168,10 +180,13 @@ class _Prepared:
 
     block: LoadedBlock
     target: Target
-    turns: list[StyleTurn]
+    turns: list[StyleTurn]  # the proactive cue included when ``proactive``
     sha: str
     pre_holdout: bool
     selected: bool
+    proactive: bool  # no user turn waits for this reply: the context ends with the cue
+    after_gap: bool  # the pause before the block is longer than the segment gap
+    anchor: datetime  # the moment whose state says whether she was asleep (see _woke_up)
 
     @property
     def sample_id(self) -> str:
@@ -247,14 +262,17 @@ class TrainingSetExporter:
             stats.drop(DROP_EMPTY_TARGET)
             return None
         turns: list[StyleTurn] = []
+        last_at: datetime | None = None  # the last message of the last turn that has text
         for turn in block.context:
             text = context_text([m.data for m in turn], self._labeler)
             if text:
                 turns.append(StyleTurn("user" if turn[0].data.is_sent else "assistant", text))
-        context = normalize_context(turns)
-        if not context.turns or not context.ends_with_user:
-            stats.drop(DROP_NO_USER_TURN)
-            return None
+                last_at = turn[-1].at
+        proactive = not normalize_context(turns).ends_with_user
+        if proactive:
+            turns = with_proactive_cue(turns)
+        gap_s = self._services.settings.profile.segment_gap_min * 60.0
+        after_gap = last_at is not None and (block.at - last_at).total_seconds() > gap_s
         pre_holdout = block.at < self._cutoff
         return _Prepared(
             block=block,
@@ -262,8 +280,36 @@ class TrainingSetExporter:
             turns=turns,
             sha=target_hash(target.text),
             pre_holdout=pre_holdout,
-            selected=pre_holdout and plan_selected(block.sample_id, self._ratio),
+            selected=pre_holdout and (proactive or plan_selected(block.sample_id, self._ratio)),
+            proactive=proactive,
+            after_gap=after_gap,
+            anchor=self._anchor(block.at, last_at, proactive=proactive),
         )
+
+    def _anchor(self, at: datetime, last_at: datetime | None, *, proactive: bool) -> datetime:
+        """The moment before ``at`` at which she must have been asleep for her to have woken up.
+
+        An answer: when the user's last message arrived (``last_at``; the engine reads the state
+        of that moment).  A proactive sample: the end of the greeting window before ``at`` - the
+        greeting trigger fires 5 to 40 minutes after her waking up.
+        """
+        if proactive or last_at is None:
+            window = self._services.settings.schedule.greeting_window_min
+            return at - timedelta(minutes=window[-1])
+        return last_at
+
+    def _woke_up(self, item: _Prepared, view: AsOfView) -> bool:
+        """Did she wake up for this reply?  The deterministic part of the engine's rule (R-ENG-003).
+
+        She was deep asleep (the routine of the time) when the user wrote, and is not any more
+        when she answers (``view`` is the view of that moment); for a proactive sample that is the
+        greeting window.  The engine also lets her wake up by chance at the edge of her sleep;
+        that cannot be told from the data.  The earlier moment is read through a view as well, and
+        it is never later than the sample's own (R-TRN-013).
+        """
+        if view.her_state() == "deep_sleep":
+            return False
+        return self._source.at(item.anchor).her_state() == "deep_sleep"
 
     def _prepared(self, stats: StatsCollector) -> Iterator[_Prepared]:
         options = self._options
@@ -281,7 +327,9 @@ class TrainingSetExporter:
                 if prepared is not None:
                     yield prepared
 
-        for ref in iter_block_refs(self._services, since=options.since, until=options.until):
+        for ref in iter_block_refs(
+            self._services, since=options.since, until=options.until, across_gaps=True
+        ):
             if ref.reproducible < 1:
                 stats.drop(DROP_NO_REPRODUCIBLE)
                 continue
@@ -328,9 +376,11 @@ class TrainingSetExporter:
     # ----------------------------------------------------------------- second pass
 
     def run(self) -> ExportResult:
-        """Export the set, or report which plans are missing (see the module description)."""
-        if self._ratio <= 0:
-            return self.build()
+        """Export the set, or report which plans are missing (see the module description).
+
+        The first pass runs whatever the ratio: a proactive sample of the training part needs a
+        plan even when no other sample does (D-643).
+        """
         missing, selected = self.scan()
         if missing:
             return ExportResult("waiting_for_plans", missing_plans=missing, plan_selected=selected)
@@ -480,6 +530,7 @@ class TrainingSetExporter:
                 view,
                 [StyleTurn(turn.role, red(turn.text)) for turn in item.turns],
                 plan=plan,
+                woke_up=self._woke_up(item, view),
                 memory=replace(memory, text=red(memory.text)),
                 budget=TokenBudget(room, self._tokenizer.count),
             )
@@ -501,6 +552,8 @@ class TrainingSetExporter:
                 pre_holdout=item.pre_holdout,
                 planned=plan is not None,
                 plan_selected=item.selected,
+                proactive=item.proactive,
+                after_gap=item.after_gap,
                 turns=len(parts.turns),
                 prelude=parts.meta.prelude_turns > 0,
                 trimmed=parts.meta.trimmed_turns > 0,
@@ -541,6 +594,7 @@ class TrainingSetExporter:
             (target.stickers > 0, TAG_STICKER),
             (target.code_lines > 0, TAG_CODE),
             (target.quoted, TAG_QUOTE),
+            (item.proactive, TAG_PROACTIVE),
             (len(turns) == 1, TAG_SINGLE),
             (len(turns) >= DEEP_TURNS, TAG_DEEP),
             (not item.pre_holdout, TAG_TEST),
@@ -568,6 +622,7 @@ class TrainingSetExporter:
             facts_to_use=tuple(red(fact) for fact in fields.facts_to_use),
             tone=red(fields.tone),
             bubble_hint=red(fields.bubble_hint),
+            sticker_hint=red(item.target.sticker_tags[0]) if item.target.sticker_tags else "",
         )
         return None if plan.empty else plan
 

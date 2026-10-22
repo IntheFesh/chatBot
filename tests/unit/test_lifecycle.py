@@ -221,7 +221,10 @@ async def test_backoff_is_capped_and_repeated_crashes_mark_the_component_unhealt
     assert clock.sleeps[:5] == [10, 20, 30, 30, 30]
     health = supervisor.health()
     assert health.status is HealthStatus.UNHEALTHY
-    assert "crashed" in health.detail and "permanent failure" in health.detail
+    # what the health report says is the type and the place of the failure; the words of the
+    # exception can quote the conversation and the report is stored in a plain column (D-714)
+    assert "crashed" in health.detail and "RuntimeError @ " in health.detail
+    assert "always_fails" in health.detail and "permanent failure" not in health.detail
     await supervisor.stop()
 
 

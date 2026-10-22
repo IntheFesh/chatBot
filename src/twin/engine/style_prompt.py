@@ -85,6 +85,13 @@ PRELUDE_HEADING = "【前文】"
 WOKE_UP_LINE = "你刚醒，刚看到对方发来的这些消息。"
 PLAN_FIELD_CHARS = 80
 PLAN_FACTS_SHOWN = 6
+PROACTIVE_CUE_TEXT = "（对方这会儿没有说话，是她自己想主动找他聊几句。）"
+"""The last turn of the context when she writes first (R-PRO-006, R-TRN-002, D-642).
+
+A prompt must end with a user turn (ShareGPT, the template), so when no message of the user waits
+for an answer - the proactive path, and the training samples of her own openings and follow-ups -
+this fixed note is that turn.  One constant: the proactive scheduler and the export both use it.
+"""
 _BLANK_LINES = re.compile(r"\n{3,}")
 
 Side = Literal["user", "assistant"]
@@ -115,6 +122,15 @@ class StyleTurn:
 
     role: Side
     text: str
+
+
+def with_proactive_cue(turns: Sequence[StyleTurn]) -> list[StyleTurn]:
+    """``turns`` with the proactive cue as the last (the user's) turn: she is writing first.
+
+    What the proactive path hands the style model (its history, then the cue as the message "being
+    answered") and what the training export builds for a reply block that no user turn precedes.
+    """
+    return [*turns, StyleTurn("user", PROACTIVE_CUE_TEXT)]
 
 
 def style_turns(turns: Iterable[TurnLike]) -> list[StyleTurn]:

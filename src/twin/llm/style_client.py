@@ -23,8 +23,11 @@ Sampling is neutral and identical on both servers: temperature and top-p come fr
 stop string.  Failures raise :class:`~twin.llm.errors.StyleModelError`; there is no retry here,
 the engine decides whether to fall back to DeepSeek.
 
-The vLLM client talks to AutoDL through an SSH tunnel and therefore redacts the prompt first
-(CLAUDE.md rule 6); the llama.cpp client talks to a process on this computer and does not.
+Both clients redact the prompt before it is sent (CLAUDE.md rule 6 for the AutoDL server behind
+the SSH tunnel; for the local one so that the model sees the same text in both places) and they do
+it with the one process-wide numbered redactor, :func:`~twin.llm.redaction.prompt_redactor`: the
+tokens are the ``[手机号#1]`` the training set was redacted with (R-TRN-007, D-326), not the
+unnumbered ones of the logs (D-641).  ``tokenize`` sends exactly what ``generate`` would.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ import httpx
 from twin.clock import Clock
 from twin.config.settings import StyleModelConfig
 from twin.llm.errors import StyleModelError
-from twin.llm.redaction import redact_text
+from twin.llm.redaction import redact_prompt
 
 IM_END = "<|im_end|>"
 DEFAULT_TIMEOUT_S = 60.0
@@ -153,6 +156,7 @@ class _HttpStyleClient:
         timeout_s: float = DEFAULT_TIMEOUT_S,
         client: httpx.AsyncClient | None = None,
         headers: dict[str, str] | None = None,
+        outbound: Callable[[str], str] | None = redact_prompt,
     ) -> None:
         self._endpoint = endpoint.rstrip("/")
         self._clock = clock
@@ -160,6 +164,11 @@ class _HttpStyleClient:
         self._client = client
         self._owns_client = client is None
         self._headers = headers or {}
+        self._outbound = outbound
+
+    def _sent(self, text: str) -> str:
+        """``text`` as the server gets it: through the outbound filter (``None``: untouched)."""
+        return self._outbound(text) if self._outbound else text
 
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -238,9 +247,22 @@ def _timings(value: Any) -> dict[str, float] | None:
 class LlamaCppCompletionClient(_HttpStyleClient):
     """llama.cpp ``llama-server`` on this computer, through ``/completion``."""
 
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        clock: Clock,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
+        client: httpx.AsyncClient | None = None,
+        outbound: Callable[[str], str] | None = redact_prompt,
+    ) -> None:
+        super().__init__(
+            endpoint, clock=clock, timeout_s=timeout_s, client=client, outbound=outbound
+        )
+
     async def generate(self, prompt: RenderedPrompt, params: StyleParams) -> StyleOutput:
         payload: dict[str, Any] = {
-            "prompt": prompt.text,
+            "prompt": self._sent(prompt.text),
             "n_predict": params.n_predict,
             "temperature": params.temperature,
             "top_p": params.top_p,
@@ -286,12 +308,13 @@ class LlamaCppCompletionClient(_HttpStyleClient):
         ``/completion`` tokenizes a string prompt with ``add_special=true`` and
         ``parse_special=true`` (``tools/server/server-context.cpp``), so a GGUF that asks for a
         BOS token gets one in front of the prompt.  The comparison must see that BOS, hence the
-        same flags here; ``/tokenize`` itself defaults to ``add_special=false``.
+        same flags here; ``/tokenize`` itself defaults to ``add_special=false``.  The text goes
+        through the same outbound filter as a prompt.
         """
         data = await self._call(
             "POST",
             "/tokenize",
-            payload={"content": text, "add_special": True, "parse_special": True},
+            payload={"content": self._sent(text), "add_special": True, "parse_special": True},
             timeout_s=TOKENIZE_TIMEOUT_S,
         )
         return _token_ids(_field(data, "tokens", list))
@@ -309,20 +332,25 @@ class VllmCompletionClient(_HttpStyleClient):
         timeout_s: float = DEFAULT_TIMEOUT_S,
         client: httpx.AsyncClient | None = None,
         api_key: str | None = None,
-        outbound: Callable[[str], str] | None = redact_text,
+        outbound: Callable[[str], str] | None = redact_prompt,
     ) -> None:
         if not model:
             raise ValueError("the vLLM client needs the LoRA model name")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        super().__init__(endpoint, clock=clock, timeout_s=timeout_s, client=client, headers=headers)
+        super().__init__(
+            endpoint,
+            clock=clock,
+            timeout_s=timeout_s,
+            client=client,
+            headers=headers,
+            outbound=outbound,
+        )
         self._model = model
-        self._outbound = outbound
 
     async def generate(self, prompt: RenderedPrompt, params: StyleParams) -> StyleOutput:
-        text = self._outbound(prompt.text) if self._outbound else prompt.text
         payload: dict[str, Any] = {
             "model": self._model,
-            "prompt": text,
+            "prompt": self._sent(prompt.text),
             "max_tokens": params.n_predict,
             "temperature": params.temperature,
             "top_p": params.top_p,
@@ -377,11 +405,10 @@ class VllmCompletionClient(_HttpStyleClient):
         The text goes through the same outbound filter as a prompt, and ``add_special_tokens`` is
         false as in :meth:`generate` (``/tokenize`` would add a BOS by default).
         """
-        sent = self._outbound(text) if self._outbound else text
         data = await self._call(
             "POST",
             "/tokenize",
-            payload={"model": self._model, "prompt": sent, "add_special_tokens": False},
+            payload={"model": self._model, "prompt": self._sent(text), "add_special_tokens": False},
             timeout_s=TOKENIZE_TIMEOUT_S,
         )
         return _token_ids(_field(data, "tokens", list))

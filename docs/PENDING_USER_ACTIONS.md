@@ -323,7 +323,7 @@
 
 7. **导入新记录之后**
    - 导入钩子会找出没回放过（或消息变了）的日子并排队：第一次回放必须你批准；之后的增量如果估算低于 `budget.one_time_usd` 的 10%（`memory.replay_auto_approve_ratio`）则自动批准。导入报告“导入后钩子”里有一行 `memory_replay`，单独补跑用 `uv run twin memory replay start`。
-   - 换了嵌入模型（`retrieval.model`）之后：`uv run twin memory reindex`。
+   - 换了嵌入模型（`retrieval.model`）之后：`uv run twin memory reindex`（第 17 轮起是重任务：排进队列由应用执行；应用没在运行时加 `--foreground`）。
 
 8. **（后续轮次）** 第 08 轮生成每日生活线并按日排每日摘要；第 09 轮把 `MemoryAssembler.build` 接进回复提示词、创建 `bot_turns` 并注册读取器（`register_bot_turn_reader`）、会话静默后调用 `queue_bot_extraction`；第 10 轮读写待跟进；第 11 轮的 `/记住`、`/忘掉`、`/记忆` 调用 `MemoryManager`；第 13 轮的训练集导出只经 `AsOfView(t)` 读记忆。这些都不需要你现在做什么。
 
@@ -420,9 +420,9 @@
    - 完成后：`uv run twin train bundle --profile <档位> --dataset <打印出的目录>`，后面接 13a 的流程。
 
 3. **检查导出统计**（`twin train export-status`，同样的数字在 `dataset_meta.json` 的 `stats` 里）
-   - 各切分的样本数与丢弃原因。`no_user_turn_to_answer`（她主动开口的块，DECISIONS D-320）在合成数据里约占四分之一，真实数据按你们的聊天习惯会不同；`over_budget` 或 `target_too_long` 很多时请告诉我。
+   - 各切分的样本数与丢弃原因。她主动开口的块（她开启对话、连发两段、长沉默后先开口）现在也是样本，上下文末尾是固定的主动提示轮（DECISIONS D-320、D-642），统计里的 `samples.proactive` 是它们的个数，`samples.after_gap` 是前面隔了很久的样本数；真实数据按你们的聊天习惯会不同。`over_budget` 或 `target_too_long` 很多时请告诉我。
    - 表情包占比、表情代码占比应接近她的画像（统计里并排显示 `export` 与 `profile`），相差很大说明导出没有教到她的习惯。
-   - 规划样本占训练+验证的约 30%；测试集不带规划（D-321）。
+   - 规划样本占训练+验证的约 30%，外加每个 proactive 样本（线上主动消息总带规划，D-643；所以比例设为 0 时导出仍可能停在 `waiting_for_plans`）；测试集不带规划（D-321）。
    - token 总数与各档位预计训练时长：**规划用的粗略数字**（D-327），不是测量；第一次真实训练后以 `training_runs` 为准。
    - 抽查几行 `sft_train.jsonl`：目标里没有 `[图片]`、`[语音…]` 等事件文字，上下文里有；占位符如 `[手机号#1]` 在整个数据集里指同一个号码。
    - 真实数据量大时（十万个样本量级）导出会花不少时间（每个样本一次“当时的记忆块”检索和一次向量编码）；沙箱里 440 个样本约 7 秒（用的是测试里的小向量模型），真实模型的耗时没有测过，请把你机器上的耗时告诉我。
@@ -584,7 +584,7 @@
    - 请告诉我：规则里有没有出现具体的日期、事件或事实（本地检查和第二次审查应当挡住；如果漏了，把那条规则发给我）。
 
 4. **DPO 导出（有 200 条偏好对之后再做，不到时只是演练）**
-   - `uv run twin train export-dpo`：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl` 的新数据集目录；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
+   - `uv run twin train export-dpo`（第 17 轮起是重任务：排进队列由应用执行，应用没在运行时加 `--foreground`，结果用 `twin train export-status` 查看）：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl` 的新数据集目录；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
    - 用 `uv run twin train bundle --profile <档位> --dataset <新目录>` 打包；真实训练在第 14 轮。
 
 5. **M2 复判**（所有指令存在之后重新判；`/记住` 的事实现在算“机器人对话”的一组）

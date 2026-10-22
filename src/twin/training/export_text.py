@@ -39,6 +39,7 @@ from twin.retrieval.records import MessageData
 
 QUOTE_CHARS = 30
 STICKER_TEXT = "[表情包]"
+STICKER_PREFIX = "[表情包:"
 QUOTE_PREFIX = "[引用:"
 
 # drop reasons that are not a message kind
@@ -107,6 +108,8 @@ class Target:
 
     lines: list[str] = field(default_factory=list)
     stickers: int = 0
+    sticker_tags: list[str] = field(default_factory=list)
+    """The tags of the stickers in the target, in order (a sticker without a tag has none)."""
     text_lines: int = 0
     code_lines: int = 0
     quoted: bool = False
@@ -152,6 +155,8 @@ def render_target(
             elif kind == Kind.STICKER.value:
                 target.lines.append(line)
                 target.stickers += 1
+                if line.startswith(STICKER_PREFIX):
+                    target.sticker_tags.append(line[len(STICKER_PREFIX) : -1])
             else:
                 target.lines.append(line)
                 target.text_lines += 1
