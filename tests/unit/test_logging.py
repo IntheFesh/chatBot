@@ -7,18 +7,28 @@ import logging
 import logging.handlers
 from pathlib import Path
 
+import httpx
+import openai
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tests.support.synthetic import mobile
+from twin.channel.ilink.http import IlinkHttpError
+from twin.llm.errors import ApiError, BudgetDeniedError, StyleModelError
 from twin.ops.logging import (
     BACKUP_COUNT,
+    EXC_DETAIL_LIMIT,
     MAX_BYTES,
     configure_logging,
     describe_exception,
+    exception_detail,
+    exception_summary,
     get_logger,
     sanitize_fields,
     shutdown_logging,
 )
+from twin.ops.process_model import CliError, ExitCode
 
 BODY = "这是一段绝对不能出现在日志里的聊天正文"
 PHONE = mobile()
@@ -66,35 +76,171 @@ def test_below_the_configured_level_nothing_is_written(tmp_path: Path) -> None:
     assert not path.exists() or path.read_text(encoding="utf-8") == ""
 
 
-def test_exceptions_are_logged_as_type_redacted_message_and_stack(tmp_path: Path) -> None:
+def failing(message: str) -> None:
+    local_secret = BODY  # noqa: F841 - must never be logged
+    raise ValueError(message)
+
+
+def test_exceptions_are_logged_as_type_and_stack_never_the_message(tmp_path: Path) -> None:
+    """R17-44 (D-714): the message of an exception can quote the conversation; redaction masks
+    identifiers, not sentences - so no message is logged at INFO and above, at any log level."""
     path = configure_logging(tmp_path, level="INFO", console=False)
     log = get_logger("test.exc")
-
-    def failing() -> None:
-        local_secret = BODY  # noqa: F841 - must never be logged
-        raise ValueError(f"cannot send to {PHONE}")
-
     try:
-        failing()
+        failing(f"cannot send {BODY} to {PHONE}")
     except ValueError:
         log.exception("send_failed", attempt=2)
     entry = read_lines(path)[0]
-    assert entry["level"] == "ERROR"
-    assert str(entry["exc"]).startswith("ValueError: cannot send to [手机号]")
-    assert "failing" in str(entry["stack"])
-    assert BODY not in path.read_text(encoding="utf-8") and PHONE not in path.read_text(
-        encoding="utf-8"
-    )
+    assert entry["level"] == "ERROR" and entry["event"] == "send_failed" and entry["attempt"] == 2
+    assert entry["exc"] == "ValueError"  # the type, nothing else
+    assert "failing" in str(entry["stack"]) and "test_logging.py" in str(entry["stack"])
+    written = path.read_text(encoding="utf-8")
+    assert BODY not in written and PHONE not in written and "[手机号]" not in written
+    assert "exc_detail" not in written  # no record of the message exists at INFO
 
 
-def test_long_exception_messages_are_truncated() -> None:
+def test_a_debug_log_keeps_the_redacted_message_in_a_record_of_its_own(tmp_path: Path) -> None:
+    path = configure_logging(tmp_path, level="DEBUG", console=False)
+    log = get_logger("test.exc")
     try:
-        raise RuntimeError("x" * 5000)
-    except RuntimeError:
-        import sys
+        failing(f"cannot send {BODY} to {PHONE}")
+    except ValueError:
+        log.exception("send_failed")
+    entries = read_lines(path)
+    assert [(e["level"], e["event"]) for e in entries] == [
+        ("ERROR", "send_failed"),
+        ("DEBUG", "send_failed_detail"),
+    ]
+    error, detail = entries
+    assert error["exc"] == "ValueError" and "exc_detail" not in error
+    assert BODY not in json.dumps(error, ensure_ascii=False)  # nothing above DEBUG has it
+    assert PHONE not in str(detail["exc_detail"]) and "[手机号]" in str(detail["exc_detail"])
+    assert BODY in str(detail["exc_detail"])  # a sentence is not an identifier: DEBUG only
 
-        summary, _stack = describe_exception(sys.exc_info())
-    assert len(summary) < 400
+
+def test_the_console_shows_the_type_and_the_stack_not_the_message(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    configure_logging(tmp_path, level="INFO", console=True, console_level=logging.INFO)
+    try:
+        failing(f"cannot send {BODY}")
+    except ValueError:
+        get_logger("test.exc").exception("send_failed")
+    shutdown_logging()
+    shown = capsys.readouterr().err
+    assert "ValueError" in shown and "failing" in shown and BODY not in shown
+
+
+class WithFacts(Exception):
+    """An exception whose attributes are what the log may say about it."""
+
+    def __init__(self, text: str, **attributes: object) -> None:
+        super().__init__(text)
+        for name, value in attributes.items():
+            setattr(self, name, value)
+
+
+def caught(exc: BaseException) -> BaseException:
+    try:
+        raise exc
+    except BaseException as found:
+        return found
+
+
+def test_the_facts_of_the_project_errors_and_of_the_http_libraries_are_kept() -> None:
+    request = httpx.Request("GET", "https://example.invalid/x")
+    response = httpx.Response(429, request=request)
+    unauthorized = openai.AuthenticationError(
+        f"bad key {BODY}", response=httpx.Response(401, request=request), body=None
+    )
+    expected = [
+        (ApiError(f"{BODY}", status=503, retryable=True), "ApiError status=503 retryable=true"),
+        (IlinkHttpError("getupdates", 500), "IlinkHttpError status=500 endpoint=getupdates"),
+        (StyleModelError(BODY, kind="timeout"), "StyleModelError kind=timeout"),
+        (CliError(BODY, ExitCode.BUSY), "CliError code=busy"),
+        (
+            httpx.HTTPStatusError(BODY, request=request, response=response),
+            "HTTPStatusError status_code=429",
+        ),
+        (unauthorized, "AuthenticationError status_code=401"),
+        (FileNotFoundError(2, BODY), "FileNotFoundError errno=2"),
+        (BudgetDeniedError("reply", 3), "BudgetDeniedError level=3 purpose=reply"),
+        (httpx.ConnectError(BODY), "ConnectError"),
+    ]
+    for exc, summary in expected:
+        assert exception_summary(exc) == summary
+        assert BODY not in summary
+
+
+def test_an_attribute_that_could_be_a_sentence_is_not_a_fact() -> None:
+    sentence = WithFacts(BODY, kind=BODY, purpose="two words", endpoint=f"{BODY}/x", code=BODY)
+    assert exception_summary(sentence) == "WithFacts"
+    odd_types = WithFacts("m", status="503", attempts=True, retryable="yes", timeout=1)
+    assert exception_summary(odd_types) == "WithFacts"  # a flag is a bool, a status an int
+    raising = WithFacts("m")
+
+    class Broken(Exception):
+        @property
+        def response(self) -> object:
+            raise RuntimeError("no response")
+
+    assert exception_summary(Broken(BODY)) == "Broken" and exception_summary(raising) == "WithFacts"
+
+
+def chained() -> BaseException:
+    try:
+        try:
+            raise ApiError(BODY, status=502)
+        except ApiError as inner:
+            raise RuntimeError(BODY) from inner
+    except RuntimeError as outer:
+        return outer
+
+
+def suppressed() -> BaseException:
+    try:
+        try:
+            raise ValueError(BODY)
+        except ValueError:
+            raise KeyError(BODY) from None  # the cause is hidden on purpose: not named
+    except KeyError as outer:
+        return outer
+
+
+def test_the_causes_are_named_by_their_types_and_facts_only() -> None:
+    summary = "RuntimeError <- caused by ApiError status=502 retryable=false"
+    assert exception_summary(chained()) == summary
+    assert exception_summary(suppressed()) == "KeyError"
+    loop = ValueError("a")
+    loop.__cause__ = loop  # a cycle must not hang the logger
+    assert exception_summary(loop) == "ValueError"
+
+
+@given(
+    message=st.text(max_size=200),
+    kind=st.sampled_from([ValueError, RuntimeError, KeyError, OSError, LookupError, TypeError]),
+)
+def test_no_message_ever_reaches_the_summary_or_the_stack(
+    message: str, kind: type[Exception]
+) -> None:
+    """R17-44: whatever the text, the description of a plain exception is its type name."""
+    found = caught(kind(message))
+    summary, stack = describe_exception((type(found), found, found.__traceback__))
+    assert summary == kind.__name__
+    assert "\n" not in stack and "(" not in stack  # file:line:function only
+
+
+def test_the_detail_is_the_redacted_message_shortened() -> None:
+    detail = exception_detail(RuntimeError(f"{PHONE} " + "x" * 5000))
+    assert detail.startswith("[手机号] x") and len(detail) == EXC_DETAIL_LIMIT
+    assert exception_detail(RuntimeError("")) == ""
+    assert BODY in exception_detail(ValueError(BODY))
+
+
+def test_long_exception_messages_do_not_make_long_summaries() -> None:
+    found = caught(RuntimeError("x" * 5000))
+    summary, stack = describe_exception((type(found), found, found.__traceback__))
+    assert summary == "RuntimeError" and len(stack) < 400
 
 
 def test_records_are_json_lines_with_utc_timestamp_and_bound_fields(tmp_path: Path) -> None:

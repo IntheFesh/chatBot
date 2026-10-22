@@ -22,11 +22,13 @@ from __future__ import annotations
 import ast
 import json
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.support.clock import ManualClock
 from tests.support.nodes import missing_nodes
 from tests.support.scripts import load_script
 from tests.support.synthetic import (
@@ -36,7 +38,10 @@ from tests.support.synthetic import (
     mobile,
     wxid,
 )
+from twin.ops.alerts import AlertService
+from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, Worker
 from twin.ops.logging import configure_logging, get_logger, shutdown_logging
+from twin.storage.db import Database
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "twin"
@@ -172,24 +177,80 @@ def test_no_media_database_or_export_sits_anywhere_in_the_tests() -> None:
 # ----------------------------------------------------------------------------- 2. the logs
 
 
-def test_a_sentence_of_the_conversation_is_not_in_the_log_file_at_any_level_above_debug(
-    tmp_path: Path,
+async def fail_one_job(db: Database, clock: ManualClock, message: str) -> tuple[JobQueue, str]:
+    """A job whose handler raises ``ValueError(message)`` and which fails for good."""
+    registry = HandlerRegistry()
+
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(message)
+
+    registry.register("boom", boom)
+    queue = JobQueue(db, clock)
+    job_id = queue.enqueue("boom", {}, max_attempts=1)
+    await Worker(queue, registry, clock, alerts=AlertService(db, clock)).run_until_idle()
+    return queue, job_id
+
+
+def plain_values(db: Database, table: str) -> list[str]:
+    """Every value of a table that is not ciphertext: what a person with the file could read."""
+    connection = sqlite3.connect(db.path)
+    try:
+        rows = connection.execute(f'SELECT * FROM "{table}"').fetchall()
+    finally:
+        connection.close()
+    return [str(value) for row in rows for value in row if not isinstance(value, bytes)]
+
+
+async def test_a_sentence_of_the_conversation_is_not_in_the_log_file_at_any_level_above_debug(
+    tmp_path: Path, db: Database, clock: ManualClock
 ) -> None:
+    """R17-44 (D-714): the message of an exception is not redacted into safety - it is left out.
+
+    Redaction masks identifiers, not sentences, so ``ValueError(BODY)`` is logged as its type and
+    stack; the sentence is in the sealed column of the failed job and nowhere in plain.
+    """
     path = configure_logging(tmp_path, level="INFO", console=False)
     try:
         log = get_logger("audit.privacy")
         log.info("received", content=BODY, text=BODY, reply=BODY, prompt=BODY, user="u1")
         log.warning("odd", body=BODY, messages=[{"role": "user", "content": BODY}])
         try:
-            raise ValueError(f"cannot send {mobile()}")
+            raise ValueError(BODY)
         except ValueError:
             log.exception("send_failed")
+        queue, job_id = await fail_one_job(db, clock, BODY)
         written = path.read_text(encoding="utf-8")
     finally:
         shutdown_logging()
-    assert BODY not in written and mobile() not in written
+    assert BODY not in written  # not in the file, whatever the record
     lines = [json.loads(line) for line in written.splitlines() if line]
-    assert [entry["event"] for entry in lines][:2] == ["received", "odd"]
+    assert [entry["event"] for entry in lines][:3] == ["received", "odd", "send_failed"]
+    assert lines[2]["exc"] == "ValueError"
+    assert "job_failed" in {entry["event"] for entry in lines}
+    for table in ("jobs", "alerts"):
+        assert not any(BODY in value for value in plain_values(db, table)), table
+    job = queue.get(job_id)
+    assert job is not None and job.last_error is not None and BODY not in job.last_error
+    assert queue.error_detail(job_id) == BODY  # visible where it is sealed, and only there
+
+
+async def test_an_identifier_in_an_exception_is_not_in_the_log_or_the_plain_columns_either(
+    tmp_path: Path, db: Database, clock: ManualClock
+) -> None:
+    path = configure_logging(tmp_path, level="DEBUG", console=False)
+    try:
+        try:
+            raise ValueError(f"cannot send {mobile()}")
+        except ValueError:
+            get_logger("audit.privacy").exception("send_failed")
+        queue, job_id = await fail_one_job(db, clock, f"cannot send {mobile()}")
+        written = path.read_text(encoding="utf-8")
+    finally:
+        shutdown_logging()
+    assert mobile() not in written  # at DEBUG the message is there, but redacted
+    assert "[手机号]" in written
+    assert not any(mobile() in value for value in plain_values(db, "jobs"))
+    assert queue.error_detail(job_id) == "cannot send [手机号]"
 
 
 # ------------------------------------------------------------- 3. what leaves the machine
@@ -305,6 +366,8 @@ PRIVACY_TESTS = {
     "log without words (R-OPS-007)": [
         "tests/unit/test_logging.py::test_info_logs_never_contain_content",
         "tests/unit/test_logging.py::test_debug_logs_keep_content_but_redacted",
+        "tests/unit/test_logging.py::test_exceptions_are_logged_as_type_and_stack_never_the_message",
+        "tests/unit/test_jobs.py::test_a_failure_keeps_its_message_sealed_and_out_of_every_plain_place",
         "tests/unit/test_engine_e2e.py::test_an_ordinary_conversation_logs_no_words_of_it",
         "tests/unit/test_engine_failures.py::test_the_backend_failure_log_never_has_the_text_of_the_conversation",
         "tests/unit/test_scan_rules.py::test_application_code_logs_through_the_structured_logger_only",

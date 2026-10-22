@@ -190,7 +190,7 @@ class IlinkLogin:
         except (IlinkTransportError, IlinkHttpError):
             return None  # network trouble, a read timeout or a gateway error: still waiting
         except IlinkError as exc:
-            log.warning("login_status_unreadable", error=str(exc))
+            log.warning("login_status_unreadable", error=type(exc).__name__)
             return None
 
     def _result(self, answer: IlinkResponse) -> LoginResult:

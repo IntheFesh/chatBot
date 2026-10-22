@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import signal
 import sys
 import threading
@@ -330,6 +331,34 @@ def test_jobs_show_hides_the_payload_unless_asked(initialised: Path) -> None:
     assert "秘密内容" in full.output
     missing = runner.invoke(app, ["jobs", "show", "01NOSUCHJOB"])
     assert missing.exit_code == 1 and "no job" in missing.output
+
+
+def test_jobs_show_prints_the_error_message_only_with_detail(initialised: Path) -> None:
+    """R17-44 (D-714): the plain error has the type and the stack; the message is sealed."""
+    (job_id,) = enqueue({"n": 1})
+    services = open_services()
+    try:
+        queue = JobQueue(services.db, services.clock)
+        assert queue.claim_next({"cli_demo"}, offpeak_allowed=True, worker_id="w") is not None
+        assert queue.fail(
+            job_id,
+            "w",
+            "ValueError @ worker.py:12:handle",
+            retry_at=None,
+            detail="cannot parse: 一句秘密的话",
+        )
+    finally:
+        services.close()
+    plain = runner.invoke(app, ["jobs", "show", job_id])
+    assert plain.exit_code == 0, plain.output
+    assert "ValueError @ worker.py:12:handle" in plain.output and "一句秘密的话" not in plain.output
+    assert "error message" not in plain.output
+    detailed = runner.invoke(app, ["jobs", "show", job_id, "--detail"])
+    assert detailed.exit_code == 0, detailed.output
+    assert "error message" in detailed.output and "cannot parse: 一句秘密的话" in detailed.output
+    (clean_id,) = enqueue({"n": 2})
+    nothing = runner.invoke(app, ["jobs", "show", clean_id, "--detail"])
+    assert nothing.exit_code == 0 and re.search(r"error message\s+-\n", nothing.output)
 
 
 def test_jobs_cancel_and_retry(initialised: Path) -> None:

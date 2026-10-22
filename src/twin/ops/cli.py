@@ -81,8 +81,12 @@ def jobs_list(
 def jobs_show(
     job_id: Annotated[str, typer.Argument(help="Job id")],
     payload: Annotated[bool, typer.Option("--payload", help="Also print the payload")] = False,
+    detail: Annotated[
+        bool,
+        typer.Option("--detail", help="Also print the message of the error that failed the job"),
+    ] = False,
 ) -> None:
-    """Show one job (the payload is hidden unless --payload is given)."""
+    """Show one job (the payload and the error message are hidden unless asked for)."""
     services = get_cli_context().services()
     job = _queue(services).get(job_id)
     if job is None:
@@ -111,6 +115,9 @@ def jobs_show(
         typer.echo(f"{key:18} {value if value is not None else '-'}")
     if payload:
         typer.echo(f"{'payload':18} {job.payload!r}")
+    if detail:
+        message = _queue(services).error_detail(job_id)
+        typer.echo(f"{'error message':18} {message if message else '-'}")
 
 
 @jobs_app.command("retry")

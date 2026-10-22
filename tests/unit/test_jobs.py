@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import subprocess
 import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,8 +19,10 @@ from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
 from tests.support.win32 import FakeWin32
 from twin.clock import SystemClock
+from twin.llm.errors import ApiError, BudgetDeniedError
 from twin.ops.alerts import AlertService
 from twin.ops.jobs import (
+    MAX_ERROR_DETAIL_CHARS,
     BatchNotFoundError,
     BatchTooLargeError,
     DeferredOffPeakPolicy,
@@ -29,6 +33,7 @@ from twin.ops.jobs import (
     Worker,
     backoff_delay,
     default_registry,
+    describe_detail,
     describe_failure,
     get_offpeak_policy,
     job_handler,
@@ -36,10 +41,12 @@ from twin.ops.jobs import (
     set_offpeak_policy,
 )
 from twin.ops.liveness import ProcessProbe
+from twin.ops.logging import configure_logging, shutdown_logging
 from twin.storage.db import Database
 from twin.storage.models import Alert, Job
 
 PHONE = mobile()
+BODY = "这是一句绝对不能出现在明文里的聊天内容"
 
 
 class AlwaysOffPeak:
@@ -193,9 +200,12 @@ async def test_failed_jobs_retry_with_exponential_backoff_then_fail_with_an_aler
     assert (first.retried, first.failed) == (1, 0)
     assert job.status == "pending" and job.attempts == 1
     assert job.run_after == clock.now_utc() + timedelta(seconds=30)
-    assert (
-        job.last_error is not None and PHONE not in job.last_error and "[手机号]" in job.last_error
-    )
+    # the plain column says what failed and where - not what the exception said (D-714) ...
+    assert job.last_error is not None and job.last_error.startswith("RuntimeError @ ")
+    assert PHONE not in job.last_error and "[手机号]" not in job.last_error
+    assert "upstream refused" not in job.last_error and "flaky" in job.last_error
+    # ... the message is sealed, redacted
+    assert queue.error_detail(job_id) == "upstream refused [手机号]"
 
     assert (await worker.run_until_idle()).retried == 0  # not due yet
     clock.tick(30)
@@ -250,9 +260,139 @@ async def test_handler_exception_does_not_stop_other_jobs(
     assert seen == ["ok:1", "ok:2"]
 
 
-def test_describe_failure_redacts_and_truncates() -> None:
-    text = describe_failure(RuntimeError(f"{PHONE} " + "x" * 2000))
-    assert text.startswith("RuntimeError: [手机号]") and len(text) <= 500
+def caught(exc: BaseException) -> BaseException:
+    try:
+        raise exc
+    except BaseException as found:
+        return found
+
+
+def test_describe_failure_is_the_type_the_facts_and_the_stack_but_not_the_message() -> None:
+    found = caught(RuntimeError(f"{PHONE} {BODY} " + "x" * 2000))
+    text = describe_failure(found)
+    assert text.startswith("RuntimeError @ ") and "caught" in text and len(text) <= 500
+    for private in (PHONE, "[手机号]", BODY, "xxx"):
+        assert private not in text
+    structured = describe_failure(caught(ApiError(BODY, status=503, retryable=True)))
+    assert structured.startswith("ApiError status=503 retryable=true @ ")
+    assert describe_failure(RuntimeError("never raised")) == "RuntimeError"  # no stack to show
+
+
+def test_describe_detail_is_the_redacted_message_and_nothing_when_there_is_none() -> None:
+    detail = describe_detail(RuntimeError(f"{PHONE} {BODY} " + "x" * 5000))
+    assert detail is not None and detail.startswith(f"[手机号] {BODY} xxx")
+    assert len(detail) == MAX_ERROR_DETAIL_CHARS and PHONE not in detail
+    assert describe_detail(RuntimeError()) is None
+
+
+async def test_a_failure_keeps_its_message_sealed_and_out_of_every_plain_place(
+    queue: JobQueue,
+    registry: HandlerRegistry,
+    db: Database,
+    clock: ManualClock,
+    tmp_path: Path,
+) -> None:
+    """R17-44 (D-714): a sentence of the conversation in an exception is in the sealed column only.
+
+    Not in ``last_error``, not in the alert, not in the log at any level above DEBUG, and not
+    anywhere in the bytes of the database file (the sealed column is ciphertext).
+    """
+    log_path = configure_logging(tmp_path / "logs", level="DEBUG", console=False)
+
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(f"cannot parse: {BODY}")
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=2)
+    worker = make_worker(queue, registry, db, clock)
+    try:
+        await worker.run_until_idle()  # the first attempt: a retry is scheduled
+        clock.tick(3600)
+        summary = await worker.run_until_idle()  # the second: the job fails for good
+        written = log_path.read_text(encoding="utf-8")
+    finally:
+        shutdown_logging()
+    assert summary.failed == 1
+    job = queue.get(job_id)
+    assert job is not None and job.status == "failed"
+    assert job.last_error is not None and BODY not in job.last_error
+    assert job.last_error.startswith("ValueError @ ")
+    assert queue.error_detail(job_id) == f"cannot parse: {BODY}"  # visible where it is sealed
+    with db.session() as session:
+        [alert] = session.query(Alert).all()
+        assert BODY not in str(alert.detail) and BODY not in alert.title
+    entries = [json.loads(line) for line in written.splitlines() if line]
+    assert {e["event"] for e in entries} >= {"job_retry_scheduled", "job_failed"}
+    for entry in entries:
+        if entry["level"] != "DEBUG":
+            assert BODY not in json.dumps(entry, ensure_ascii=False), entry["event"]
+    db.dispose()
+    raw = b"".join(path.read_bytes() for path in db.path.parent.glob(f"{db.path.name}*"))
+    assert BODY.encode("utf-8") not in raw and b"cannot parse" not in raw
+
+
+async def test_the_identifier_of_a_message_is_masked_in_the_sealed_detail(
+    queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
+) -> None:
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(f"cannot send {PHONE}")
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=1)
+    await make_worker(queue, registry, db, clock).run_until_idle()
+    job = queue.get(job_id)
+    assert job is not None and job.last_error is not None and PHONE not in job.last_error
+    assert queue.error_detail(job_id) == "cannot send [手机号]"
+
+
+async def test_retrying_and_recovering_clear_or_leave_the_detail_consistently(
+    queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
+) -> None:
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(BODY)
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=1)
+    await make_worker(queue, registry, db, clock).run_until_idle()
+    assert queue.error_detail(job_id) == BODY
+    assert queue.retry(job_id)  # a fresh start: neither error is left
+    job = queue.get(job_id)
+    assert job is not None and job.last_error is None
+    assert queue.error_detail(job_id) is None
+    assert queue.error_detail("no-such-job") is None
+    # a job that used its last attempt and died with its process: a fixed text, no old message
+    queue.claim_next({"boom"}, offpeak_allowed=True, worker_id="dead-process")
+    assert queue.recover_running()[1][0].last_error == (
+        "process stopped while the job was running; attempts exhausted"
+    )
+    assert queue.error_detail(job_id) is None
+
+
+async def test_a_deferral_is_logged_with_the_type_of_its_cause_not_its_words(
+    queue: JobQueue,
+    registry: HandlerRegistry,
+    db: Database,
+    clock: ManualClock,
+    tmp_path: Path,
+) -> None:
+    log_path = configure_logging(tmp_path / "logs", level="INFO", console=False)
+
+    async def handler(ctx: JobContext) -> None:
+        try:
+            raise BudgetDeniedError("reply", 3)
+        except BudgetDeniedError as exc:
+            raise JobDeferred(f"{BODY} {exc}", retry_in_s=120) from exc
+
+    registry.register("held", handler)
+    queue.enqueue("held", {})
+    try:
+        await make_worker(queue, registry, db, clock).run_until_idle()
+        entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    finally:
+        shutdown_logging()
+    [deferred] = [e for e in entries if e["event"] == "job_deferred"]
+    assert deferred["reason"] == "BudgetDeniedError level=3 purpose=reply"
+    assert deferred["retry_in_s"] == 120 and BODY not in json.dumps(deferred, ensure_ascii=False)
 
 
 # ------------------------------------------------------ restart and recovery

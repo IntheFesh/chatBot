@@ -218,7 +218,7 @@ uv run twin import status --watch
 uv run twin jobs list                          # 看队列；批次号在入队时打印，也在这里
 uv run twin jobs approve <批次号>               # 确认提示；加 --yes 跳过
 uv run twin jobs run --until-idle              # 应用没在运行时，在前台执行已批准的任务
-uv run twin jobs show <任务号>                  # 一个任务的详情（加 --payload 看载荷）
+uv run twin jobs show <任务号>                  # 一个任务的详情（加 --payload 看载荷，--detail 看失败时的错误消息）
 uv run twin jobs retry <任务号>                 # 重新排队失败或取消的任务
 uv run twin jobs cancel <任务号>
 ```
@@ -746,7 +746,7 @@ uv run twin purge --all
 | `twin jobs list` | 只读 | List jobs, newest first. |
 | `twin jobs retry` | 轻量修改 | Re-queue a failed or cancelled job with a fresh attempt budget. |
 | `twin jobs run` | 重任务（入队，由运行中的应用执行） | Execute queued jobs here (used when the application is not running). |
-| `twin jobs show` | 只读 | Show one job (the payload is hidden unless --payload is given). |
+| `twin jobs show` | 只读 | Show one job (the payload and the error message are hidden unless asked for). |
 | `twin llm probe` | 轻量修改 | Run the M0 checks against the real DeepSeek API and write docs/LLM_REPORT.md. |
 | `twin llm status` | 只读 | Show models, learned capabilities, the last probe and the budget level. |
 | `twin memory block` | 只读 | Show the memory block a reply about ``topic`` would get (to judge what is recalled). |

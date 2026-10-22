@@ -28,7 +28,7 @@ from twin.learning.pairs import (
     reply_text,
 )
 from twin.learning.sample import SampleBuilder
-from twin.ops.logging import get_logger
+from twin.ops.logging import exception_summary, get_logger
 
 log = get_logger("twin.learning.dislike")
 
@@ -96,7 +96,7 @@ class NotLikeRecorder:
                 feedback_id=feedback_id,
             )
         except PairError as exc:
-            log.info("pair_not_made", reason=str(exc)[:120])
+            log.info("pair_not_made", reason=exception_summary(exc))
             return NotLikeResult(
                 "recorded",
                 first.reply_id,
