@@ -309,6 +309,7 @@ async def handle_sticker_tag(ctx: JobContext) -> None:
     finally:
         await runtime.client.aclose()
     synced = await asyncio.to_thread(StickerVectors(services).sync)
+    await asyncio.to_thread(StickerCatalog(services).announce_changes)  # R17-51: the new tags
     log.info(
         "stickers_tagged",
         tagged=tagged,

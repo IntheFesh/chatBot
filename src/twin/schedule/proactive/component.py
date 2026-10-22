@@ -55,6 +55,7 @@ from twin.schedule.proactive.status import ProactiveStatusSource
 from twin.schedule.proactive.store import CandidateStore, ProactiveLogStore, RatingStore
 from twin.schedule.service import ScheduleKit, schedule_kit
 from twin.schedule.time_service import PlanUnavailableError
+from twin.stickers.labels import sticker_labels
 from twin.stickers.tags import load_vocabulary
 
 if TYPE_CHECKING:
@@ -188,7 +189,7 @@ def build_scheduler(
     followups = FollowupStore(memory)
     reader = bot_turn_reader(services)
     rng = rng or random.Random()  # noqa: S311 - the draws of the schedule, not security
-    openers = OpenerExamples(services, rng=rng)
+    openers = OpenerExamples(services, sticker_label=sticker_labels(services).label_md5, rng=rng)
     budget = parts.llm.budget
 
     def read_turns() -> Sequence[Turn]:

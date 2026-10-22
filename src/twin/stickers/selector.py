@@ -22,15 +22,24 @@ sometimes, as she does; :meth:`StickerSelector.rank` shows the scores themselves
 view (:func:`as_of_view`, built by ``AsOfView(t)`` of rounds 07 and 13) sees only the stickers
 she had used *before* ``t`` and counts uses and recency as of ``t``, so the sticker she used for
 the first time after ``t`` can never be chosen; the repeat rate comes from the pre-holdout data.
+
+**What is read once (R17-51, D-692).**  The uses of all her stickers, the table of her stickers and
+her repeat rate are read when first needed and kept - by every selector derived from the first
+one (:meth:`~StickerSelector.with_view`, :meth:`~StickerSelector.with_rng`), which share them.
+Every :meth:`~StickerSelector.rank` / :meth:`~StickerSelector.choose` asks whether
+``settings.state_version`` moved since (one tiny read) and reads everything again if it did, so a
+change the running application has to hear about is seen at the next sticker, and a reply no longer
+reads her whole sticker history once per sticker.
 """
 
 from __future__ import annotations
 
 import math
 import random
+import threading
 from bisect import bisect_left
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -43,6 +52,7 @@ from twin.services import Services
 from twin.stickers.catalog import StickerCatalog, StickerRecord
 from twin.stickers.vectors import StickerVectors
 from twin.storage.chat_models import StickerUse
+from twin.storage.state import current_state_version
 
 NEUTRAL_SIMILARITY = 0.5  # for a sticker that has no description vector (yet)
 MIN_SIMILARITY = 0.01
@@ -139,6 +149,56 @@ def her_repeat_rate(services: Services, window: int, *, before: datetime | None)
     return repeats / stickers if stickers else 0.0
 
 
+class _Loaded:
+    """What the selectors derived from one another have read of the library, read once.
+
+    The state version it was read at is kept; :meth:`fresh` throws the data away when the version
+    has moved.  The data are immutable once read, so the selectors of several threads (a reply
+    and a proactive message are post-processed at the same time) can share it.
+    """
+
+    def __init__(self, services: Services, catalog: StickerCatalog) -> None:
+        self._services = services
+        self._catalog = catalog
+        self._lock = threading.RLock()
+        self._usage: UsageTable | None = None
+        self._records: list[StickerRecord] | None = None
+        self._rates: dict[str, float] = {}
+        self._version: int | None = None
+
+    def clear(self) -> None:
+        with self._lock:
+            self._usage = None
+            self._records = None
+            self._rates = {}
+
+    def fresh(self) -> None:
+        """Forget what was read if ``settings.state_version`` has moved since it was read."""
+        version = current_state_version(self._services.db)
+        with self._lock:
+            if self._version is not None and version != self._version:
+                self.clear()
+            self._version = version
+
+    def usage(self) -> UsageTable:
+        with self._lock:
+            if self._usage is None:
+                self._usage = UsageTable.load(self._services)
+            return self._usage
+
+    def records(self) -> list[StickerRecord]:
+        with self._lock:
+            if self._records is None:
+                self._records = self._catalog.records(status="available", tagged=True)
+            return self._records
+
+    def repeat_rate(self, scope: str, compute: Callable[[], float]) -> float:
+        with self._lock:
+            if scope not in self._rates:
+                self._rates[scope] = compute()
+            return self._rates[scope]
+
+
 class StickerSelector:
     """Chooses one of her stickers for a tag (see the module description)."""
 
@@ -156,10 +216,10 @@ class StickerSelector:
         self._view = view
         self._catalog = catalog or StickerCatalog(services)
         self._vectors = vectors or StickerVectors(services)
-        self._usage = usage
-        self._records: list[StickerRecord] | None = None
+        self._loaded = _Loaded(services, self._catalog)
+        if usage is not None:
+            self._loaded._usage = usage
         self._rng = rng or random.Random()  # noqa: S311 - a draw among stickers, not security
-        self._repeat_rate: float | None = None
 
     @property
     def view(self) -> StickerView:
@@ -167,28 +227,25 @@ class StickerSelector:
 
     def with_view(self, view: StickerView) -> StickerSelector:
         """The same selector for another view (shares the loaded data)."""
+        return self._derived(view, self._rng)
+
+    def with_rng(self, rng: random.Random) -> StickerSelector:
+        """The same selector drawing with another generator (shares the loaded data)."""
+        return self._derived(self._view, rng)
+
+    def _derived(self, view: StickerView, rng: random.Random) -> StickerSelector:
         other = StickerSelector(
-            self._services,
-            view=view,
-            catalog=self._catalog,
-            vectors=self._vectors,
-            usage=self._usage_table(),
-            rng=self._rng,
+            self._services, view=view, catalog=self._catalog, vectors=self._vectors, rng=rng
         )
-        other._repeat_rate = self._repeat_rate if view.scope == self._view.scope else None
-        other._records = self._records
+        other._loaded = self._loaded
         return other
 
     def reload(self) -> None:
-        """Forget the loaded uses (after an import)."""
-        self._usage = None
-        self._records = None
-        self._repeat_rate = None
+        """Forget the loaded uses and stickers, for this selector and all derived from it."""
+        self._loaded.clear()
 
     def _usage_table(self) -> UsageTable:
-        if self._usage is None:
-            self._usage = UsageTable.load(self._services)
-        return self._usage
+        return self._loaded.usage()
 
     def _bound(self) -> datetime | None:
         """The moment the data of the view ends: its as-of moment or, pre-holdout, the cutoff."""
@@ -203,7 +260,11 @@ class StickerSelector:
 
     def repeat_rate(self) -> float:
         """Her rate of repeating a sticker within the window, in the data of the view's scope."""
-        if self._repeat_rate is None:
+        self._loaded.fresh()
+        return self._repeat_rate()
+
+    def _repeat_rate(self) -> float:
+        def compute() -> float:
             before = None
             if self._view.scope == "pre_holdout":
                 try:
@@ -211,13 +272,15 @@ class StickerSelector:
                 except HoldoutError:
                     before = None
             config = self._services.settings.stickers
-            self._repeat_rate = her_repeat_rate(
-                self._services, config.no_repeat_window, before=before
-            )
-        return self._repeat_rate
+            return her_repeat_rate(self._services, config.no_repeat_window, before=before)
+
+        return self._loaded.repeat_rate(self._view.scope, compute)
 
     def repeats_allowed(self) -> bool:
         return self.repeat_rate() > self._services.settings.stickers.repeat_rate_threshold
+
+    def _repeats_allowed(self) -> bool:
+        return self._repeat_rate() > self._services.settings.stickers.repeat_rate_threshold
 
     # ------------------------------------------------------------------ ranking
 
@@ -228,11 +291,9 @@ class StickerSelector:
         return RECENCY_FLOOR + (1.0 - RECENCY_FLOOR) * decay
 
     def _pool(self, tag: str, usage: dict[str, Usage]) -> list[StickerRecord]:
-        if self._records is None:
-            self._records = self._catalog.records(status="available", tagged=True)
         return [
             record
-            for record in self._records
+            for record in self._loaded.records()
             if record.usable and tag in record.tags and record.md5 in usage
         ]
 
@@ -240,11 +301,17 @@ class StickerSelector:
         self, tag: str, context_text: str, recent_bubbles: Sequence[str | None] = ()
     ) -> list[Candidate]:
         """The candidates for exactly this tag, best first (no fallback to nearby tags)."""
+        self._loaded.fresh()
+        return self._rank(tag, context_text, recent_bubbles)
+
+    def _rank(
+        self, tag: str, context_text: str, recent_bubbles: Sequence[str | None]
+    ) -> list[Candidate]:
         config = self._services.settings.stickers
         bound = self._bound()
         usage = self._usage_table().as_of(bound)
         pool = self._pool(tag, usage)
-        if not self.repeats_allowed() and config.no_repeat_window:
+        if not self._repeats_allowed() and config.no_repeat_window:
             blocked = {m for m in recent_bubbles[-config.no_repeat_window :] if m}
             pool = [record for record in pool if record.md5 not in blocked]
         if not pool:
@@ -276,8 +343,9 @@ class StickerSelector:
         ``recent_bubbles`` lists the last bubbles of the conversation, oldest first: the MD5 of
         the sticker where a bubble was a sticker, ``None`` otherwise.
         """
+        self._loaded.fresh()
         for candidate_tag in (tag, *self._catalog.vocabulary.near(tag)):
-            ranked = self.rank(candidate_tag, context_text, recent_bubbles)
+            ranked = self._rank(candidate_tag, context_text, recent_bubbles)
             if ranked:
                 weights = [c.score for c in ranked]
                 return self._rng.choices(ranked, weights=weights, k=1)[0].record

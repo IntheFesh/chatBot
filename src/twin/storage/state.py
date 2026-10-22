@@ -8,10 +8,15 @@ components to drop cached state.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from sqlalchemy.orm import Session
 
 from twin.clock import Clock
 from twin.storage.settings_store import get_setting, put_setting
+
+if TYPE_CHECKING:
+    from twin.storage.db import Database
 
 STATE_VERSION_KEY = "state_version"
 
@@ -20,6 +25,12 @@ def read_state_version(session: Session) -> int:
     """Current state version (0 if never bumped)."""
     value = get_setting(session, STATE_VERSION_KEY, 0)
     return int(value)
+
+
+def current_state_version(db: Database) -> int:
+    """The state version read in a session of its own (a cache asks this to know it is stale)."""
+    with db.session() as session:
+        return read_state_version(session)
 
 
 def bump_state_version(session: Session, clock: Clock) -> int:

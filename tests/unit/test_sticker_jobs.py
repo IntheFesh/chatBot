@@ -253,6 +253,27 @@ async def test_an_approved_batch_tags_corrects_and_indexes_the_stickers(
     assert never_tagged(services) is False
 
 
+async def test_a_finished_tagging_job_tells_the_application_the_tags_changed(
+    scenario: Scenario, services: Services, api: respx.MockRouter, embedder: HashingBackend
+) -> None:
+    """R17-51: the label book and the selector keep what they read until the state version moves."""
+    from twin.stickers.labels import sticker_labels
+    from twin.storage.state import current_state_version
+
+    api.post(API).mock(side_effect=answer)
+    md5 = scenario.md5s[2]
+    book = sticker_labels(services)
+    assert book.label_md5(md5) is None  # read before the job: no tags yet
+    plan = plan_tagging(services)
+    runtime = build_llm_runtime(services)
+    for batch_id in plan.batch_ids:
+        runtime.batches.approve(batch_id)
+    before = current_state_version(services.db)
+    done = await run_tag_jobs(services)
+    assert done.done == plan.jobs and current_state_version(services.db) > before
+    assert book.label_md5(md5) == "开心"  # the book read the library again
+
+
 async def test_a_daily_job_runs_without_approval_on_the_daily_account(
     scenario: Scenario, services: Services, api: respx.MockRouter
 ) -> None:

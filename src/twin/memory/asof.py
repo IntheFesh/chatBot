@@ -57,6 +57,7 @@ from twin.retrieval.examples import Example
 from twin.retrieval.query import ExampleQuery, ExampleRetriever, QueryTurn
 from twin.retrieval.windows import LocalPlace
 from twin.stickers.emoji_codes import EmojiCodePolicy
+from twin.stickers.labels import sticker_labels
 from twin.stickers.rate import BubbleHistory, MemoryBubbleHistory, StickerRateController
 from twin.stickers.selector import StickerSelector, StickerView, as_of_view
 
@@ -124,7 +125,11 @@ class AsOfSource:
         self._assembler = MemoryAssembler(self._memory)
         self._memory.refresh()
         self._place = LocalPlace.create(services)
-        self._retriever = retriever or ExampleRetriever(services)
+        # the labels of the stickers in her examples are the pre-holdout ones the training export
+        # and the evaluation use (R-TRN-013, D-691)
+        self._retriever = retriever or ExampleRetriever(
+            services, sticker_label=sticker_labels(services).label_md5
+        )
         self._profile: ProfileSnapshot | None = load_profile(services, SCOPE)
         self._activity: ActivityModel | None = load_activity_model(services, SCOPE)
         self._full = render_full(services, SCOPE, with_live_corrections=True)
@@ -299,9 +304,8 @@ class AsOfView:
 
     def sticker_selector(self, rng: random.Random | None = None) -> StickerSelector:
         """A selector for the library as of ``t`` (shares the loaded data of the source)."""
-        if rng is None:
-            return self._source.selector().with_view(self.sticker_view)
-        return StickerSelector(self._source.services, view=self.sticker_view, rng=rng)
+        shared = self._source.selector().with_view(self.sticker_view)
+        return shared if rng is None else shared.with_rng(rng)
 
     @property
     def emoji_codes(self) -> EmojiCodePolicy | None:

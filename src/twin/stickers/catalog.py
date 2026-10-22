@@ -75,6 +75,12 @@ class StickerRecord:
         return self.available and self.tagged and not self.disabled
 
 
+def label_of(record: StickerRecord) -> str | None:
+    """The word a sticker is shown by - in an example of a prompt, on the terminal, in a training
+    sample: its first (best) tag, or ``None`` if it has none."""
+    return record.tags[0] if record.tags else None
+
+
 def record_of(row: Sticker) -> StickerRecord:
     """Copy a ``stickers`` row (call while its session is open)."""
     return StickerRecord(
@@ -239,7 +245,9 @@ class StickerCatalog:
 
     def tag_lookup(self) -> Callable[[str], str | None]:
         """``md5 -> first tag`` for the stickers that have tags (loaded once, then cached)."""
-        table = {record.md5: record.tags[0] for record in self.records(tagged=True) if record.tags}
+        table = {
+            record.md5: label for record in self.records(tagged=True) if (label := label_of(record))
+        }
         return table.get
 
     def counts(self) -> dict[str, int]:
@@ -356,6 +364,16 @@ class StickerCatalog:
                 refresh_effective(row, self.vocabulary)
                 cleared += 1
         return cleared
+
+    def announce_changes(self) -> None:
+        """Tell the running application that the tags changed (moves ``settings.state_version``).
+
+        Tagging writes one sticker at a time without bumping the version (a job would wake the
+        application at every picture); a job calls this once when it is done, so the label book
+        and the selector, which keep what they read until the version moves, read it again.
+        """
+        with self._services.db.transaction(bump_state=True):
+            pass
 
     def set_disabled(self, md5: str, disabled: bool) -> StickerRecord:
         with self._services.db.transaction(bump_state=True) as session:
