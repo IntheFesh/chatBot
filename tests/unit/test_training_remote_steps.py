@@ -152,6 +152,97 @@ async def test_the_jobs_of_a_run_are_reported_with_their_exit_codes(steps: Remot
     assert states == {"setup": "exited (exit 0)", "train": "running", "eval": "exited (exit 2)"}
 
 
+class JobsThatRun:
+    """``RemoteJobs`` as ``_run_job`` uses it: a state, and what ``run``/``stop`` were asked."""
+
+    def __init__(self, state: JobStatus) -> None:
+        self.state = state
+        self.offsets: list[int] = []
+        self.stopped: list[str] = []
+
+    async def status(self, name: str) -> JobStatus:
+        return self.state
+
+    async def stop(self, name: str) -> JobStatus:
+        self.stopped.append(name)
+        return self.state
+
+    async def run(
+        self, name: str, argv: object, *, env: object, offset: int, emit: object, on_offset: object
+    ) -> JobOutcome:
+        self.offsets.append(offset)
+        return JobOutcome(name, "exited", 0, offset)
+
+
+def recorded_offset(steps: RemoteSteps) -> int:
+    return int(steps._store.get(RUN).steps["train"]["log_offset"])
+
+
+def earlier_attempt(steps: RemoteSteps, clock: ManualClock, *, offset: int = 5000) -> None:
+    """The record of a first attempt of ``train`` that printed ``offset`` bytes of its log."""
+    steps._store.begin_step(RUN, "train", clock.now_utc())
+    steps._store.set_step_fields(RUN, "train", log_offset=offset)
+
+
+async def test_a_job_that_runs_again_is_followed_from_the_start_of_its_new_log(
+    steps: RemoteSteps, clock: ManualClock
+) -> None:
+    """R17-49a (D-636): ``remote_job.py start`` truncates the log of a finished job.
+
+    The offset of the earlier attempt points past the end of the new log; following from there
+    prints nothing until the new log has outgrown the old one.  A job that failed (or was lost) is
+    started again from the start, and so is the record of the offset.
+    """
+    for state in (JobStatus("exited", 3, 5000), JobStatus("lost", None, 5000)):
+        earlier_attempt(steps, clock)
+        jobs = JobsThatRun(state)
+        steps._jobs = jobs  # type: ignore[assignment]
+        outcome = await steps._run_job(RUN, "train", "train.sh")
+        assert outcome.ok
+        assert jobs.offsets == [0], state
+        assert recorded_offset(steps) == 0, state
+
+
+async def test_a_job_that_never_ran_starts_at_zero(steps: RemoteSteps, clock: ManualClock) -> None:
+    jobs = JobsThatRun(JobStatus("none", None, 0))
+    steps._jobs = jobs  # type: ignore[assignment]
+    await steps._run_job(RUN, "train", "train.sh")
+    assert jobs.offsets == [0] and recorded_offset(steps) == 0
+
+
+async def test_a_job_that_still_runs_is_followed_from_the_offset_already_printed(
+    steps: RemoteSteps, clock: ManualClock
+) -> None:
+    """R17-49a (D-636): re-attaching (the program was closed while the step ran) goes on."""
+    earlier_attempt(steps, clock)
+    jobs = JobsThatRun(JobStatus("running", None, 7000))
+    steps._jobs = jobs  # type: ignore[assignment]
+    await steps._run_job(RUN, "train", "train.sh")
+    assert jobs.offsets == [5000] and recorded_offset(steps) == 5000
+
+
+async def test_a_job_that_finished_meanwhile_is_not_run_and_keeps_its_offset(
+    steps: RemoteSteps, clock: ManualClock
+) -> None:
+    earlier_attempt(steps, clock)
+    jobs = JobsThatRun(JobStatus("exited", 0, 9000))
+    steps._jobs = jobs  # type: ignore[assignment]
+    outcome = await steps._run_job(RUN, "train", "train.sh")
+    assert outcome.ok and jobs.offsets == []  # its result is used, nothing is started
+    assert recorded_offset(steps) == 5000
+
+
+async def test_again_starts_over_from_the_start_of_the_log_even_when_the_job_runs(
+    steps: RemoteSteps, clock: ManualClock
+) -> None:
+    earlier_attempt(steps, clock)
+    jobs = JobsThatRun(JobStatus("running", None, 7000))
+    steps._jobs = jobs  # type: ignore[assignment]
+    await steps._run_job(RUN, "train", "train.sh", again=True)
+    assert jobs.stopped == [f"{RUN}-train"]
+    assert jobs.offsets == [0] and recorded_offset(steps) == 0
+
+
 async def test_the_gpu_and_the_data_disk_of_the_instance_are_read_from_its_answers() -> None:
     gpu = "NVIDIA GeForce RTX 5090, 32607 MiB, 570.86, 12.0\n"
     df = (

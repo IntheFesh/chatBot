@@ -121,13 +121,23 @@ class RemoteSteps:
     async def _run_job(
         self, run_id: str, step: str, script: str, *args: str, again: bool = False
     ) -> JobOutcome:
-        """Run ``script`` as a background job, re-attaching to or reusing an earlier run of it."""
+        """Run ``script`` as a background job, re-attaching to or reusing an earlier run of it.
+
+        The log offset of the earlier attempt is carried over only when that attempt is the job
+        this call goes on with: one that still runs (re-attached) or one that already ended well
+        (its result is used, nothing starts).  A job that failed, was lost or is run ``again`` is
+        started anew, and ``remote_job.py start`` truncates the log of a finished job - an old
+        offset would point past the end of the new log and nothing would be shown until the new
+        log outgrew the old one (D-636).
+        """
         name = f"{run_id}-{step}"
-        previous = self._store.get(run_id).steps.get(step, {})
-        offset = int(previous.get("log_offset", 0)) if not again else 0
-        self._store.begin_step(run_id, step, self._clock.now_utc(), keep_offset=not again)
         state = await self._jobs.status(name)
-        if state.state == "exited" and state.exit_code == 0 and not again:
+        finished_well = state.state == "exited" and state.exit_code == 0 and not again
+        continues = (state.state == "running" and not again) or finished_well
+        previous = self._store.get(run_id).steps.get(step, {})
+        offset = int(previous.get("log_offset", 0)) if continues else 0
+        self._store.begin_step(run_id, step, self._clock.now_utc(), keep_offset=continues)
+        if finished_well:
             self._echo(f"{step}: the job already finished on the instance; using its result")
             outcome = JobOutcome(name, "exited", 0, offset)
         else:

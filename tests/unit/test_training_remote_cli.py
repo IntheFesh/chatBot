@@ -374,16 +374,26 @@ def test_a_failing_script_fails_the_step_and_a_finished_job_is_not_run_again(
     instance.cli("train", "remote", "setup", input=f"{PASSPHRASE}\n")
     train = instance.workdir / "autodl" / "train.sh"
     good = train.read_text("utf-8")
-    train.write_text("#!/usr/bin/env bash\necho 'CUDA out of memory' >&2\nexit 3\n", "utf-8")
+    # R17-49a (D-636): a failed run that printed a lot (2 KiB and more) of log
+    failing = (
+        "#!/usr/bin/env bash\nhead -c 4096 /dev/zero | tr '\\0' 'x'; echo\n"
+        "echo 'CUDA out of memory' >&2\nexit 3\n"
+    )
+    train.write_text(failing, encoding="utf-8")
     failed = instance.cli("train", "remote", "train")
     assert failed.exit_code == 1 and "train exited with code 3" in failed.output
     assert "CUDA out of memory" in failed.output  # the log is shown
     run = instance.latest_run()
     assert run.status == "failed" and run.steps["train"]["exit_code"] == 3
-    train.write_text(good, encoding="utf-8")
+    assert run.steps["train"]["log_offset"] > 4096
+    # the fixed script prints much less than the failed one: its output must still be shown
+    train.write_text(good + 'echo "SECOND RUN OK"\n', encoding="utf-8")
     fixed = instance.cli("train", "remote", "train")
     assert fixed.exit_code == 0, fixed.output
+    assert "SECOND RUN OK" in fixed.output
     assert instance.latest_run().status == "trained"
+    log = instance.workdir / "jobs" / f"{run.id}-train" / "log"
+    assert instance.latest_run().steps["train"]["log_offset"] == len(log.read_bytes())
     count = instance.workdir / "train.count"
     assert count.read_text("utf-8").count("run") == 1
     again = instance.cli("train", "remote", "train")
