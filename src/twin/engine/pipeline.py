@@ -317,6 +317,8 @@ class ReplyPipeline:
             log.warning("memory_unavailable", reason=type(memory).__name__)
             actions.append(PostAction("memory_unavailable", detail=type(memory).__name__))
             memory = MemoryBlock("")
+        elif memory.degraded:  # built without the vector search (D-731)
+            actions.append(PostAction("memory_vectors_unavailable"))
         retrieved = found[1]
         if isinstance(retrieved, BaseException):
             log.warning("examples_unavailable", reason=type(retrieved).__name__)

@@ -126,7 +126,7 @@ class StyleWriter:
             raise StyleModelError(str(exc), kind="locked") from exc
         context = request.context
 
-        def render() -> tuple[PromptParts, bool]:
+        def render() -> tuple[PromptParts, bool, bool]:
             turns = conversation_of(context)
             memory = MemoryBlock("")
             memory_failed = False
@@ -143,10 +143,10 @@ class StyleWriter:
                 budget=self._budget,
                 memory=memory,
             )
-            return parts, memory_failed
+            return parts, memory_failed, memory.degraded
 
         try:
-            parts, memory_failed = await asyncio.to_thread(render)
+            parts, memory_failed, memory_degraded = await asyncio.to_thread(render)
         except LockedVersionError as exc:
             raise StyleModelError(str(exc), kind="locked") from exc
         except StylePromptError as exc:
@@ -186,6 +186,8 @@ class StyleWriter:
         }
         if memory_failed:
             info["memory_unavailable"] = True
+        if memory_degraded:  # the block was built without the vector search (D-731)
+            info["memory_vectors_unavailable"] = True
         usage = UsageSummary(1, output.prompt_tokens or 0, output.completion_tokens or 0)
         return StyleWrite(text, usage, output.latency_ms, info)
 

@@ -244,6 +244,22 @@ async def test_a_memory_that_fails_does_not_stop_the_reply(
     assert client.prompts[0].text.endswith(OPENER)
 
 
+async def test_a_memory_built_without_vectors_is_noted_in_the_style_round(
+    ready: Services, llm: LlmRuntime
+) -> None:
+    """R17-35 (D-731): the style model's round carries the same note as the DeepSeek one."""
+    client = ScriptedStyleClient(["好呀", "好呀"])
+    pipeline = pipeline_of(ready, llm, style(ready, llm, client))
+    degraded = await pipeline.run(
+        context(), data(memory_text="【今天要留意的】\n她下午四点要考试", memory_degraded=True)
+    )
+    assert degraded.usable and degraded.meta["memory_vectors_unavailable"] is True
+    assert "memory_unavailable" not in degraded.meta
+    assert "她下午四点要考试" in client.prompts[0].text
+    whole = await pipeline.run(context(), data(memory_text="【今天要留意的】\n她下午四点要考试"))
+    assert "memory_vectors_unavailable" not in whole.meta
+
+
 # --------------------------------------------------------------------- the hybrid backend
 
 

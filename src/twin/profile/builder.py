@@ -40,13 +40,13 @@ from twin.profile.diffing import Change, diff_metrics
 from twin.profile.holdout import HoldoutError, holdout_cutoff
 from twin.profile.localtime import LocalClock, format_minute
 from twin.profile.metrics import TEXT_KINDS, WindowCollector
-from twin.profile.overrides import RoutineOverrides
 from twin.profile.phrases import PhraseCollector
 from twin.profile.rules import Rule, generate_rules, load_rules
 from twin.profile.snapshot import ProfileMetrics, assemble_metrics
 from twin.profile.store import ACTIVITY_ACTIVE, PROFILE_ACTIVE, VersionStore
 from twin.profile.units import Rec
 from twin.schedule.daytype import DayTypeCalendar
+from twin.schedule.service import day_type_calendar_for
 from twin.storage.chat_models import Message
 from twin.storage.profile_models import ActivityModelVersion, ProfileVersion
 from twin.storage.settings_store import put_setting
@@ -76,13 +76,10 @@ class BuildContext:
         root = services.paths.root
         codes = load_word_list(locate_list_file(root, settings.profile.emoji_codes_file))
         rules = load_rules(locate_list_file(root, settings.profile.rules_file))
-        holidays = RoutineOverrides(services.db, services.clock).holiday_ranges()
         return cls(
             settings=settings,
             local_clock=LocalClock(SourceTime.from_config(settings.time)),
-            calendar=DayTypeCalendar(
-                zone_countries=settings.safety.timezone_country, holiday_ranges=holidays
-            ),
+            calendar=day_type_calendar_for(services),
             known_codes=frozenset(codes),
             rules=rules,
         )

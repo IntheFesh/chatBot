@@ -38,8 +38,11 @@ class Routine:
         self.calls.append((day_type, weekday))
         return self.busy
 
-    def latency_distribution(self, slot: int) -> EmpiricalDistribution:
+    def latency_distribution(self, slot: int, day_type: str | None = None) -> EmpiricalDistribution:
         return EmpiricalDistribution.empty()
+
+    def latency_for_day_type(self, slot: int, day_type: str) -> EmpiricalDistribution | None:
+        return None  # no kind of day has a distribution of its own in this routine
 
     def rate_at(self, slot: int, day_type: str) -> float:
         return self.rates.get(slot, 1.0)

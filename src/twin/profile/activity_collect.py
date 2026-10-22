@@ -4,7 +4,8 @@
 the unit tracker produced for it (so bursts, segments and latencies are computed once).  It
 keeps, per day type, her messages and her initiations in each 15-minute local slot, the days on
 which anything was said, the reply-latency histograms by the slot in which the message she
-answers arrived, and the local wall-clock position of each of her messages for the per-day
+answers arrived (all of them, and those of the messages that arrived on a workday, a weekend day
+or a holiday, R-ACT-002), and the local wall-clock position of each of her messages for the per-day
 sleep search.  :class:`ActivityRaw` is what the inference (:mod:`twin.profile.activity_infer`)
 reads.
 """
@@ -21,6 +22,8 @@ from twin.profile.units import Rec, Step
 
 ALL = "all"
 WORKDAY = "workday"
+WEEKEND = "weekend"
+HOLIDAY = "holiday"
 
 
 @dataclass
@@ -41,6 +44,8 @@ class ActivityRaw:
     first_day: date | None
     last_day: date | None
     days: dict[str, int] = field(default_factory=dict)
+    latency_weekend: dict[int, Counter[float]] = field(default_factory=dict)
+    latency_holiday: dict[int, Counter[float]] = field(default_factory=dict)
 
     def primary_zone(self) -> str:
         if not self.zone_names:
@@ -60,6 +65,8 @@ class ActivityCollector:
         self._inits: dict[str, list[int]] = {}
         self._latency: dict[int, Counter[float]] = {}
         self._latency_workday: dict[int, Counter[float]] = {}
+        self._latency_weekend: dict[int, Counter[float]] = {}
+        self._latency_holiday: dict[int, Counter[float]] = {}
         self._wall: array[float] = array("d")
         self._zone_ids: array[int] = array("b")
         self._workday_counts: dict[date, list[int]] = {}
@@ -107,8 +114,13 @@ class ActivityCollector:
             seconds = float(round(step.latency_s))
             arrival = step.answered.stamp.slot
             self._latency.setdefault(arrival, Counter())[seconds] += 1
-            if step.answered.day_type == WORKDAY:
-                self._latency_workday.setdefault(arrival, Counter())[seconds] += 1
+            by_type = {
+                WORKDAY: self._latency_workday,
+                WEEKEND: self._latency_weekend,
+                HOLIDAY: self._latency_holiday,
+            }.get(step.answered.day_type)
+            if by_type is not None:  # the type of the day the message she answers arrived on
+                by_type.setdefault(arrival, Counter())[seconds] += 1
 
     def finish(self) -> ActivityRaw:
         days: dict[str, int] = Counter(self._day_types.values())
@@ -125,6 +137,8 @@ class ActivityCollector:
             inits=self._inits,
             latency=self._latency,
             latency_workday=self._latency_workday,
+            latency_weekend=self._latency_weekend,
+            latency_holiday=self._latency_holiday,
             her_wall=self._wall,
             her_zone=self._zone_ids,
             workday_day_counts=self._workday_counts,

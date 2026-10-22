@@ -18,13 +18,19 @@ now?" in four steps:
    tomorrow are mandatory: they are in the block whatever the budget (at most
    :data:`MAX_MANDATORY` of each kind, so a tiny budget cannot be overrun without bound).
 4. **write** - sections with small headings (:mod:`twin.memory.render`).
+
+When the vector search fails, the live block (:meth:`MemoryAssembler.build`) is built without the
+vector hits - from the keyword hits, the follow-ups, the facts of today and tomorrow, the life line
+and the recent days - and is marked ``degraded`` (D-731).  A view made by
+:meth:`MemoryAssembler.view` (the training export, the evaluation, ``memory_view``) does not
+degrade: it raises.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 
 from twin.config.settings import MemoryConfig
@@ -45,7 +51,7 @@ from twin.memory.render import (
     heading,
     summary_line,
 )
-from twin.memory.view import MemoryView
+from twin.memory.view import MemoryView, VectorOutage
 from twin.memory.visible import date_score, occurrence_offset
 
 MAX_MANDATORY = 5
@@ -88,6 +94,7 @@ class MemoryAssembler:
         self._memory = memory
         self._estimator = estimator or TokenEstimator()
         self._limits = limits
+        self._outage = VectorOutage(memory.services.clock)  # what the live block remembers (D-731)
 
     @property
     def estimator(self) -> TokenEstimator:
@@ -97,22 +104,37 @@ class MemoryAssembler:
     # ------------------------------------------------------------------ entry points
 
     def view(
-        self, moment: datetime, *, include_lifeline: bool = True, refresh: bool = True
+        self,
+        moment: datetime,
+        *,
+        include_lifeline: bool = True,
+        refresh: bool = True,
+        degrade_vectors: bool = False,
     ) -> MemoryView:
-        """The memory at ``moment`` whose :meth:`~MemoryView.render` is this assembler."""
+        """The memory at ``moment`` whose :meth:`~MemoryView.render` is this assembler.
+
+        A view raises when the vector search fails, as the training export and the evaluation need
+        (iron rule 13); only the live block asks for ``degrade_vectors`` (see :meth:`build`).
+        """
         return MemoryView(
             self._memory,
             moment,
             include_lifeline=include_lifeline,
             refresh=refresh,
             renderer=self.render_view,
+            degrade_vectors=degrade_vectors,
+            outage=self._outage if degrade_vectors else None,
         )
 
     def build(
         self, query_context: MemoryQuery, now: datetime, budget_tokens: int | None = None
     ) -> MemoryBlock:
-        """The memory block for a reply at ``now`` (blocking: the vector search reads disk)."""
-        return self.render_view(self.view(now), query_context, budget_tokens)
+        """The memory block for a reply at ``now`` (blocking: the vector search reads disk).
+
+        This is the live path: if the vector backend fails, the block is built without it and
+        marked ``degraded`` instead of failing (D-731).
+        """
+        return self.render_view(self.view(now, degrade_vectors=True), query_context, budget_tokens)
 
     async def abuild(
         self, query_context: MemoryQuery, now: datetime, budget_tokens: int | None = None
@@ -132,7 +154,8 @@ class MemoryAssembler:
     ) -> MemoryBlock:
         budget = self.effective_budget(budget_tokens)
         entries = self._recall(view, query)
-        return self._fit(entries, budget)
+        block = self._fit(entries, budget)
+        return replace(block, degraded=True) if view.vectors_degraded else block
 
     def _memory_config(self) -> MemoryConfig:
         return self._memory.services.settings.memory

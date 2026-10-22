@@ -9,7 +9,8 @@ Queries (all pure; none samples except where the name says so)::
 
     rate_at(slot, day_type)              messages per slot per day
     initiation_rate_at(slot, day_type)   conversations she opens in that slot per day
-    latency_distribution(slot)           seconds until she answers a message arriving then
+    latency_distribution(slot, day_type) seconds until she answers a message arriving then
+                                         (that day type's own, where it has enough samples)
     sleep_profile()                      typical onset / wake per day type, confidence, warnings
     busy_windows(day_type, weekday=None) busy periods, with their latency distributions
     typical_state(time, day_type)        deep_sleep | sleep_edge | busy | free
@@ -236,6 +237,10 @@ class ActivityModel:
     busy: Mapping[str, tuple[BusyWindow, ...]]
     her_messages: int
     initiations_per_day: float
+    # a model built before these were collected has none (``None``): its weekend and holiday
+    # latencies are the all-day ones until the profile is rebuilt (D-734)
+    latency_weekend: BucketedDistribution | None = None
+    latency_holiday: BucketedDistribution | None = None
     manual_busy: tuple[BusyWindow, ...] = ()
     applied_overrides: tuple[str, ...] = ()
     extra: Mapping[str, Any] = field(default_factory=dict)
@@ -262,8 +267,36 @@ class ActivityModel:
         """Conversations she opens in this slot, per day of this type (smoothed)."""
         return self._curve(self.initiation, day_type)[self._check_slot(local_slot)]
 
-    def latency_distribution(self, local_slot: int) -> EmpiricalDistribution:
-        """Seconds until she answers a message that arrives in this slot (with fallbacks)."""
+    def latency_for_day_type(self, local_slot: int, day_type: str) -> EmpiricalDistribution | None:
+        """Her latency in this slot on this kind of day, or ``None`` if that has too few samples.
+
+        The distribution of the day type is used when the slot, or the hour around it, holds at
+        least the minimum number of samples *of that type* (the same sizes and minimum as the
+        all-day one); a thin bucket answers ``None`` instead of the type's all-day mixture, so the
+        caller falls back to the all-day distribution of the slot, which has the shape of her day.
+        """
+        slot = self._check_slot(local_slot)
+        split = {
+            "workday": self.latency_workday,
+            "weekend": self.latency_weekend,
+            "holiday": self.latency_holiday,
+        }.get(day_type)
+        if split is None or split.level_for(slot) == len(split.sizes):
+            return None
+        return split.get(slot)
+
+    def latency_distribution(
+        self, local_slot: int, day_type: str | None = None
+    ) -> EmpiricalDistribution:
+        """Seconds until she answers a message that arrives in this slot (with fallbacks).
+
+        With a ``day_type`` the distribution of that kind of day is used where it is dense enough
+        (:meth:`latency_for_day_type`), otherwise the all-day one (R-ACT-002).
+        """
+        if day_type is not None:
+            typed = self.latency_for_day_type(local_slot, day_type)
+            if typed is not None:
+                return typed
         return self.latency.get(self._check_slot(local_slot))
 
     # ------------------------------------------------------ sleep, busy, state
@@ -381,6 +414,14 @@ class ActivityModel:
             "initiation_raw": curves(self.initiation_raw),
             "latency": self.latency.to_json(),
             "latency_workday": self.latency_workday.to_json(),
+            **{
+                key: split.to_json()
+                for key, split in (
+                    ("latency_weekend", self.latency_weekend),
+                    ("latency_holiday", self.latency_holiday),
+                )
+                if split is not None
+            },
             "sleep": self.sleep.to_json(),
             "busy": {key: [w.to_json() for w in windows] for key, windows in self.busy.items()},
             "her_messages": self.her_messages,
@@ -407,6 +448,8 @@ class ActivityModel:
             initiation_raw=curves(data["initiation_raw"]),
             latency=BucketedDistribution.from_json(data["latency"]),
             latency_workday=BucketedDistribution.from_json(data["latency_workday"]),
+            latency_weekend=_optional_split(data.get("latency_weekend")),
+            latency_holiday=_optional_split(data.get("latency_holiday")),
             sleep=SleepProfile.from_json(data["sleep"]),
             busy={
                 key: tuple(BusyWindow.from_json(w) for w in windows)
@@ -416,3 +459,8 @@ class ActivityModel:
             initiations_per_day=float(data["initiations_per_day"]),
             extra=dict(data.get("extra", {})),
         )
+
+
+def _optional_split(data: Mapping[str, Any] | None) -> BucketedDistribution | None:
+    """A latency split of a stored model, which versions made before it was collected lack."""
+    return BucketedDistribution.from_json(data) if data is not None else None

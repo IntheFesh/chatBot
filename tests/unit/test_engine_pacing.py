@@ -5,11 +5,15 @@ from __future__ import annotations
 import random
 import statistics
 from collections import Counter
+from dataclasses import replace
+from datetime import timedelta
 
 import pytest
 
 from tests.support.engine_extras import Routine
+from tests.support.engine_harness import START
 from tests.support.reply_view import StaticDataView, dist, make_profile
+from tests.support.routine import fixed_model
 from tests.support.synth_chat import ChatSpec, build_chat
 from twin.engine.pacing import (
     MIN_INTERVAL_S,
@@ -30,6 +34,7 @@ from twin.profile.distribution import BucketedDistribution, EmpiricalDistributio
 from twin.profile.metrics import TYPING_MIN_GAPS, typing_speed
 from twin.profile.snapshot import ProfileMetrics, assemble_metrics
 from twin.profile.values import Hourly, Scalar
+from twin.schedule.plan_model import BusySpan, busy_ref
 from twin.services import Services
 
 
@@ -189,3 +194,51 @@ def test_the_profile_of_a_conversation_has_her_typing_speed(services: Services) 
     assert speed is None or speed >= 0.0
     pacing = PacingModel(seconds_per_char=speed)
     assert pacing.typing_time(8) >= 0.0
+
+
+# ------------------------------------- the latency by kind of day (R17-40b, D-734)
+
+
+def day_type_pacing() -> PacingModel:
+    """Her hour 15 is 900 s over all days; on weekends the slot 15:15 has a latency of its own."""
+    hourly = BucketedDistribution.from_counters({15: {900.0: 50}}, sizes=(1,), min_samples=20)
+    weekend = BucketedDistribution.from_counters(
+        {61: {5.0: 40}}, sizes=(1, 4), min_samples=20, discrete=True
+    )
+    activity = replace(fixed_model(), latency_weekend=weekend)
+    return PacingModel(latency_by_hour=hourly, activity=activity)
+
+
+def test_a_kind_of_day_with_a_latency_of_its_own_comes_before_the_hour_of_every_day() -> None:
+    pacing = day_type_pacing()
+    rng = random.Random(1)
+    assert pacing.reply_latency(15, 61, "weekend").sample(rng) == 5.0
+    assert pacing.reply_latency(15, 61).sample(rng) == 900.0  # no day type: as before
+    # workdays and holidays have too few samples in the slot: the hour of every day, as before
+    assert pacing.reply_latency(15, 61, "workday").sample(rng) == 900.0
+    assert pacing.reply_latency(15, 61, "holiday").sample(rng) == 900.0
+    assert pacing.reply_latency(15, 62, "weekend").sample(rng) == 5.0  # the hour of the type
+
+
+def test_the_day_type_goes_through_the_first_delay_and_the_busy_fallback() -> None:
+    pacing = day_type_pacing()
+    rng = random.Random(1)
+    assert pacing.first_delay(rng, 15, 61, 5, "weekend") == 5.0 + reading_time(5)
+    assert pacing.first_delay(rng, 15, 61, 5) == 900.0 + reading_time(5)
+    assert pacing.busy_latency(None, 15, 61, "weekend").sample(rng) == 5.0
+    assert pacing.busy_latency(None, 15, 61).sample(rng) == 900.0
+    # a reference to a window the model does not have: the kind of day of the *situation* counts,
+    # not the one the reference names
+    span = BusySpan(
+        START, START + timedelta(hours=2), "11:00-13:00", "inferred", busy_ref("workday", 2, 9)
+    )
+    assert pacing.busy_latency(span, 15, 61, "weekend").sample(rng) == 5.0
+    assert pacing.busy_latency(span, 15, 61, "workday").sample(rng) == 900.0
+
+
+def test_a_model_without_the_split_paces_every_day_type_as_it_did() -> None:
+    hourly = BucketedDistribution.from_counters({15: {900.0: 50}}, sizes=(1,), min_samples=20)
+    pacing = PacingModel(latency_by_hour=hourly, activity=fixed_model())  # stored before the split
+    rng = random.Random(1)
+    for kind in ("workday", "weekend", "holiday", None):
+        assert pacing.reply_latency(15, 61, kind).sample(rng) == 900.0, kind

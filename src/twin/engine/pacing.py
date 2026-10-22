@@ -142,8 +142,16 @@ class PacingModel:
 
     # -------------------------------------------------------------- reply latency
 
-    def reply_latency(self, hour: int, slot: int) -> Sampler:
-        """Her reply latency for a message that arrives in this local hour (R-ENG-004)."""
+    def reply_latency(self, hour: int, slot: int, day_type: str | None = None) -> Sampler:
+        """Her reply latency for a message that arrives in this local hour (R-ENG-004).
+
+        On a kind of day whose own distribution has enough samples in this slot (R-ACT-002, D-734)
+        that one comes first; otherwise the hour's, then the slot's all-day one.
+        """
+        if self.activity is not None and day_type is not None:
+            typed = self.activity.latency_for_day_type(slot, day_type)
+            if typed is not None and typed.n > 0:
+                return typed
         if self.latency_by_hour is not None:
             found = self.latency_by_hour.get(hour)
             if found.n > 0:
@@ -156,21 +164,25 @@ class PacingModel:
             return self.latency_all
         return REFERENCE_LATENCY
 
-    def busy_latency(self, span: BusySpan | None, hour: int, slot: int) -> Sampler:
+    def busy_latency(
+        self, span: BusySpan | None, hour: int, slot: int, day_type: str | None = None
+    ) -> Sampler:
         """The latency distribution of the busy window she is in (the long tail stays)."""
         if span is not None and self.activity is not None:
             try:
-                day_type, weekday, index = parse_busy_ref(span.latency_ref)
-                windows = self.activity.busy_windows(day_type, weekday)
+                ref_type, weekday, index = parse_busy_ref(span.latency_ref)
+                windows = self.activity.busy_windows(ref_type, weekday)
                 if 0 <= index < len(windows) and windows[index].latency.n > 0:
                     return windows[index].latency
             except (ValueError, KeyError):
                 pass  # a reference this model cannot resolve: the hour's own distribution
-        return self.reply_latency(hour, slot)
+        return self.reply_latency(hour, slot, day_type)
 
-    def first_delay(self, rng: random.Random, hour: int, slot: int, chars: int) -> float:
+    def first_delay(
+        self, rng: random.Random, hour: int, slot: int, chars: int, day_type: str | None = None
+    ) -> float:
         """Free: her latency of the hour plus the time to read what was written."""
-        return self.reply_latency(hour, slot).sample(rng) + reading_time(chars)
+        return self.reply_latency(hour, slot, day_type).sample(rng) + reading_time(chars)
 
     def short_pause(self, rng: random.Random, chars: int) -> float:
         """A short pause: reading the new message plus one of her pauses inside a burst."""

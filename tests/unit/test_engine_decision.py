@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import inspect
 import random
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import datetime, time, timedelta
 
 import pytest
 from pydantic import BaseModel
 
 from tests.support.engine_harness import START, FixedDay, reference_pacing
+from tests.support.routine import fixed_model
 from twin.config.runtime import registered_settings
 from twin.config.settings import Settings
 from twin.engine.decision import MAX_RETRIES, Decider, Decision, Situation
@@ -142,8 +143,11 @@ class Routine:
         self.calls.append((day_type, weekday))
         return self.busy
 
-    def latency_distribution(self, slot: int) -> EmpiricalDistribution:
+    def latency_distribution(self, slot: int, day_type: str | None = None) -> EmpiricalDistribution:
         return EmpiricalDistribution.empty()
+
+    def latency_for_day_type(self, slot: int, day_type: str) -> EmpiricalDistribution | None:
+        return None  # no kind of day has a distribution of its own in this routine
 
     def rate_at(self, slot: int, day_type: str) -> float:
         return self.rates.get(slot, 1.0)
@@ -338,3 +342,44 @@ def test_there_is_no_switch_for_an_instant_answer() -> None:
     deciding = decider(free_day(), random.Random(21))
     delays = [deciding.decide(reference_pacing(), situation()).delay_s for _ in range(300)]
     assert min(delays) >= reading_time(7)  # even her quickest answer takes the time to read
+
+
+# ------------------------------------- the latency by kind of day (R17-40b, D-734)
+
+
+def test_the_delay_follows_the_kind_of_day_of_the_situation() -> None:
+    """R17-40b: a weekend afternoon is answered at once, a workday afternoon is not."""
+    hourly = BucketedDistribution.from_counters({15: {900.0: 50}}, sizes=(1,), min_samples=20)
+    weekend = BucketedDistribution.from_counters(
+        {61: {5.0: 40}}, sizes=(1, 4), min_samples=20, discrete=True
+    )
+    pacing = PacingModel(
+        latency_by_hour=hourly, activity=replace(fixed_model(), latency_weekend=weekend)
+    )
+    deciding = decider(free_day())
+    saturday = deciding.decide(pacing, situation(hour=15, slot=61, day_type="weekend"))
+    monday = deciding.decide(pacing, situation(hour=15, slot=61, day_type="workday"))
+    assert saturday.delay_s == pytest.approx(5.0 + reading_time(7))
+    assert monday.delay_s == pytest.approx(900.0 + reading_time(7))
+
+
+def test_a_busy_spell_the_model_cannot_resolve_uses_the_latency_of_the_kind_of_day() -> None:
+    """The reference names a workday window; the situation is a weekend: the situation counts."""
+    hourly = BucketedDistribution.from_counters({15: {900.0: 50}}, sizes=(1,), min_samples=20)
+    weekend = BucketedDistribution.from_counters(
+        {61: {5.0: 40}}, sizes=(1, 4), min_samples=20, discrete=True
+    )
+    span = BusySpan(
+        NOON - timedelta(hours=1),
+        NOON + timedelta(hours=3),
+        "11:00–15:00",
+        "inferred",
+        busy_ref("workday", 5, 9),  # no such window in the model: the day's own latency stands in
+    )
+    pacing = PacingModel(
+        latency_by_hour=hourly, activity=replace(fixed_model(), latency_weekend=weekend)
+    )
+    decision = decider(busy_day(span)).decide(
+        pacing, situation(hour=15, slot=61, day_type="weekend")
+    )
+    assert decision.mode == "busy" and decision.delay_s == pytest.approx(5.0)

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import random
+from dataclasses import replace
 from datetime import UTC, datetime, time
+
+import pytest
 
 from twin.profile.activity_model import (
     CURVE_KEYS,
@@ -16,6 +20,8 @@ from twin.profile.activity_model import (
 from twin.profile.circular import CircularStats
 from twin.profile.distribution import BucketedDistribution, EmpiricalDistribution
 from twin.profile.overrides import OverrideView
+
+WEEKEND_KEYS = {"latency_weekend", "latency_holiday"}  # what a version stored earlier lacks
 
 
 def clock(hour: float) -> time:
@@ -262,3 +268,80 @@ def test_disabled_and_unrelated_corrections_change_nothing() -> None:
     assert same.applied_overrides == ()
     assert same.typical_state(clock(2.0), "workday") == "deep_sleep"
     assert same.sleep_profile().windows.keys() == model.sleep_profile().windows.keys()
+
+
+# ----------------------------------------------- the latency by kind of day (R17-40b, D-734)
+
+
+def split(counts: dict[int, dict[float, int]]) -> BucketedDistribution:
+    """A latency split in the layout of the model: the slot, its hour, then everything."""
+    return BucketedDistribution.from_counters(counts, sizes=(1, 4), min_samples=20, discrete=True)
+
+
+def latency_model(**splits: BucketedDistribution | None) -> ActivityModel:
+    """A model whose all-day latency at 15:15 (slot 61) is 20 s and whose splits are given."""
+    base = make_model({"all": sleep_window(23.0, 7.0)})
+    return replace(
+        base,
+        latency=split({61: {20.0: 60}}),
+        latency_workday=split({61: {900.0: 40}}),
+        **splits,  # type: ignore[arg-type]
+    )
+
+
+def test_a_kind_of_day_with_enough_samples_in_the_slot_answers_with_its_own_latency() -> None:
+    model = latency_model(
+        latency_weekend=split({61: {5.0: 30}}), latency_holiday=split({61: {7.0: 3}})
+    )
+    assert model.latency_distribution(61, "weekend").median() == 5.0
+    assert model.latency_distribution(61, "workday").median() == 900.0
+    assert model.latency_for_day_type(61, "weekend") is model.latency_weekend.get(61)  # type: ignore[union-attr]
+    assert model.latency_distribution(61).median() == 20.0  # no day type: the all-day one
+
+
+def test_a_thin_bucket_falls_back_to_the_all_day_distribution_of_the_slot() -> None:
+    model = latency_model(latency_holiday=split({61: {7.0: 3}}))
+    fallback = model.latency.get(61)
+    assert model.latency_distribution(61, "holiday") is fallback  # 3 samples: too few
+    assert model.latency_for_day_type(61, "holiday") is None
+    assert model.latency_distribution(61, "festival") is fallback  # a type nobody knows
+    assert model.latency_for_day_type(61, "festival") is None
+    other_slot = model.latency_distribution(10, "workday")  # a slot of the type without samples
+    assert other_slot is model.latency.get(10) and model.latency_for_day_type(10, "workday") is None
+
+
+def test_the_hour_around_the_slot_answers_when_the_slot_alone_is_thin() -> None:
+    weekend = split({60: {6.0: 12}, 62: {8.0: 12}})  # 12 + 12 in the hour, none in slot 61
+    model = latency_model(latency_weekend=weekend)
+    found = model.latency_distribution(61, "weekend")
+    assert found.n == 24 and found is weekend.levels[1][61 // 4]
+    assert model.latency_distribution(52, "weekend") is model.latency.get(52)  # another hour
+
+
+def test_a_model_made_before_the_split_existed_answers_with_the_all_day_one() -> None:
+    model = latency_model()  # no weekend, no holiday
+    assert model.latency_weekend is None and model.latency_holiday is None
+    assert model.latency_distribution(61, "weekend") is model.latency.get(61)
+    assert model.latency_distribution(61, "holiday") is model.latency.get(61)
+    assert model.latency_distribution(61, "workday").median() == 900.0  # it always had this one
+    with pytest.raises(ValueError, match="local slot"):
+        model.latency_distribution(96, "weekend")
+
+
+def test_the_split_survives_json_and_an_old_stored_model_still_loads() -> None:
+    model = latency_model(
+        latency_weekend=split({61: {5.0: 30}}), latency_holiday=split({61: {7.0: 3}})
+    )
+    stored = model.to_json()
+    again = ActivityModel.from_json(json.loads(json.dumps(stored)))
+    assert again.latency_weekend is not None and again.latency_holiday is not None
+    assert again.latency_weekend.to_json() == model.latency_weekend.to_json()  # type: ignore[union-attr]
+    assert again.latency_holiday.to_json() == model.latency_holiday.to_json()  # type: ignore[union-attr]
+    assert again.latency_distribution(61, "weekend").median() == 5.0
+    assert again.to_json() == stored  # the round trip is exact
+    old = {key: value for key, value in stored.items() if key not in WEEKEND_KEYS}
+    loaded = ActivityModel.from_json(old)  # a version stored before the split was collected
+    assert loaded.latency_weekend is None and loaded.latency_holiday is None
+    assert loaded.latency_distribution(61, "weekend").median() == 20.0
+    assert not WEEKEND_KEYS & set(latency_model().to_json())  # and a model without it writes none
+    assert loaded.to_json() == latency_model().to_json()
