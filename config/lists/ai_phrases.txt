@@ -2,6 +2,9 @@
 # One literal substring per line (matched case-insensitively), UTF-8; '#' starts a comment line.
 # Editable: add phrases you notice the model producing.  Used by the reply post-processor
 # (round 09) to reject and regenerate a reply.
+# A bubble with a phrase of the customer-service groups is deleted whole, so a phrase belongs here
+# only if she never says it herself (D-671): 当然可以, 你说得很对, 记得照顾好自己, 如果你需要,
+# 我可以帮你 and 好的，我明白了 are everyday speech and are not on this list.
 
 # --- self-identification as an AI / model
 作为AI
@@ -29,7 +32,8 @@
 语言模型
 大语言模型
 我没有真实的情感
-我没有感情
+作为一个没有感情
+作为没有感情
 我无法真正理解
 我只是一个程序
 我的训练数据
@@ -119,9 +123,6 @@
 这是一个非常好的问题
 这是一个很有趣的问题
 你提出了一个
-你说得很对
-你说的很有道理
-你的想法很棒
 你的感受是完全正常的
 你的感受是可以理解的
 我理解你的感受
@@ -131,25 +132,16 @@
 保持积极的心态
 调整好心态
 照顾好自己很重要
-记得照顾好自己
-一定要照顾好自己
 建议寻求专业帮助
 
 # --- assistant-style openers and closers
-好的，我明白了
-好的，让我
-当然可以
 以上就是
 以上是
 希望以上
 希望这些
 希望这个回答
-如果你需要
-如果您需要
 如果需要的话，我可以
-需要我帮你
 需要我为你
-我可以帮你
 我可以为你
 我可以帮助你
 我可以帮您
