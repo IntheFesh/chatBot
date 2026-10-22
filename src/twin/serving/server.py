@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import os
 import posixpath
+import socket
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
@@ -155,6 +156,13 @@ def _normalised(path: str, platform: str) -> str:
 def _is_absolute(path: str) -> bool:
     """Absolute in either spelling: a Windows path reported to a POSIX test is still absolute."""
     return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def free_loopback_port() -> int:
+    """A port on 127.0.0.1 that nobody listens on right now (the system picks it)."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
 
 
 def same_model_file(reported: str | None, expected: Path, *, platform: str | None = None) -> bool:

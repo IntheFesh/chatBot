@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,6 +66,7 @@ from twin.serving.server import (
     LlamaServerManager,
     ServerState,
     ServerTimings,
+    free_loopback_port,
     same_model_file,
     served_model_path,
 )
@@ -83,13 +83,6 @@ log = get_logger("twin.serving.evaluation")
 EVAL_LOG: Final = "llama-server-eval.log"
 TUNNEL_WAIT_S: Final = 90.0
 STOP_WAIT_S: Final = 20.0
-
-
-def free_loopback_port() -> int:
-    """A port on 127.0.0.1 that nobody listens on right now (the system picks it)."""
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 @dataclass
