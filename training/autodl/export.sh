@@ -5,10 +5,12 @@
 #
 # Order (print it with --dry-run; nothing is touched then):
 #   merge the adapter into the bf16 base -> build llama-quantize -> convert to an F16 GGUF
-#   -> delete the merged HF weights -> quantise Q4_K_M, Q5_K_M, Q8_0 -> delete the F16 GGUF
-#   -> copy the adapter and write artifacts/manifest.json.
+#   -> delete the merged HF weights -> quantise Q4_K_M, Q5_K_M, Q8_0 straight into
+#   artifacts/gguf/ -> delete the F16 GGUF -> copy the adapter and write artifacts/manifest.json.
 # A deletion only follows the step that made the file replacing the deleted one, and the free
-# space is checked before every step that writes a large file.  Running the script again skips
+# space is checked before every step that writes a large file.  The quantized files are written
+# where they stay (no copy: at the peak the disk holds the base, the F16 file and the three
+# quantizations, 3.2 times the bf16 size, and not a fourth set).  Running the script again skips
 # the steps that are done (state/export.<step>); the adapter itself stays for the remote vLLM.
 set -euo pipefail
 
@@ -47,7 +49,7 @@ F16="${GGUF_DIR}/model-F16.gguf"
 ARTIFACTS="${TWIN_HOME}/artifacts"
 STATE="${TWIN_HOME}/state"
 IFS=, read -r -a QUANTS <<<"${TWIN_GGUF_QUANTS}"
-mkdir -p "${STATE}" "${GGUF_DIR}" "${ARTIFACTS}"
+mkdir -p "${STATE}" "${GGUF_DIR}" "${ARTIFACTS}/gguf"
 if [ "${REDO}" = "1" ]; then
     rm -f "${STATE}"/export.*
 fi
@@ -55,7 +57,8 @@ fi
 step_done() { [ -f "${STATE}/export.$1" ]; }
 mark_done() { touch "${STATE}/export.$1"; }
 
-quant_file() { echo "${GGUF_DIR}/${TWIN_PROFILE}-$1.gguf"; }
+# the quantizations are written where they stay
+quant_file() { echo "${ARTIFACTS}/gguf/${TWIN_PROFILE}-$1.gguf"; }
 
 step_merge_adapter() {
     free_space_gate "merging the adapter" "$((TWIN_BASE_GB_CEIL + 3))"
@@ -119,7 +122,9 @@ step_quantize() {
         if [ -s "${target}" ]; then
             continue
         fi
-        free_space_gate "quantising ${quant}" "$((TWIN_BASE_GB_CEIL / 2 + 2))"
+        [ -s "${F16}" ] || die "the F16 GGUF is missing; run export.sh --redo to start from the merge"
+        free_space_gate "quantising ${quant}" "$(quant_space_needed_gb "$(stat -c %s "${F16}")")"
+        rm -f "${target}.part"
         "${LLAMA_CPP}/build/bin/llama-quantize" "${F16}" "${target}.part" "${quant}"
         mv "${target}.part" "${target}"
     done
@@ -137,13 +142,15 @@ step_delete_f16() {
 step_collect_artifacts() {
     local adapter
     adapter="$(cat "${STATE}/export.adapter" 2>/dev/null || best_adapter "${ADAPTER_CHOICE}")"
-    rm -rf "${ARTIFACTS}/adapter" "${ARTIFACTS}/gguf"
-    mkdir -p "${ARTIFACTS}/adapter" "${ARTIFACTS}/gguf"
+    rm -rf "${ARTIFACTS}/adapter"
+    mkdir -p "${ARTIFACTS}/adapter"
     for file in adapter_config.json adapter_model.safetensors README.md; do
         if [ -f "${adapter}/${file}" ]; then cp "${adapter}/${file}" "${ARTIFACTS}/adapter/"; fi
     done
+    # the quantizations are already in artifacts/gguf (written there by step_quantize); this step
+    # must not delete them, so that doing it again only rewrites the adapter copy and the manifest
     for quant in "${QUANTS[@]}"; do
-        cp "$(quant_file "${quant}")" "${ARTIFACTS}/gguf/"
+        [ -s "$(quant_file "${quant}")" ] || die "$(quant_file "${quant}") is missing; run export.sh --redo"
     done
     "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/artifact_manifest.py" \
         --artifacts "${ARTIFACTS}" \

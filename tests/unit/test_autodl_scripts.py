@@ -37,7 +37,7 @@ from tests.support.autodl_scripts import (
 )
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
-from twin.training.profiles import PROFILES
+from twin.training.profiles import PROFILES, QUANT_FACTORS
 from twin.training.versions import JIEBA, NLTK, ROUGE_CHINESE
 
 PASSPHRASE = "correct horse battery staple"
@@ -1019,20 +1019,21 @@ root="$(cd "$(dirname "$0")/../../.." && pwd)"
 merged=0; [ -d "$root/output/merged" ] && merged=1
 f16=0; [ -f "$1" ] && f16=1
 printf 'quantize %s merged_exists=%s f16_exists=%s\\n' "$3" "$merged" "$f16" >>"$root/../trace.log"
+printf '%s\\n' "$2" >>"$root/../quant_targets.log"
 printf '%s' "$3-model" >"$2"
 """
 
 
-@posix_only
-def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
-    tmp_path: Path,
-) -> None:
-    workdir = prepared_workdir(tmp_path, "5090-14b")
+def prepare_export(
+    tmp_path: Path, profile: str = "5090-14b", *, free_gb: str = "echo 900"
+) -> tuple[Path, dict[str, str], Path]:
+    """A work directory ready for ``export.sh``: an SFT adapter, llama.cpp's products as stubs."""
+    workdir = prepared_workdir(tmp_path, profile)
     install_fake_cli(tmp_path)
     env = script_env(
         workdir,
         tmp_path,
-        TWIN_PROBE_OVERRIDES=write_overrides(tmp_path, probe_free_gb="echo 900"),
+        TWIN_PROBE_OVERRIDES=write_overrides(tmp_path, probe_free_gb=free_gb),
         TWIN_RUN_ID="r-test-1",
     )
     sft = workdir / "output" / "sft"
@@ -1055,7 +1056,14 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     (workdir / "state").mkdir()
     (workdir / "state" / "export.prepare_llama_cpp").touch()
     # the trace file lives next to the work directory so the stubs can reach it
-    trace = workdir.parent / "trace.log"
+    return workdir, env, workdir.parent / "trace.log"
+
+
+@posix_only
+def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
+    tmp_path: Path,
+) -> None:
+    workdir, env, trace = prepare_export(tmp_path)
 
     done = run_script(workdir, env, "export.sh", "5090-14b")
     assert done.returncode == 0, done.stderr + done.stdout
@@ -1070,6 +1078,15 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     assert not (workdir / "output" / "merged").exists()  # deleted after the F16 file existed
     assert not (workdir / "gguf" / "model-F16.gguf").exists()  # deleted after all three quants
     artifacts = workdir / "artifacts"
+    # R17-8 (D-634): the quantizer writes where the files stay; there is no second copy on the disk
+    targets = (tmp_path / "quant_targets.log").read_text("utf-8").splitlines()
+    assert [Path(target).name for target in targets] == [
+        "5090-14b-Q4_K_M.gguf.part",
+        "5090-14b-Q5_K_M.gguf.part",
+        "5090-14b-Q8_0.gguf.part",
+    ]
+    assert {Path(target).parent for target in targets} == {artifacts / "gguf"}
+    assert list((workdir / "gguf").iterdir()) == []  # not even the F16 file is left
     assert sorted(p.name for p in (artifacts / "gguf").iterdir()) == [
         "5090-14b-Q4_K_M.gguf",
         "5090-14b-Q5_K_M.gguf",
@@ -1091,6 +1108,84 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     again = run_script(workdir, env, "export.sh", "5090-14b")
     assert again.returncode == 0 and "already done" in again.stdout
     assert len(trace.read_text("utf-8").splitlines()) == 4
+
+
+@posix_only
+def test_a_rerun_of_collect_keeps_the_quants(tmp_path: Path) -> None:
+    """R17-8 (D-634): the last step used to ``rm -rf artifacts/gguf``; now the quants live there.
+
+    Doing the last step again (the manifest, say) must not delete the finished quantizations or
+    run the quantizer again.
+    """
+    workdir, env, trace = prepare_export(tmp_path)
+    assert run_script(workdir, env, "export.sh", "5090-14b").returncode == 0
+    gguf = workdir / "artifacts" / "gguf"
+    before = {path.name: path.read_bytes() for path in gguf.iterdir()}
+    assert len(before) == 3
+    (workdir / "state" / "export.collect_artifacts").unlink()
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr
+    assert {path.name: path.read_bytes() for path in gguf.iterdir()} == before
+    assert len(trace.read_text("utf-8").splitlines()) == 4  # no quantizer run
+    assert (workdir / "artifacts" / "manifest.json").is_file()
+
+
+@posix_only
+def test_collect_stops_when_a_quantization_is_missing(tmp_path: Path) -> None:
+    """R17-8 (D-634): the manifest is only written for a complete set."""
+    workdir, env, _ = prepare_export(tmp_path)
+    assert run_script(workdir, env, "export.sh", "5090-14b").returncode == 0
+    (workdir / "artifacts" / "gguf" / "5090-14b-Q5_K_M.gguf").unlink()
+    (workdir / "artifacts" / "manifest.json").unlink()
+    (workdir / "state" / "export.collect_artifacts").unlink()
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode == 1 and "5090-14b-Q5_K_M.gguf is missing" in done.stderr
+    assert not (workdir / "artifacts" / "manifest.json").exists()
+
+
+@posix_only
+def test_the_quantization_gate_is_the_size_of_the_file_it_writes(tmp_path: Path) -> None:
+    """R17-8 (D-634): ceil(F16 size x 0.55) + 2 GB free, not half the base model + 2 GB.
+
+    The F16 file of the test is 3000 bytes: 3 GB are needed.  The old gate asked for half of the
+    14B base model (15 GB) plus 2, which is too much for a small model and for 32B (35 GB for a
+    Q8_0 file of 34.8 GB) too little.
+    """
+    free = (
+        'if [ -s "$TWIN_HOME/gguf/model-F16.gguf" ]; then echo ${TEST_FREE_GB}; else echo 900; fi'
+    )
+    workdir, env, _ = prepare_export(tmp_path, free_gb=free)
+    short = run_script(workdir, {**env, "TEST_FREE_GB": "2"}, "export.sh", "5090-14b")
+    assert short.returncode == 1, short.stdout
+    assert (
+        "not enough free space before 'quantising Q4_K_M': 2 GB free, 3 GB needed" in short.stderr
+    )
+    assert "请到 AutoDL 控制台扩容数据盘" in short.stderr
+    assert not list((workdir / "artifacts" / "gguf").glob("*"))
+    enough = run_script(workdir, {**env, "TEST_FREE_GB": "3"}, "export.sh", "5090-14b")
+    assert enough.returncode == 0, enough.stderr
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("f16_gb", "needed"), [(0, 2), (0.0000028, 3), (16.4, 12), (29.6, 19), (65.6, 39), (100.5, 58)]
+)
+def test_the_free_space_a_quantization_needs(  # type: ignore[no-untyped-def]
+    env_for, f16_gb: float, needed: int
+) -> None:
+    """R17-8 (D-634): ceil(F16 size x 0.55) + 2, at least the largest quant (Q8_0, 0.53)."""
+    autodl, env = env_for("5090-8b")
+    size = int(f16_gb * 2**30)
+    done = call_function(autodl, env, f"quant_space_needed_gb {size}")
+    assert done.returncode == 0 and done.stdout.strip() == str(needed), done.stderr
+    assert needed >= f16_gb * max(QUANT_FACTORS.values()) + 2
+
+
+@posix_only
+def test_the_gate_factor_of_the_script_covers_the_largest_quantization(env_for) -> None:  # type: ignore[no-untyped-def]
+    autodl, env = env_for("5090-8b")
+    done = call_function(autodl, env, 'echo "${QUANT_SPACE_FACTOR}"')
+    assert float(done.stdout) >= max(QUANT_FACTORS.values())
 
 
 @posix_only

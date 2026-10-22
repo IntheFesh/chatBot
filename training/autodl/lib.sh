@@ -138,6 +138,18 @@ next_smaller_batch() {
     echo "$((batch / 2)) $((accum * 2))"
 }
 
+# The largest quantization (Q8_0) is 0.53 of the F16 size (twin.training.profiles.QUANT_FACTORS);
+# 0.55 leaves a little room.
+QUANT_SPACE_FACTOR=0.55
+
+# quant_space_needed_gb F16_BYTES: whole GB that must be free before one quantization writes its
+# file: ceil(F16 size * QUANT_SPACE_FACTOR) + 2.  The F16 file is already on the disk, and the
+# earlier quantizations are in artifacts/gguf, so only the new file is added.
+quant_space_needed_gb() {
+    awk -v bytes="$1" -v factor="${QUANT_SPACE_FACTOR}" \
+        'BEGIN { gb = bytes * factor / 1073741824; n = int(gb); if (n < gb) n++; print n + 2 }'
+}
+
 # yaml_get FILE KEY: the value of a top-level "key: value" line.
 yaml_get() {
     sed -n "s/^$2:[[:space:]]*//p" "$1" | head -n1
@@ -458,7 +470,7 @@ export_step_text() {
         prepare_llama_cpp) echo "clone llama.cpp ${TWIN_LLAMA_CPP_TAG:-?} and build llama-quantize on the CPU" ;;
         convert_f16) echo "convert the merged model to an F16 GGUF (convert_hf_to_gguf.py)" ;;
         delete_merged_hf) echo "delete the merged HF weights" ;;
-        quantize) echo "quantize the F16 GGUF to ${TWIN_GGUF_QUANTS:-Q4_K_M,Q5_K_M,Q8_0}" ;;
+        quantize) echo "quantize the F16 GGUF to ${TWIN_GGUF_QUANTS:-Q4_K_M,Q5_K_M,Q8_0}, written into artifacts/gguf" ;;
         delete_f16) echo "delete the F16 GGUF" ;;
         collect_artifacts) echo "copy the adapter, compute sha256 and write artifacts/manifest.json" ;;
         *) return 1 ;;
