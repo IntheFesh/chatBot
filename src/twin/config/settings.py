@@ -416,7 +416,9 @@ class TrainingConfig(_Section):
 
 
 class EvalConfig(_Section):
-    blind_n: int = Field(default=50, ge=1)
+    # contexts a blind test draws by default: the gates need MIN_VALID (50) valid judgements per
+    # backend and a skipped, failed or fallen-back pair does not count, so the draw has room
+    blind_n: int = Field(default=65, ge=1)
     memory_questions: int = Field(default=20, ge=1)
     # the weekly consistency audit (round 15, R-EVAL-004): how many days it looks back, how many
     # characters of the bot's replies and how many facts it hands to DeepSeek
