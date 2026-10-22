@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import typer
 from sqlalchemy import delete
 from typer.testing import CliRunner
 
@@ -22,7 +23,7 @@ from twin.clock import set_active_clock
 from twin.config.secrets import SecretStore
 from twin.ops.backup import cli as backup_cli
 from twin.ops.backup.archive import read_manifest
-from twin.ops.instance_lock import LOCK_RUN, InstanceLock
+from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, InstanceLock
 from twin.ops.process_model import CommandKind, ExitCode, get_spec
 from twin.services import CliContext, Services, set_cli_context
 from twin.storage.memory_models import Fact
@@ -189,6 +190,41 @@ def test_restore_is_refused_while_the_application_runs(world: BackupWorld) -> No
     finally:
         lock.release()
     assert code == ExitCode.BUSY and "twin service stop" in out
+
+
+def test_restore_holds_both_instance_locks_from_the_question_to_the_end(
+    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-28 (D-710): ``twin run`` cannot start between the question and the replacement."""
+    name = make(world)
+    locks_dir = world.services.paths.locks_dir
+
+    def free() -> list[bool]:
+        """Which locks another process could take right now."""
+        taken = []
+        for lock_name in ALL_LOCKS:
+            lock = InstanceLock(lock_name, locks_dir=locks_dir)
+            taken.append(lock.acquire())
+            lock.release()
+        return taken
+
+    seen: dict[str, list[bool]] = {}
+    real_restore = backup_cli.restore_archive
+
+    def asked(text: str, *args: object, **kwargs: object) -> bool:
+        seen["question"] = free()
+        return True
+
+    def restoring(*args: object, **kwargs: object) -> object:
+        seen["restore"] = free()
+        return real_restore(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(typer, "confirm", asked)
+    monkeypatch.setattr(backup_cli, "restore_archive", restoring)
+    code, out = twin(world, "restore", name)
+    assert code == 0, out
+    assert seen == {"question": [False, False], "restore": [False, False]}
+    assert free() == [True, True]
 
 
 def test_restore_reports_an_index_that_does_not_match_the_database(world: BackupWorld) -> None:

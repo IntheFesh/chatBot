@@ -34,7 +34,7 @@
 | **只读** | 直接读库；任何写库都会被拒绝 | 能 | `twin health`、`twin profile show`、`twin cost report` |
 | **轻量修改** | 短事务写库，并让运行中的应用在 2 秒内感知（重读人设卡、重建今天的计划、启停 `llama-server` 等） | 能 | `twin settings set`、`twin timezone set`、`twin persona edit`、`twin backup now` |
 | **重任务** | 只把任务**排进队列**，由运行中的应用执行；应用没在运行时加 `--foreground`，或用 `twin jobs run --until-idle` 在前台执行 | 能（入队） | `twin import <目录>`、`twin profile rebuild`、`twin train export` |
-| **独占** | 数据库迁移、恢复备份、一键删除、密钥轮换等：`run` 锁或 `supervisor` 锁被任何一个进程持有就拒绝执行，退出码 4 | **不能**，先 `twin service stop` | `twin backup restore`、`twin purge`、`twin db upgrade` |
+| **独占** | 数据库迁移、恢复备份、一键删除、密钥轮换等：`run` 锁或 `supervisor` 锁被任何一个进程持有就拒绝执行，退出码 4；命令运行期间（包括等你键入确认的时候）这两把锁由它自己持有，应用启动不了 | **不能**，先 `twin service stop` | `twin backup restore`、`twin purge`、`twin db upgrade` |
 
 **必须先停止应用的命令**（`twin service stop` 之后再执行，做完 `twin service start`）：
 

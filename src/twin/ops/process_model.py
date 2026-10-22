@@ -13,11 +13,16 @@ Every CLI command is declared with :func:`command` and one of four kinds:
     running application executes them, or ``twin jobs run --until-idle`` does when
     the application is stopped (``--foreground`` does that immediately).
 ``EXCLUSIVE``
-    restore, purge, key rotation, migrations: refused while the ``run`` or
-    ``supervisor`` instance lock is held by another process.  A command may
-    ``acquires`` locks for its own lifetime (``twin run`` takes ``run``) and
-    ``tolerates`` others (``twin run`` is started by ``twin supervise``, which holds
-    ``supervisor``).
+    restore, purge, key rotation, migrations: the wrapper *takes* the ``run`` and
+    ``supervisor`` instance locks (the ones the command does not ``acquires`` or ``tolerates``
+    itself) before the command body and holds them until it has finished, also while it asks
+    a question and also when it fails; a lock that another process holds refuses the command
+    (D-710).  A check that only looked at the locks would leave a gap in which ``twin run``
+    starts between the look and the work.  A command may ``acquires`` locks for its own
+    lifetime (``twin run`` takes ``run``) and ``tolerates`` others (``twin run`` is started by
+    ``twin supervise``, which holds ``supervisor``).  Because the locks are held, nothing inside
+    an exclusive command may look at them again (``app_is_running``, ``locks_held_elsewhere``
+    would say "busy" for the command's own hold).
 
 The wrapper also enforces the consent gate (R-SCOPE-003) and turns the known
 operational errors into short messages with distinct exit codes.
@@ -47,6 +52,7 @@ from twin.ops.instance_lock import (
     locks_held_elsewhere,
 )
 from twin.ops.logging import configure_logging
+from twin.ops.winapi import Win32
 from twin.services import CliContext, Services, get_cli_context
 from twin.storage.crypto import CryptoError
 from twin.storage.db import ReadOnlyViolationError, WritePolicy, use_write_policy
@@ -124,19 +130,32 @@ STOP_HINT = (
 
 
 def _guard_locks(
-    stack: ExitStack, spec: CommandSpec, locks_dir: Path, *, platform: str | None = None
+    stack: ExitStack,
+    spec: CommandSpec,
+    locks_dir: Path,
+    *,
+    platform: str | None = None,
+    win32: Win32 | None = None,
 ) -> None:
+    """Take the locks of the command and hand their release to ``stack`` (D-710).
+
+    An EXCLUSIVE command takes every lock it neither acquires nor tolerates and keeps it until
+    the stack is closed: the command body runs with ``twin run`` and ``twin supervise`` locked
+    out.  If one of them is held elsewhere, the ones taken so far are released by the stack.
+    """
     others = tuple(name for name in ALL_LOCKS if name not in spec.acquires + spec.tolerates)
     if spec.kind is CommandKind.EXCLUSIVE:
-        busy = locks_held_elsewhere(locks_dir, others, platform=platform)
-        if busy:
-            raise CliError(
-                f"this command needs exclusive access, but the '{busy[0]}' instance is running; "
-                + STOP_HINT,
-                ExitCode.BUSY,
-            )
+        for name in others:
+            lock = InstanceLock(name, locks_dir=locks_dir, platform=platform, win32=win32)
+            if not lock.acquire():
+                raise CliError(
+                    f"this command needs exclusive access, but the '{name}' instance is "
+                    f"running; {STOP_HINT}",
+                    ExitCode.BUSY,
+                )
+            stack.callback(lock.release)
     for name in spec.acquires:
-        lock = InstanceLock(name, locks_dir=locks_dir, platform=platform)
+        lock = InstanceLock(name, locks_dir=locks_dir, platform=platform, win32=win32)
         if not lock.acquire():
             raise CliError(
                 f"another '{name}' instance is already running (lock '{name}' is held)",

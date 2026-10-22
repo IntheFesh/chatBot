@@ -2,13 +2,17 @@
 
 EXCLUSIVE.  The command
 
-1. refuses to run while the application is (the lock check of every exclusive command; the hint
+1. refuses to run while the application is (the lock hold of every exclusive command; the hint
    says ``twin service stop``);
 2. lists what it would delete, with numbers;
 3. asks for the confirmation phrase **typed in**: ``删除她的全部数据`` for ``--all``,
    ``删除训练数据`` for ``--training-only``.  There is no option that gives the phrase or skips the
    question, and anything else than the exact phrase deletes nothing;
-4. checks once more that the application is not running, deletes, and prints a report of counts.
+4. deletes and prints a report of counts.
+
+The ``run`` and ``supervisor`` locks are held from before step 1 to after step 4 (D-710), so the
+application cannot start between the question and the deletion; a second look at the locks
+before deleting is not needed, and would see the command's own hold.
 
 See :mod:`twin.ops.purge` for what each scope removes and what it leaves alone.
 """
@@ -20,8 +24,7 @@ from typing import Annotated
 
 import typer
 
-from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
-from twin.ops.process_model import STOP_HINT, CliError, CommandKind, ExitCode, command
+from twin.ops.process_model import CliError, CommandKind, ExitCode, command
 from twin.ops.purge import (
     CONFIRM_ALL,
     CONFIRM_TRAINING,
@@ -46,12 +49,6 @@ def _confirm(plan: PurgePlan, phrase: str) -> None:
     if answer.strip() != phrase:
         typer.echo("确认短语不符，什么都没有删除。")
         raise typer.Exit(1)
-
-
-def _still_stopped(locks_dir: Path) -> None:
-    busy = locks_held_elsewhere(locks_dir, ALL_LOCKS)
-    if busy:
-        raise CliError(f"the '{busy[0]}' instance is running now; {STOP_HINT}", ExitCode.BUSY)
 
 
 def _show(report: PurgeReport) -> None:
@@ -99,7 +96,6 @@ def purge_command(
         except KeyStoreError:
             keys = 0  # a damaged key store is deleted all the same
         _confirm(plan_all(paths, mirror, keys), CONFIRM_ALL)
-        _still_stopped(paths.locks_dir)
         context.reset()  # nothing of this process may keep the database or the log files open
         report = purge_all(paths, mirror, keystore)
         _show(report)
@@ -110,7 +106,6 @@ def purge_command(
     services = context.services()
     runs = len(uncleaned_runs(services.db))
     _confirm(plan_training(paths, runs), CONFIRM_TRAINING)
-    _still_stopped(paths.locks_dir)
     report = purge_training(paths, runs, services.db)
     _show(report)
     _fail_if_left_over(report)
