@@ -70,7 +70,7 @@ async def test_a_foreground_run_beside_the_application_does_nothing_and_leaves_i
             await run_jobs_until_idle(services, registry)
     finally:
         application.release()
-    assert info.value.code is ExitCode.BUSY and "application is running" in info.value.message
+    assert "application is running" in str(info.value) and info.value.lock_name == LOCK_RUN
     assert ran == []  # nothing was executed here, not even the job nobody was running
     job = queue.get(busy)
     assert job is not None and (job.status, job.attempts) == ("running", 1)

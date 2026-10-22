@@ -22,23 +22,26 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 
 from twin.llm.runtime import activate_offpeak_policy
-from twin.ops.instance_lock import LOCK_RUN, InstanceLock
+from twin.ops.instance_lock import LOCK_RUN, InstanceAlreadyRunningError, InstanceLock
 from twin.ops.jobs import HandlerRegistry, JobQueue, RunSummary, Worker
-from twin.ops.process_model import CliError, ExitCode
 from twin.ops.winapi import Win32
 from twin.services import Services
 
 TICK_SECONDS = 0.5
 
 
-class ApplicationRunningError(CliError):
-    """The ``run`` lock is held, so the application is running (or another foreground worker)."""
+class ApplicationRunningError(InstanceAlreadyRunningError):
+    """The ``run`` lock is held, so the application is running (or another foreground worker).
+
+    An :class:`~twin.ops.instance_lock.InstanceAlreadyRunningError`, which the command wrapper
+    turns into the exit code BUSY with this message.
+    """
 
     def __init__(self) -> None:
         super().__init__(
+            LOCK_RUN,
             "the application is running and executes the queued jobs itself; "
             "nothing was run here (a job that was queued stays queued)",
-            ExitCode.BUSY,
         )
 
 

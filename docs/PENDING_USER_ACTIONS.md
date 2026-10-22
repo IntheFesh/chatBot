@@ -322,7 +322,7 @@
 
 7. **导入新记录之后**
    - 导入钩子会找出没回放过（或消息变了）的日子并排队：第一次回放必须你批准；之后的增量如果估算低于 `budget.one_time_usd` 的 10%（`memory.replay_auto_approve_ratio`）则自动批准。导入报告“导入后钩子”里有一行 `memory_replay`，单独补跑用 `uv run twin memory replay start`。
-   - 换了嵌入模型（`retrieval.model`）之后：`uv run twin memory reindex`。
+   - 换了嵌入模型（`retrieval.model`）之后：`uv run twin memory reindex`（第 17 轮起是重任务：排进队列由应用执行；应用没在运行时加 `--foreground`）。
 
 8. **（后续轮次）** 第 08 轮生成每日生活线并按日排每日摘要；第 09 轮把 `MemoryAssembler.build` 接进回复提示词、创建 `bot_turns` 并注册读取器（`register_bot_turn_reader`）、会话静默后调用 `queue_bot_extraction`；第 10 轮读写待跟进；第 11 轮的 `/记住`、`/忘掉`、`/记忆` 调用 `MemoryManager`；第 13 轮的训练集导出只经 `AsOfView(t)` 读记忆。这些都不需要你现在做什么。
 
@@ -583,7 +583,7 @@
    - 请告诉我：规则里有没有出现具体的日期、事件或事实（本地检查和第二次审查应当挡住；如果漏了，把那条规则发给我）。
 
 4. **DPO 导出（有 200 条偏好对之后再做，不到时只是演练）**
-   - `uv run twin train export-dpo`：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl` 的新数据集目录；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
+   - `uv run twin train export-dpo`（第 17 轮起是重任务：排进队列由应用执行，应用没在运行时加 `--foreground`，结果用 `twin train export-status` 查看）：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl` 的新数据集目录；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
    - 用 `uv run twin train bundle --profile <档位> --dataset <新目录>` 打包；真实训练在第 14 轮。
 
 5. **M2 复判**（所有指令存在之后重新判；`/记住` 的事实现在算“机器人对话”的一组）

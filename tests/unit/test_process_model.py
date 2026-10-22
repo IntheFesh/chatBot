@@ -14,6 +14,7 @@ from tests.support.clock import ManualClock
 from tests.support.win32 import FakeWin32
 from twin.cli import app
 from twin.config.secrets import SecretStore
+from twin.ops.foreground import foreground_run_lock
 from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, LOCK_SUPERVISOR, InstanceLock
 from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue
 from twin.ops.process_model import (
@@ -273,7 +274,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "memory remember": CommandKind.LIGHT,
         "memory forget": CommandKind.LIGHT,
         "memory summarize": CommandKind.HEAVY,
-        "memory reindex": CommandKind.LIGHT,
+        "memory reindex": CommandKind.HEAVY,  # round 17 item 29: queued, the application runs it
         "timezone show": CommandKind.READ,
         "timezone set": CommandKind.LIGHT,
         "timezone history": CommandKind.READ,
@@ -285,7 +286,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "train bundle": CommandKind.LIGHT,
         "train export": CommandKind.HEAVY,
         "train export-status": CommandKind.READ,
-        "train export-dpo": CommandKind.LIGHT,
+        "train export-dpo": CommandKind.HEAVY,  # round 17 item 29: it makes every pair again
         "train retrain-check": CommandKind.LIGHT,
         "train remote connect": CommandKind.LIGHT,
         "train remote upload": CommandKind.LIGHT,
@@ -743,6 +744,32 @@ def test_foreground_heavy_work_holds_the_run_lock_until_it_has_finished(
     enqueue_heavy(services, [JobSpec("heavy_task", {})], foreground=True)
     assert seen == {"free_inside": False, "twin_run": ExitCode.BUSY}
     assert can_take(locks_dir, LOCK_RUN)
+
+
+def test_a_heavy_command_that_finds_the_application_running_ends_with_busy(
+    services: Services, secret_store: SecretStore
+) -> None:
+    """The refusal of the foreground lock is the exit code the wrapper gives every lock refusal."""
+    sample = typer.Typer()
+
+    @sample.command("foreground")
+    @command(CommandKind.HEAVY, consent=False)
+    def foreground() -> None:
+        with foreground_run_lock(services):
+            raise AssertionError("must not get in")
+
+    set_cli_context(
+        CliContext(
+            overrides={"paths": {"data_dir": str(services.paths.data_dir)}}, secrets=secret_store
+        )
+    )
+    application = hold(services, LOCK_RUN)
+    try:
+        result = runner.invoke(sample, [])
+    finally:
+        application.release()
+    assert result.exit_code == ExitCode.BUSY, result.output
+    assert "the application is running and executes the queued jobs itself" in result.output
 
 
 def test_foreground_heavy_work_does_not_take_over_the_applications_running_job(

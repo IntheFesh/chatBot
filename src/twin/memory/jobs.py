@@ -15,13 +15,21 @@
     extracts facts and follow-ups from a stretch of the bot's conversation (R-MEM-007).  Round 09
     calls :func:`queue_bot_extraction` once a conversation has been quiet for
     ``memory.quiet_minutes``; the turns travel in the job, so the job needs no table of its own.
+``memory_reindex``
+    drops both vector tables and encodes every fact and summary again (``twin memory reindex``,
+    HEAVY: the command only queues it, round 17 item 29, D-713).  No model is called, but the work
+    takes as long as the embedding model needs for every record, so it belongs to the application
+    and not to the process of a short command.  How it ended is kept in the setting
+    ``memory.reindex.state`` (a count, never text).
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import build_llm_runtime
@@ -39,13 +47,17 @@ from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.profile.prompt_templates import TemplateStore
 from twin.services import Services
+from twin.storage.settings_store import get_setting, put_setting
 
 log = get_logger("twin.memory.jobs")
 
 SUMMARY_JOB = "memory_summary"
 EXTRACT_JOB = "memory_extract"
+REINDEX_JOB = "memory_reindex"
 SUMMARY_PRIORITY = 70
 EXTRACT_PRIORITY = 75
+REINDEX_PRIORITY = 50  # somebody asked for it by hand and the recall is worse until it is done
+REINDEX_STATE_KEY = "memory.reindex.state"
 OPEN_FOLLOWUPS_SHOWN = 10
 MAX_TURNS_PER_JOB = 400
 
@@ -111,6 +123,34 @@ def queue_bot_extraction(services: Services, turns: Sequence[BotMessage]) -> str
 def is_quiet(last_message_at: datetime, now: datetime, quiet_minutes: int) -> bool:
     """True once a conversation has been silent for ``quiet_minutes`` (R-MEM-007)."""
     return now - last_message_at >= timedelta(minutes=quiet_minutes)
+
+
+@dataclass(frozen=True)
+class QueuedReindex:
+    job_id: str
+    already_queued: bool
+
+
+def queue_memory_reindex(services: Services) -> QueuedReindex:
+    """Queue the re-encoding of the memory's vectors unless one is already waiting or running."""
+    queue = JobQueue(services.db, services.clock)
+    for status in ("pending", "running"):
+        for job in queue.list_jobs(status=status, job_type=REINDEX_JOB, limit=10):
+            return QueuedReindex(job.id, True)
+    job_id = queue.enqueue(REINDEX_JOB, {}, priority=REINDEX_PRIORITY)
+    return QueuedReindex(job_id, False)
+
+
+def save_reindex_state(services: Services, state: dict[str, Any]) -> None:
+    stamped = {"at": services.clock.now_utc().isoformat(), **state}
+    with services.db.transaction(bump_state=False) as session:
+        put_setting(session, REINDEX_STATE_KEY, stamped, clock=services.clock, record_history=False)
+
+
+def read_reindex_state(services: Services) -> dict[str, Any] | None:
+    with services.db.session() as session:
+        value = get_setting(session, REINDEX_STATE_KEY, None)
+    return dict(value) if isinstance(value, dict) else None
 
 
 # ---------------------------------------------------------------------- handlers
@@ -187,6 +227,17 @@ async def handle_memory_summary(ctx: JobContext) -> None:
         written=result.record is not None and result.skipped is None,
         skipped=result.skipped,
     )
+
+
+@job_handler(REINDEX_JOB)
+async def handle_memory_reindex(ctx: JobContext) -> None:
+    """The work of the old synchronous command, in a thread so the event loop stays free."""
+    services = _services_of(ctx)
+    result = await asyncio.to_thread(Memory(services).reindex)
+    await asyncio.to_thread(
+        save_reindex_state, services, {"state": "done", "encoded": result.encoded}
+    )
+    log.info("memory_reindexed", encoded=result.encoded)
 
 
 @job_handler(EXTRACT_JOB)

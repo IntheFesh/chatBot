@@ -430,7 +430,7 @@ uv run twin model list
 
 ### 6.7 继续训练与 DPO
 
-她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。
+她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
 
 ---
 
@@ -604,6 +604,7 @@ uv run twin service stop                # 恢复是独占命令：应用必须�
 uv run twin backup restore <文件>        # 先问一遍；会先把现有数据备份成 data\backups\pre-restore-<时间>.bak.enc（保留最新 3 个）
 uv run twin service start
 uv run twin retrieval rebuild           # 恢复后向量库可能和数据库差一点点，命令会列出问题和修复命令
+uv run twin memory reindex              # 记忆的向量同理；它也是重任务，排进队列由刚启动的应用执行（应用没在运行时加 --foreground）
 ```
 
 密钥轮换后旧备份仍能恢复：`uv run twin secrets rotate-db-key`（独占，可中断续跑）把全部数据重加密并把旧密钥标为“已退役”，退役密钥保留在凭据管理器里，直到没有任何保留期内的备份引用它才删除。
@@ -751,7 +752,7 @@ uv run twin purge --all
 | `twin memory block` | 只读 | Show the memory block a reply about ``topic`` would get (to judge what is recalled). |
 | `twin memory forget` | 轻量修改 | Forget a fact for good, with what was derived only from it. |
 | `twin memory list` | 只读 | List what the bot remembers (current facts, newest first). |
-| `twin memory reindex` | 轻量修改 | Encode every fact and summary again (after the embedding model changed). |
+| `twin memory reindex` | 重任务（入队，由运行中的应用执行） | Encode every fact and summary again (queued as a job; after the embedding model changed). |
 | `twin memory remember` | 轻量修改 | Remember something (source: user command, the highest rank). |
 | `twin memory replay estimate` | 只读 | Show which days a replay would do and what it would cost (an upper bound; nothing runs). |
 | `twin memory replay start` | 重任务（入队，由运行中的应用执行） | Queue the replay of the days that need it; it waits for `twin jobs approve <batch>`. |
@@ -836,7 +837,7 @@ uv run twin purge --all
 | `twin timezone show` | 只读 | The bot's time zone, the time there and her state now. |
 | `twin train bundle` | 轻量修改 | Build the encrypted training package for a GPU profile (asks for a passphrase). |
 | `twin train export` | 重任务（入队，由运行中的应用执行） | Export the training set from her real reply blocks (queued as a job, resumable). |
-| `twin train export-dpo` | 轻量修改 | Write the preference pairs of /不像 as the DPO file of a new dataset version. |
+| `twin train export-dpo` | 重任务（入队，由运行中的应用执行） | Write the preference pairs of /不像 as the DPO file of a new dataset version (queued). |
 | `twin train export-status` | 只读 | Show how the last export ended and how far the plans of the hybrid share are. |
 | `twin train remote all` | 轻量修改 | Upload, set up, train, evaluate, export, download and clean up in one go. |
 | `twin train remote cleanup` | 轻量修改 | Erase the data on the instance (after the download); remember the time. |
