@@ -35,6 +35,7 @@ from twin.llm.runtime import (
     activate_offpeak_policy,
     build_llm_runtime,
     close_llm_runtime,
+    closing_llm_runtime,
 )
 from twin.llm.synth_images import draw_png
 from twin.llm.tokens import Calibration
@@ -423,6 +424,36 @@ async def test_a_client_that_has_not_been_used_does_not_read_the_store(
 ) -> None:
     runtime = build_llm_runtime(services)  # no key stored, nothing sent yet
     assert await runtime.client.refresh_key() is False
+    runtime.client.reset_key()  # nothing to drop either
+
+
+async def test_two_looks_at_a_replaced_key_reset_the_connection_once(
+    services: Services, api: respx.MockRouter
+) -> None:
+    services.secrets.set("deepseek_api_key", TEST_KEY)
+    api.post(API).mock(return_value=ok())
+    runtime = build_llm_runtime(services)
+    await runtime.client.chat([{"role": "user", "content": "你好"}], purpose="reply")
+    services.secrets.set("deepseek_api_key", OTHER_KEY)
+    first, second = await asyncio.gather(runtime.client.refresh_key(), runtime.client.refresh_key())
+    assert sorted([first, second]) == [False, True]
+    await close_llm_runtime(services)
+
+
+def test_dropping_the_key_after_the_loop_is_over_does_not_need_the_loop(
+    services: Services, api: respx.MockRouter
+) -> None:
+    services.secrets.set("deepseek_api_key", TEST_KEY)
+    api.post(API).mock(return_value=ok())
+    runtime = build_llm_runtime(services)
+
+    async def use() -> None:
+        await runtime.client.chat([{"role": "user", "content": "你好"}], purpose="reply")
+
+    asyncio.run(use())  # the loop of the connection is closed now
+    runtime.client.reset_key()  # nothing to close it on: the pool died with the loop
+    asyncio.run(use())  # and the next request builds a new connection on the new loop
+    asyncio.run(close_llm_runtime(services))
 
 
 async def test_neither_the_key_nor_its_hash_is_logged(
@@ -461,3 +492,22 @@ def test_the_assembled_application_listens_for_a_new_key(services: Services) -> 
         and listener.__self__ is runtime  # type: ignore[union-attr]
         for listener in assembly.watcher._listeners
     )
+
+
+async def test_a_one_shot_command_closes_the_runtime_when_it_ends_or_fails(
+    services: Services,
+) -> None:
+    async def work() -> str:
+        build_llm_runtime(services)
+        return "done"
+
+    assert await closing_llm_runtime(services, work()) == "done"
+    assert EXTRAS_KEY not in services.extras
+
+    async def broken() -> None:
+        build_llm_runtime(services)
+        raise RuntimeError("the command failed")
+
+    with pytest.raises(RuntimeError, match="the command failed"):
+        await closing_llm_runtime(services, broken())
+    assert EXTRAS_KEY not in services.extras
