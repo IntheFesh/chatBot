@@ -154,3 +154,48 @@ def test_tag_all_on_an_empty_library_has_nothing_to_do(data_dir: Path) -> None:
     assert result.exit_code == 0 and "every sticker is tagged and described" in result.output
     listing = cli("stickers", "list")
     assert listing.exit_code == 0 and "0 sticker(s)" in listing.output
+
+
+# ------------------------------------------------- R17-38: the backfill of the first frames
+
+
+def test_first_frames_makes_the_still_of_an_older_library_and_does_nothing_the_second_time(
+    data_dir: Path,
+) -> None:
+    from tests.support.gifs import GREEN, RED, animated_gif, store_as_sticker
+    from twin.storage.chat_models import Sticker
+
+    def seed(services: Services) -> tuple[list[str], str]:
+        olds = [
+            store_as_sticker(services, animated_gif(((n * 60, 0, 0), GREEN))) for n in range(1, 3)
+        ]
+        broken = store_as_sticker(services, b"GIF89a" + bytes(range(30)))
+        store_as_sticker(services, animated_gif((RED, GREEN), (5, 5)))  # one with its still
+        with services.db.transaction(bump_state=False) as session:
+            for md5 in olds:  # stored by a version that did not make them
+                row = session.get(Sticker, md5)
+                assert row is not None
+                row.first_frame_sha256 = None
+        return olds, broken
+
+    olds, broken = with_services(seed)
+    first = cli("stickers", "first-frames")
+    assert first.exit_code == 0, first.output
+    assert "2 made, 1 already there, 1 GIF(s) that could not be read" in first.output
+    assert "skipped, not sent as the animated file" in first.output
+
+    def stills(services: Services) -> dict[str, str | None]:
+        found = StickerCatalog(services).records()
+        return {r.md5: r.first_frame_sha256 for r in found}
+
+    after = with_services(stills)
+    assert all(after[md5] for md5 in olds) and after[broken] is None
+    second = cli("stickers", "first-frames")
+    assert "0 made, 3 already there, 1 GIF(s)" in second.output
+    assert with_services(stills) == after
+
+
+def test_first_frames_on_a_library_without_gifs_has_nothing_to_do(library: Scenario) -> None:
+    result = cli("stickers", "first-frames")
+    assert result.exit_code == 0 and "0 made, 0 already there, 0 GIF(s)" in result.output
+    assert "skipped" not in result.output

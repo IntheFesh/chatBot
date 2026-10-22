@@ -295,3 +295,22 @@ async def test_a_picture_whose_file_cannot_be_read_is_a_photo_not_an_error(
     ref = MediaRef("ab" * 32, MediaKind.IMAGE, 100, "image/png", None)  # nothing is stored
     item = await renderer.render(message(MessageKind.IMAGE, media_ref=ref))
     assert item.kind == "image" and item.text == "[图片]"
+
+
+async def test_the_still_first_frame_of_a_library_gif_sent_back_is_that_sticker(
+    services: Services, renderer: InboundRenderer, api: respx.MockRouter
+) -> None:
+    """R17-38: the bot may send the PNG of a GIF; the user forwarding it is the same sticker."""
+    from tests.support.gifs import animated_gif, store_as_sticker
+
+    route = api.post(API).mock(return_value=ok(content="一只猫"))
+    md5 = store_as_sticker(services, animated_gif())
+    catalog = StickerCatalog(services)
+    catalog.save_vision(md5, ["开心"], "一只跳舞的猫", "开心时", at=services.clock.now_utc())
+    still = catalog.require(md5).first_frame_sha256
+    assert still
+    ref = as_photo(services, services.media.read_bytes(still))
+    assert ref.sha256 == still
+    item = await renderer.render(message(MessageKind.IMAGE, media_ref=ref))
+    assert item.kind == "sticker" and item.text == "[表情包：一只跳舞的猫（情绪：开心）]"
+    assert route.call_count == 0 and len(catalog.records()) == 1

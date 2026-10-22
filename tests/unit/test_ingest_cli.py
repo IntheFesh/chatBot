@@ -430,3 +430,50 @@ def test_target_username_is_masked_in_the_settings_listing(data_dir: Path, tmp_p
     assert export.target_username not in history.output
     changed = cli("settings", "set", "target.username", export.target_username)
     assert export.target_username not in changed.output
+
+
+# ---------------------------------------------- R17-41: exactly one target conversation
+
+
+def test_a_second_conversation_is_refused_by_the_command_and_nothing_is_queued(
+    data_dir: Path, tmp_path: Path, embedder: HashingBackend
+) -> None:
+    export = export_with(tmp_path, other_conversations=1)
+    first = cli("import", str(export.root), "--foreground", input="1\n")
+    assert first.exit_code == 0, first.output
+    jobs_before = with_services(import_jobs)
+    refused = cli("import", str(export.root), "--target", export.other_usernames[0])
+    assert refused.exit_code == 1 and "exactly one target" in refused.output
+    assert "twin purge" in refused.output and "Traceback" not in refused.output
+    assert with_services(import_jobs) == jobs_before  # no run, no job
+    again = cli("import", str(export.root), "--yes", "--foreground")  # the same one: an increment
+    assert again.exit_code == 0, again.output
+
+
+def test_status_warns_about_a_database_that_holds_more_than_one_conversation(
+    data_dir: Path, tmp_path: Path, embedder: HashingBackend
+) -> None:
+    from twin.storage.chat_models import Conversation
+
+    export = export_with(tmp_path, target_messages=30)
+    assert cli("import", str(export.root), "--yes", "--foreground").exit_code == 0
+    assert "conversations, not one" not in cli("import", "status").output
+
+    def add_a_second_one(services: Services) -> None:
+        now = services.clock.now_utc()
+        with services.db.transaction(bump_state=False) as session:
+            session.add(
+                Conversation(
+                    username="older-import-2",
+                    is_group=False,
+                    message_count=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+    with_services(add_a_second_one)
+    result = cli("import", "status")
+    assert result.exit_code == 0
+    assert "holds 2 conversations, not one" in result.output
+    assert "nothing is deleted automatically" in result.output

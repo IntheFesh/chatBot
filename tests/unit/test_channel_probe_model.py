@@ -42,6 +42,7 @@ from twin.channel.probe.summary import (
     load_channel_probe_summary,
     measured_capabilities,
     save_summary,
+    suggest_gif_mode,
     suggest_quota,
     suggest_window_h,
     summarize,
@@ -353,3 +354,77 @@ def test_measured_capabilities_feed_the_channel_without_inventing_values() -> No
         None,
         None,
     )
+
+
+# ------------------------------------------- R17-38: the GIF and the still PNG, side by side
+
+
+@pytest.mark.parametrize(
+    ("animated", "png", "expected"),
+    [
+        (True, True, "as_is"),  # it moves: nothing to change
+        (True, None, "as_is"),
+        (True, False, "as_is"),
+        (False, True, "first_frame"),  # it does not move and a static picture shows: send that
+        (False, False, None),  # neither shows: no basis to choose
+        (False, None, None),  # the PNG was not measured: no basis either
+        (None, True, None),  # whether the GIF moves is not known
+        (None, None, None),
+    ],
+)
+def test_the_gif_mode_is_suggested_from_what_the_phone_showed(
+    animated: bool | None, png: bool | None, expected: str | None
+) -> None:
+    assert suggest_gif_mode(animated, png) == expected
+
+
+def plan_with_images(gif: str, png: str) -> Any:
+    plan = measured_plan()
+    media = plan.step(StepId.MEDIA)
+    media.data = {
+        "gif_animated": {"moving": True, "still": False}.get(gif),
+        "images": {
+            "png": {"api_ok": True, "phone": png},
+            "gif": {"api_ok": True, "phone": gif},
+        },
+        "typing": {"visible": "yes"},
+    }
+    return plan
+
+
+def test_the_summary_compares_the_moving_gif_with_the_static_png() -> None:
+    still = summarize(plan_with_images("still", "arrived"))
+    assert still.gif_animated is False and still.png_displayed is True
+    assert still.gif_send_mode_suggestion == "first_frame"
+    moving = summarize(plan_with_images("moving", "arrived"))
+    assert moving.gif_animated is True and moving.png_displayed is True
+    assert moving.gif_send_mode_suggestion == "as_is"
+    lost = summarize(plan_with_images("still", "missing"))
+    assert lost.png_displayed is False and lost.gif_send_mode_suggestion is None
+    refused = summarize(plan_with_images("still", "not_delivered"))
+    assert refused.png_displayed is False
+    unknown = summarize(plan_with_images("still", "unanswered"))
+    assert unknown.png_displayed is None and unknown.gif_send_mode_suggestion is None
+
+
+def test_the_channel_suggestions_are_not_touched_by_the_gif_one() -> None:
+    summary = summarize(plan_with_images("still", "arrived"))
+    assert summary.suggestions == {
+        "channel.proactive_window_safe_h": 20.7,
+        "channel.outbound_quota_safe": 7,
+    }
+
+
+def test_a_summary_stored_before_the_comparison_existed_is_still_read(
+    db: Database, clock: ManualClock
+) -> None:
+    from twin.storage.settings_store import put_setting
+
+    payload = summarize(measured_plan()).to_json()
+    del payload["png_displayed"], payload["gif_send_mode_suggestion"]
+    with db.transaction() as session:
+        put_setting(session, "m0.channel_probe", payload, clock=clock)
+    with db.session() as session:
+        stored = load_channel_probe_summary(session)
+    assert stored is not None and stored.png_displayed is None
+    assert stored.gif_send_mode_suggestion is None and stored.gif_animated is True

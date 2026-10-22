@@ -107,6 +107,7 @@ def expected_names() -> list[str]:
         "stickers untag",
         "stickers disable",
         "stickers enable",
+        "stickers first-frames",
         "stickers tag-all",
         "memory replay estimate",
         "memory replay start",
@@ -190,7 +191,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 146 == len(expected_names())
+    assert len(names) == 147 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -262,6 +263,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "stickers untag": CommandKind.LIGHT,
         "stickers disable": CommandKind.LIGHT,
         "stickers enable": CommandKind.LIGHT,
+        "stickers first-frames": CommandKind.LIGHT,
         "stickers tag-all": CommandKind.HEAVY,
         "memory replay estimate": CommandKind.READ,
         "memory replay start": CommandKind.HEAVY,

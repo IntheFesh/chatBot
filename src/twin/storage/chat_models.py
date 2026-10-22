@@ -221,6 +221,8 @@ class Sticker(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
     reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # round 17 (R-STK-007): the still first frame of a GIF as a PNG in the media store, by digest
+    first_frame_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mime: Mapped[str | None] = mapped_column(String(32), nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -274,6 +276,7 @@ class Sticker(TimestampMixin, Base):
         CheckConstraint(_in_list("status", STICKER_STATUSES), name="status"),
         Index("ix_stickers_status", "status"),
         Index("ix_stickers_sha256", "sha256"),
+        Index("ix_stickers_first_frame_sha256", "first_frame_sha256"),
     )
 
 

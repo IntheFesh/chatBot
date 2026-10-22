@@ -149,3 +149,16 @@ def test_the_book_is_safe_to_ask_from_several_threads(
     for thread in threads:
         thread.join()
     assert answers == ["开心"] * 8
+
+
+def test_the_first_frame_of_a_gif_has_the_label_of_the_sticker(services: Services) -> None:
+    """R17-38: the terminal shows the still that was sent under the label of its sticker."""
+    from tests.support.gifs import animated_gif, store_as_sticker
+
+    md5 = store_as_sticker(services, animated_gif(), tags=("开心",))
+    record = StickerCatalog(services).require(md5)
+    assert record.sha256 and record.first_frame_sha256
+    book = StickerLabelBook(services)
+    assert book.label(record.sha256) == "开心"
+    assert book.label(record.first_frame_sha256) == "开心"
+    assert book.label_md5(md5) == "开心"

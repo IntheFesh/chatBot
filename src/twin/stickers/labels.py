@@ -90,8 +90,9 @@ class StickerLabelBook:
             if label is None:
                 continue
             by_md5[record.md5] = label
-            if record.sha256:
-                by_sha256[record.sha256] = label
+            for digest in (record.sha256, record.first_frame_sha256):
+                if digest:
+                    by_sha256[digest] = label
         return _Table(version, by_md5, by_sha256)
 
 

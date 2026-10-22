@@ -31,8 +31,10 @@ from typing import Any
 import ijson
 from pydantic import ValidationError
 from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
 
 from twin.config.settings import Settings
+from twin.ingest.conversations import ONE_TARGET
 from twin.ingest.hooks import HookContext, HookOutcome, load_hooks, run_hooks
 from twin.ingest.integrity import (
     FileVerdict,
@@ -184,6 +186,8 @@ def prepare_import(services: Services, export_dir: Path, *, target_username: str
         raise TargetNotFoundError("the target conversation is not part of this export")
     if entry.is_group:
         raise ImportFailure("the target conversation is a group chat; groups are never imported")
+    with services.db.session() as session:
+        _require_single_conversation(session, entry.username)  # before any run is made (R17-41)
     fingerprint = layout.fingerprint(entry, info.export_id)
     reused: str | None = None
     with services.db.transaction(bump_state=False) as session:
@@ -210,6 +214,19 @@ def prepare_import(services: Services, export_dir: Path, *, target_username: str
         total=entry.meta.messageCount,
     )
     return PreparedImport(run_id, False, entry.meta.messageCount)
+
+
+def _require_single_conversation(session: Session, username: str) -> None:
+    """Refuse a target when the database already holds a conversation of anyone else.
+
+    Everything computed from "her" messages reads the conversation without an id (the user name
+    is an encrypted column, so the target cannot be picked in SQL); a second conversation would
+    be mixed into her profile, her examples and the training set.  Re-importing the same
+    conversation is the normal increment and is not touched (R-IMP-003, R17-41, D-695).
+    """
+    for candidate in session.scalars(select(Conversation)):
+        if candidate.username != username:
+            raise ImportFailure(ONE_TARGET)
 
 
 def resumable_run(services: Services) -> RunView | None:
@@ -451,6 +468,8 @@ class ImportRunner:
             header.conversation.displayName if header.conversation else None
         )
         with self._db.transaction(bump_state=False) as session:
+            # a run prepared before another conversation arrived must not start now
+            _require_single_conversation(session, entry.username)
             found: Conversation | None = None
             for candidate in session.scalars(select(Conversation)):
                 if candidate.username == entry.username:

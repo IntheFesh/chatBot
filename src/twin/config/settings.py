@@ -300,6 +300,8 @@ class StickersConfig(_Section):
     rate_window: int = Field(default=200, ge=1)  # bubbles the sticker share is measured over
     rate_tolerance: float = Field(default=0.20, ge=0, lt=1)  # allowed excess over her share
     describe_timeout_s: float = Field(default=15, gt=0)  # describing a sticker the user sent
+    # how a GIF sticker is sent (R-STK-007): the file as it is, or its still first frame as a PNG
+    gif_send_mode: Literal["as_is", "first_frame"] = "as_is"
 
 
 class MemoryWeights(_Section):

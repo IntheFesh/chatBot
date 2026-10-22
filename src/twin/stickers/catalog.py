@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import bindparam, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from twin.services import Services
@@ -59,6 +59,7 @@ class StickerRecord:
     desc_vector_id: str | None
     desc_encoding: str | None
     sha256: str | None
+    first_frame_sha256: str | None = None  # the still PNG of a GIF (R-STK-007, D-697)
 
     @property
     def available(self) -> bool:
@@ -110,6 +111,7 @@ def record_of(row: Sticker) -> StickerRecord:
         desc_vector_id=row.desc_vector_id,
         desc_encoding=row.desc_encoding,
         sha256=row.sha256,
+        first_frame_sha256=row.first_frame_sha256,
     )
 
 
@@ -157,17 +159,20 @@ class StickerCatalog:
         """The sticker whose picture has this hash, or ``None`` (R-STK-006, R17-5).
 
         ``sha256`` is the SHA-256 of the file's bytes (what the media store names its files by)
-        and is tried first, through ``ix_stickers_sha256``; ``md5`` is the MD5 of the bytes, which
-        is the primary key, so it also finds a sticker whose file was never stored (its download
-        failed).  Every status and both origins match - her stickers, the ones of the imported
-        history and the ones the user sent since - because the point is to *recognise* a picture,
-        not to decide whether it may be sent.
+        and is tried first, through ``ix_stickers_sha256`` - and through
+        ``ix_stickers_first_frame_sha256`` for the still first frame of a GIF, which is the same
+        sticker (D-697); ``md5`` is the MD5 of the bytes, which is the primary key, so it also
+        finds a sticker whose file was never stored (its download failed).  Every status and both
+        origins match - her stickers, the ones of the imported history and the ones the user sent
+        since - because the point is to *recognise* a picture, not to decide whether it may be
+        sent.
         """
         with self._services.db.session() as session:
             if sha256:
+                digest = sha256.strip().lower()
                 row = session.scalars(
                     select(Sticker)
-                    .where(Sticker.sha256 == sha256.strip().lower())
+                    .where(or_(Sticker.sha256 == digest, Sticker.first_frame_sha256 == digest))
                     .order_by(Sticker.her_uses.desc(), Sticker.md5)
                     .limit(1)
                 ).first()

@@ -434,3 +434,62 @@ def test_the_vector_check_is_happy_once_the_model_is_on_disk(tmp_path: Path) -> 
     assert found.status is CheckStatus.OK and "revision 7999e1d3" in found.detail
     without_settings = doctor.check_vector_model(DoctorContext(None))
     assert without_settings.status is CheckStatus.OK
+
+
+def add_conversations(services: object, usernames: list[str]) -> None:
+    from twin.services import Services
+    from twin.storage.chat_models import Conversation
+
+    assert isinstance(services, Services)
+    now = services.clock.now_utc()
+    with services.db.transaction(bump_state=False) as session:
+        for name in usernames:
+            session.add(
+                Conversation(
+                    username=name, is_group=False, message_count=0, created_at=now, updated_at=now
+                )
+            )
+
+
+def test_the_conversations_check_reports_a_database_with_two_and_deletes_nothing(
+    tmp_path: Path,
+) -> None:
+    """R17-41 (D41): a database that got two conversations before the rule is only reported."""
+    from twin.config.loader import load_settings as load
+    from twin.ingest.conversations import count_conversations_in_file
+    from twin.services import build_services
+
+    ctx = context(tmp_path)
+    paths = ctx.paths()
+    assert paths is not None
+    assert doctor.check_conversations(ctx).status is CheckStatus.OK  # no database at all
+    migrate.upgrade(paths.db_path)
+    assert "no conversation" in doctor.check_conversations(ctx).detail
+    settings = load(None, {"paths": {"data_dir": str(tmp_path / "d")}})
+    from tests.support.clock import ManualClock
+
+    services = build_services(settings, root=tmp_path, secrets=ctx.secrets, clock=ManualClock())
+    try:
+        add_conversations(services, ["friend-of-hers-1"])
+        assert doctor.check_conversations(ctx).status is CheckStatus.OK
+        assert count_conversations_in_file(paths.db_path) == 1
+        add_conversations(services, ["friend-of-hers-2"])
+        many = doctor.check_conversations(ctx)
+        assert many.status is CheckStatus.WARN and "2 conversations" in many.detail
+        assert "twin purge" in many.hint and "nothing is deleted automatically" in many.hint
+        assert count_conversations_in_file(paths.db_path) == 2  # and nothing was deleted
+        assert exit_code([many]) == 0  # a warning, not a failure: the bot still runs
+    finally:
+        services.close()
+    assert doctor.check_conversations(DoctorContext(None)).status is CheckStatus.WARN
+
+
+def test_the_conversations_check_cannot_be_fooled_by_a_file_that_is_no_database(
+    tmp_path: Path,
+) -> None:
+    from twin.ingest.conversations import count_conversations_in_file
+
+    junk = tmp_path / "twin.db"
+    junk.write_bytes(b"this is not sqlite" * 50)
+    assert count_conversations_in_file(junk) is None
+    assert count_conversations_in_file(tmp_path / "missing.db") is None

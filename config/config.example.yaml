@@ -67,7 +67,8 @@ persona: { sample_segments: 60, batch_segments: 10, segment_max_messages: 40, re
 stickers: { tags_file: "config/lists/sticker_tags.txt", neighbors_file: "config/lists/sticker_tag_neighbors.yaml",
             tag_job_size: 20, context_min_uses: 3, context_max_samples: 5, no_repeat_window: 10,
             repeat_rate_threshold: 0.30, recency_half_life_days: 90, rate_window: 200,
-            rate_tolerance: 0.20, describe_timeout_s: 15 }
+            rate_tolerance: 0.20, describe_timeout_s: 15,
+            gif_send_mode: "as_is" }   # 第 17 轮新增：as_is|first_frame，GIF 表情包原样发送还是只发静态首帧（R-STK-007）
 memory: { daily_summary: true, fact_extraction: true, block_tokens: 800, recall_facts: 12,
           recent_summary_days: 3, recall_summaries: 2, followup_lookahead_h: 36,
           recall_min_similarity: 0.35, conflict_candidates: 6, conflict_min_similarity: 0.45,

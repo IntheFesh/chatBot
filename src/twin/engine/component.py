@@ -190,7 +190,7 @@ def build_engine(
         return queue_bot_extraction(services, turns)
 
     turn_store = BotTurnStore(services.db, clock)
-    engine_stickers = StickerSender(channel, services.media)
+    engine_stickers = StickerSender.from_services(channel, services)
     engine = ConversationEngine(
         channel=channel,
         store=turn_store,

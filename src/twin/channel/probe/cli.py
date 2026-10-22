@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
@@ -276,25 +276,34 @@ def _config_path(services: Services) -> Path:
 def _offer_suggestions(
     services: Services, summary: ChannelProbeSummary, apply: bool | None
 ) -> None:
-    suggestions = {k: v for k, v in summary.suggestions.items() if v is not None}
-    if not suggestions or apply is False:
-        return
+    values: dict[str, dict[str, Any]] = {}  # section -> {key: suggested value}
+    shown: dict[str, tuple[Any, Any]] = {}  # "section.key" -> (now, suggested)
     config = services.settings.channel
     current = {
         "channel.proactive_window_safe_h": config.proactive_window_safe_h,
         "channel.outbound_quota_safe": config.outbound_quota_safe,
     }
+    for name, value in summary.suggestions.items():
+        if value is not None:
+            section, key = name.split(".", 1)
+            values.setdefault(section, {})[key] = value
+            shown[name] = (current[name], value)
+    mode = summary.gif_send_mode_suggestion  # a suggestion only if it would change something
+    if mode is not None and mode != services.settings.stickers.gif_send_mode:
+        values.setdefault("stickers", {})["gif_send_mode"] = mode
+        shown["stickers.gif_send_mode"] = (services.settings.stickers.gif_send_mode, mode)
+    if not values or apply is False:
+        return
     typer.echo("suggested configuration (measured value with 10% in reserve):")
-    for key, value in suggestions.items():
-        typer.echo(f"  {key}: {current[key]} -> {value}")
+    for name, (now, value) in shown.items():
+        typer.echo(f"  {name}: {now} -> {value}")
     path = _config_path(services)
     if apply is None and not typer.confirm(f"Write these values to {path}?", default=False):
         typer.echo("configuration left unchanged")
         return
     try:
-        set_section_values(
-            path, "channel", {key.split(".", 1)[1]: value for key, value in suggestions.items()}
-        )
+        for section, section_values in values.items():
+            set_section_values(path, section, section_values)
     except ConfigError as exc:
         raise CliError(f"could not update {path}: {exc}") from None
     typer.echo(f"updated {path}")

@@ -25,6 +25,7 @@ from twin.clock import get_clock
 from twin.config.mask import mask_value
 from twin.config.runtime import TARGET_USERNAME
 from twin.ingest.captions import plan_caption_batches
+from twin.ingest.conversations import MANY_FOUND, MANY_HINT, count_conversations
 from twin.ingest.importer import ImportFailure, resumable_run
 from twin.ingest.inspect import (
     DEFAULT_SAMPLE,
@@ -192,6 +193,9 @@ def import_status(
         raise CliError("no import has been started yet; run `twin import <directory>`")
     if not watch:
         typer.echo("\n".join(format_status(view)))
+        many = count_conversations(services.db)
+        if many > 1:  # a database from before the one-target rule (R17-41, D-695)
+            typer.echo(f"warning: {MANY_FOUND.format(count=many)}; {MANY_HINT}")
         return
 
     async def loop() -> None:

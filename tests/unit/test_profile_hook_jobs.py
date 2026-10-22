@@ -202,3 +202,35 @@ def test_a_plausible_sleep_raises_no_alert(services: Services) -> None:
     build_chat(services, ChatSpec(days=30))
     run_rebuild(services, "all", "manual", False)
     assert alerts(services) == []
+
+
+def test_any_section_can_be_replaced_by_its_heading() -> None:
+    """R17-39: the sticker download rewrites its own section of the report, not the style one."""
+    text = "# 报告\n\n## 表情包\n\n旧的\n\n## 风格变化\n\n风格\n\n## 导入后钩子\n\n钩子\n"
+    new = replace_section(text, ["- 新的", "- 两行"], "## 表情包")
+    assert new == (
+        "# 报告\n\n## 表情包\n\n- 新的\n- 两行\n\n## 风格变化\n\n风格\n\n## 导入后钩子\n\n钩子\n"
+    )
+    assert replace_section("# 报告\n", ["- 新的"], "## 表情包") == "# 报告\n\n## 表情包\n\n- 新的\n"
+    assert replace_section(text, ["- 新"]).count("## 表情包") == 1  # the default is the style one
+
+
+def test_a_job_rewrites_the_section_it_names_with_the_counters_of_the_import(
+    services: Services, tmp_path: Path
+) -> None:
+    outcome = run_import(
+        services, make_export(tmp_path, target_messages=200, other_conversations=0)
+    )
+    assert outcome.report_path is not None
+    seen: list[dict[str, object]] = []
+
+    def lines(stats: dict[str, object]) -> list[str]:
+        seen.append(stats)
+        return ["- 写入的行"]
+
+    path = refresh_latest_import_report(services, heading="## 表情包", lines=lines)
+    assert path == Path(outcome.report_path)
+    text = read(outcome.report_path)
+    assert "- 写入的行" in text.split("## 表情包")[1].split("\n## ")[0]
+    assert text.count("## 表情包") == 1 and text.count(HEADING) == 1
+    assert len(seen) == 1 and "stickers" in seen[0]  # the counters of the run, as stored

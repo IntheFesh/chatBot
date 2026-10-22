@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
+import io
 import random
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+from tests.fixtures.synth_export import make_image_bytes
 from tests.support.clock import ManualClock
 from tests.support.engine_extras import PICTURES, add_sticker
 from tests.support.engine_harness import Alerts, Out, ScriptedChannel, reference_pacing
+from tests.support.gifs import animated_gif
 from twin.channel.base import (
     PROBE_RUNNING,
     AuthState,
@@ -25,8 +31,11 @@ from twin.channel.base import (
 from twin.engine.pacing import MIN_INTERVAL_S, PacingModel
 from twin.engine.sender import BubbleSender, OutBubble, SentBubble, StopReason
 from twin.engine.sticker_sender import Sticker, StickerSender
+from twin.llm.images import sniff_mime
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.library import store_sticker_file
+from twin.storage.chat_models import Sticker as StickerRow
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "twin"
 
@@ -324,3 +333,174 @@ def test_no_module_of_the_engine_but_the_sticker_sender_calls_send_image() -> No
 
 def test_the_pacing_floor_is_one_second() -> None:
     assert PacingModel().bubble_interval(random.Random(1), 0, first=True) == 1.0
+
+
+# ------------------------------------------------ R17-38: a GIF as it is, or its first frame
+
+
+class MimeChannel(ScriptedChannel):
+    """A scripted channel that also notes the type each picture was sent as."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        super().__init__(clock)
+        self.mimes: list[str] = []
+
+    async def send_image(self, data, mime, **options):  # type: ignore[no-untyped-def]
+        self.mimes.append(mime)
+        return await super().send_image(data, mime, **options)
+
+
+def gif_sticker(services: Services, *, shades: int = 2, tags: tuple[str, ...] = ("开心",)):  # type: ignore[no-untyped-def]
+    """A library sticker whose file is a GIF that moves; its first frame is red."""
+    data = animated_gif(tuple((255 - 90 * n, 20 * n, 0) for n in range(shades + 1)), (10, 10))
+    md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    with services.db.transaction() as session:
+        row = StickerRow(md5=md5, status="pending", attempts=0, her_uses=3, user_uses=0)
+        session.add(row)
+        session.flush()
+        store_sticker_file(row, data, services.media, services.clock.now_utc())
+        row.tags = list(tags)
+    record = StickerCatalog(services).get(md5)
+    assert record is not None and record.available and record.mime == "image/gif"
+    return record, data
+
+
+async def test_a_gif_goes_out_as_it_is_unless_the_first_frame_is_asked_for(
+    services: Services, clock: ManualClock
+) -> None:
+    sticker, data = gif_sticker(services)
+    channel = MimeChannel(clock)
+    for sender in (
+        StickerSender(channel, services.media),  # no setting given: the file as it is
+        StickerSender.from_services(channel, services),  # the default of the configuration
+    ):
+        assert (await sender.send_sticker(sticker)).ok
+    assert services.settings.stickers.gif_send_mode == "as_is"
+    assert channel.images == [data, data] and channel.mimes == ["image/gif", "image/gif"]
+
+
+async def test_in_first_frame_mode_a_gif_goes_out_as_the_png_of_its_first_frame(
+    services: Services, clock: ManualClock
+) -> None:
+    sticker, data = gif_sticker(services)
+    assert sticker.first_frame_sha256
+    still = services.media.read_bytes(sticker.first_frame_sha256)
+    services.settings.stickers.gif_send_mode = "first_frame"
+    channel = MimeChannel(clock)
+    sender = StickerSender.from_services(channel, services)
+    assert (await sender.send_sticker(sticker)).ok
+    assert channel.images == [still] and channel.mimes == ["image/png"]
+    assert channel.images[0] != data and sniff_mime(channel.images[0]) == "image/png"
+    with Image.open(io.BytesIO(channel.images[0])) as frame:
+        assert frame.convert("RGB").getpixel((0, 0)) == (255, 0, 0)  # the first frame
+    # a picture that is not a GIF is not touched by the setting
+    flat = add_sticker(services, seed=8)
+    assert (await sender.send_sticker(flat)).ok
+    assert channel.images[1] == PICTURES[flat.md5] and channel.mimes[1] == "image/png"
+
+
+async def test_the_setting_is_read_when_the_sticker_is_sent(
+    services: Services, clock: ManualClock
+) -> None:
+    sticker, data = gif_sticker(services)
+    channel = MimeChannel(clock)
+    sender = StickerSender.from_services(channel, services)
+    services.settings.stickers.gif_send_mode = "first_frame"
+    await sender.send_sticker(sticker)
+    services.settings.stickers.gif_send_mode = "as_is"
+    await sender.send_sticker(sticker)
+    assert channel.mimes == ["image/png", "image/gif"] and channel.images[1] == data
+
+
+async def test_a_gif_stored_before_first_frames_existed_gets_one_when_it_is_sent(
+    services: Services, clock: ManualClock
+) -> None:
+    from twin.stickers.library import StickerLibraryAllowList
+
+    sticker, _ = gif_sticker(services)
+    with services.db.transaction() as session:
+        row = session.get(StickerRow, sticker.md5)
+        assert row is not None and row.first_frame_sha256
+        services.media.delete(row.first_frame_sha256)
+        row.first_frame_sha256 = None  # the library of an older version
+    old = StickerCatalog(services).require(sticker.md5)
+    assert old.first_frame_sha256 is None
+    services.settings.stickers.gif_send_mode = "first_frame"
+    channel = MimeChannel(clock)
+    assert (await StickerSender.from_services(channel, services).send_sticker(old)).ok
+    made = StickerCatalog(services).require(sticker.md5).first_frame_sha256
+    assert made and channel.mimes == ["image/png"]
+    assert hashlib.sha256(channel.images[0]).hexdigest() == made  # what went out is what was made
+    assert StickerLibraryAllowList(services.db).allowed(made)  # and the channel will accept it
+
+
+async def test_a_first_frame_that_cannot_be_made_is_never_replaced_by_the_animated_file(
+    services: Services, clock: ManualClock
+) -> None:
+    broken = b"GIF89a" + bytes(range(60))  # a GIF by its header, nothing readable after it
+    md5 = hashlib.md5(broken, usedforsecurity=False).hexdigest()
+    with services.db.transaction() as session:
+        row = StickerRow(md5=md5, status="pending", attempts=0, her_uses=3, user_uses=0)
+        session.add(row)
+        session.flush()
+        store_sticker_file(row, broken, services.media, services.clock.now_utc())
+        row.tags = ["开心"]
+    sticker = StickerCatalog(services).require(md5)
+    assert sticker.available and sticker.first_frame_sha256 is None
+    services.settings.stickers.gif_send_mode = "first_frame"
+    channel = MimeChannel(clock)
+    sender = StickerSender.from_services(channel, services)
+    with pytest.raises(MediaNotAllowed, match="not sent in its place"):
+        await sender.send_sticker(sticker)
+    assert channel.images == []  # nothing went out - not the animated file either
+    # in the sender of a reply this is a bubble that is skipped, as for any sticker not sendable
+    rig = Rig(services, clock)
+    rig.sender = BubbleSender(
+        rig.channel,
+        StickerSender.from_services(rig.channel, services),
+        rig.catalog.get,
+        clock,
+        rig.alerts,
+        random.Random(4),
+    )
+    report = await rig.send(OutBubble("sticker", "[表情包:开心]", md5), text("好"))
+    assert [b.sticker_md5 for b in report.skipped] == [md5] and rig.channel.texts == ["好"]
+    assert rig.channel.images == []
+
+
+async def test_a_sender_without_a_way_to_make_the_first_frame_refuses_rather_than_send_the_gif(
+    services: Services, clock: ManualClock
+) -> None:
+    sticker, _ = gif_sticker(services)
+    bare = replace(sticker, first_frame_sha256=None)
+    channel = MimeChannel(clock)
+    sender = StickerSender(channel, services.media, gif_send_mode=lambda: "first_frame")
+    with pytest.raises(MediaNotAllowed, match="not sent in its place"):
+        await sender.send_sticker(bare)
+    assert channel.images == []
+
+
+async def test_the_first_frame_passes_the_allow_list_of_the_terminal_channel_and_shows_its_label(
+    services: Services, clock: ManualClock
+) -> None:
+    from tests.support.console import RecordingOutput, ScriptedInput
+    from twin.channel.local import LocalConsoleChannel
+
+    sticker, _ = gif_sticker(services, tags=("撒娇",))
+    services.settings.stickers.gif_send_mode = "first_frame"
+    out = RecordingOutput()
+    channel_input = ScriptedInput()
+    channel = LocalConsoleChannel.from_services(services, input=channel_input, output=out)
+    await channel.start()
+    try:
+        channel_input.feed("hi")
+        async for _ in channel.incoming():
+            break
+        assert (await StickerSender.from_services(channel, services).send_sticker(sticker)).ok
+        stranger = make_image_bytes(random.Random(77), "PNG")  # a picture that is no sticker
+        with pytest.raises(MediaNotAllowed, match="neither a sticker"):
+            await channel.send_image(stranger, "image/png")
+    finally:
+        await channel.stop()
+    [line] = out.lines
+    assert line.startswith("bot: [表情包：撒娇] ") and line.rstrip().endswith(".png")

@@ -4,20 +4,26 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import random
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from itertools import pairwise
+from pathlib import Path
+from typing import Any, NamedTuple
 
 import httpx
 import pytest
 import respx
+from PIL import Image
 from sqlalchemy import select
 
 from tests.fixtures.synth_export import make_image_bytes
 from tests.support.clock import InstantClock
+from tests.support.gifs import animated_gif
 from twin.config.settings import StickerDownloadConfig
+from twin.llm.images import sniff_mime
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry, JobQueue
 from twin.services import Services
@@ -32,7 +38,11 @@ from twin.stickers.download import (
     queue_sticker_download,
 )
 from twin.stickers.library import (
+    FirstFrameError,
+    backfill_first_frames,
     describe_sticker_bytes,
+    ensure_first_frame,
+    first_frame_png,
     sticker_file_allowed,
     store_sticker_file,
 )
@@ -441,3 +451,262 @@ def test_sticker_rows_are_listed_by_status(services: Services) -> None:
     with services.db.session() as session:
         statuses = session.scalars(select(Sticker.status)).all()
     assert statuses == ["pending"]
+
+
+# ----------------------------------- R17-39: the numbers of the download are in the import report
+
+
+@pytest.fixture
+def instant(services: Services) -> InstantClock:
+    """The downloads pace themselves (a request every quarter second, back-off): no real waiting."""
+    clock = InstantClock(services.clock.now_utc())
+    services.clock = clock  # type: ignore[assignment]
+    return clock
+
+
+def finished_import(services: Services, tmp_path: Path, **options: object) -> tuple[Any, Any]:
+    from tests.support.ingest import make_export, run_import
+
+    export = make_export(
+        tmp_path,
+        target_messages=150,
+        other_conversations=0,
+        sticker_kinds=5,
+        local_sticker_ratio=0.0,
+        **options,
+    )
+    outcome = run_import(services, export)
+    assert outcome.report_path is not None
+    return export, outcome
+
+
+def report_text(outcome: Any) -> str:
+    return Path(str(outcome.report_path)).read_text(encoding="utf-8")
+
+
+def report_file(outcome: Any) -> Path:
+    return Path(str(outcome.report_path))
+
+
+async def run_download_job(services: Services) -> None:
+    registry = HandlerRegistry()
+    registry.register(STICKER_JOB, handle_sticker_download)
+    summary = await run_jobs_until_idle(services, registry, tick_seconds=0.01)
+    assert summary.failed == 0
+
+
+async def test_the_download_job_writes_its_numbers_into_the_import_report(
+    services: Services, instant: InstantClock, web: respx.MockRouter, tmp_path: Path
+) -> None:
+    """R17-39: the report used to say "see the output of that command" - which nobody keeps."""
+    export, outcome = finished_import(services, tmp_path)
+    before = report_text(outcome)
+    assert "下载统计见该命令的输出" not in before and "还没有下载过" in before
+    infos = list(export.stickers.values())
+    for good in (infos[0], infos[3], infos[4]):
+        web.get(good.url).respond(200, content=good.data)
+    web.get(infos[1].url).respond(404)
+    web.get(infos[2].url).respond(200, content=picture(900, "GIF"))  # not the picture it names
+    await run_download_job(services)
+    after = report_text(outcome)
+    section = after.split("## 表情包")[1].split("\n## ")[0]
+    assert "最近一次下载" in section
+    assert "尝试 5" in section and "可用 3" in section
+    assert "MD5 不符 1" in section and "不可用 1" in section and "http_404 × 1" in section
+    assert "| available | 3 |" in section and "| md5_mismatch | 1 |" in section
+    assert "还没有下载过" not in after and after.count("## 表情包") == 1
+    assert after.count("## 风格变化") == 1 and "## 导入后钩子" in after  # the rest is untouched
+    assert after.split("## 表情包")[0] == before.split("## 表情包")[0]
+
+
+async def test_the_summary_survives_in_the_settings_and_a_later_job_replaces_it(
+    services: Services, instant: InstantClock, web: respx.MockRouter, tmp_path: Path
+) -> None:
+    from twin.stickers.download_summary import load_download_summary
+
+    export, outcome = finished_import(services, tmp_path)
+    assert load_download_summary(services) is None
+    infos = list(export.stickers.values())
+    web.get(infos[0].url).respond(200, content=infos[0].data)
+    for other in infos[1:]:
+        web.get(other.url).respond(503)
+    await run_download_job(services)
+    first = load_download_summary(services)
+    assert first is not None and (first.attempted, first.available, first.unavailable) == (5, 1, 4)
+    assert first.reasons == {"http_503": 4} and not first.stopped and first.at.tzinfo is not None
+    # the user fixes the network and downloads the failed ones again
+    for other in infos[1:]:
+        web.get(other.url).respond(200, content=other.data)
+    queue_sticker_download(services, retry_failed=True)
+    registry = HandlerRegistry()
+    registry.register(STICKER_JOB, handle_sticker_download)
+    await run_jobs_until_idle(services, registry, tick_seconds=0.01)
+    second = load_download_summary(services)
+    assert second is not None and (second.attempted, second.available) == (4, 4)
+    text = report_text(outcome)
+    assert "尝试 4" in text and "http_503" not in text.split("## 表情包")[1].split("\n## ")[0]
+
+
+async def test_a_download_with_no_import_report_to_update_is_not_an_error(
+    services: Services, instant: InstantClock, web: respx.MockRouter
+) -> None:
+    data = picture(700)
+    add_sticker(services, md5_of(data), "https://stickers.example.test/lonely")
+    web.get("https://stickers.example.test/lonely").respond(200, content=data)
+    queue_sticker_download(services)
+    await run_download_job(services)  # no import ever ran: there is no report
+    assert sticker(services, md5_of(data)).status == "available"
+
+
+async def test_a_report_that_was_deleted_is_not_rewritten_from_nothing(
+    services: Services, instant: InstantClock, web: respx.MockRouter, tmp_path: Path
+) -> None:
+    export, outcome = finished_import(services, tmp_path)
+    report_file(outcome).unlink()
+    for info in export.stickers.values():
+        web.get(info.url).respond(200, content=info.data)
+    await run_download_job(services)
+    assert not report_file(outcome).exists()
+
+
+# ------------------------------- R17-38: the still first frame of a GIF, stored beside it
+
+
+class RowFacts(NamedTuple):
+    status: str
+    mime: str | None
+    sha256: str | None
+    first_frame_sha256: str | None
+
+
+def sticker_row(services: Services, md5: str) -> RowFacts:
+    with services.db.session() as session:
+        row = session.get(Sticker, md5)
+        assert row is not None
+        return RowFacts(row.status, row.mime, row.sha256, row.first_frame_sha256)
+
+
+def add_stored_gif(services: Services, data: bytes, *, md5: str | None = None) -> str:
+    """A library sticker whose file is ``data``; returns its MD5 (the real one by default)."""
+    key = md5 or md5_of(data)
+    add_sticker(services, key, "https://s.example.test/g")
+    with services.db.transaction() as session:
+        row = session.get(Sticker, key)
+        assert row is not None
+        store_sticker_file(row, data, services.media, NOW)
+    return key
+
+
+def test_a_gif_is_stored_with_the_still_first_frame_as_a_png(services: Services) -> None:
+    data = animated_gif()
+    md5 = add_stored_gif(services, data)
+    row = sticker_row(services, md5)
+    assert row.status == "available" and row.mime == "image/gif"
+    assert row.first_frame_sha256 and row.first_frame_sha256 != row.sha256
+    still = services.media.read_bytes(row.first_frame_sha256)
+    assert sniff_mime(still) == "image/png"
+    with Image.open(io.BytesIO(still)) as frame:
+        assert frame.size == (12, 8) and getattr(frame, "n_frames", 1) == 1
+        assert frame.convert("RGB").getpixel((0, 0)) == (255, 0, 0)  # the first frame, not a later
+    with Image.open(io.BytesIO(data)) as moving:
+        assert moving.n_frames == 3  # and the original is the moving picture, untouched
+    assert services.media.read_bytes(row.sha256) == data
+
+
+def test_a_picture_that_is_not_a_gif_has_no_first_frame(services: Services) -> None:
+    png, jpeg = picture(11, "PNG"), picture(12, "JPEG")
+    for data in (png, jpeg):
+        assert sticker_row(services, add_stored_gif(services, data)).first_frame_sha256 is None
+
+
+def test_a_gif_whose_frames_cannot_be_read_is_kept_but_has_no_first_frame(
+    services: Services,
+) -> None:
+    broken = b"GIF89a" + bytes(range(40))  # the header says GIF, nothing after it is a picture
+    md5 = add_stored_gif(services, broken)
+    row = sticker_row(services, md5)
+    assert row.status == "available" and row.first_frame_sha256 is None
+    with pytest.raises(FirstFrameError, match="could not be read"):
+        first_frame_png(broken)
+    with pytest.raises(FirstFrameError, match="could not be read"):
+        ensure_first_frame(services.db, services.media, md5)
+
+
+def test_the_allow_list_accepts_the_gif_and_its_first_frame_and_nothing_else(
+    services: Services,
+) -> None:
+    md5 = add_stored_gif(services, animated_gif())
+    row = sticker_row(services, md5)
+    assert row.sha256 and row.first_frame_sha256
+    with services.db.session() as session:
+        assert sticker_file_allowed(session, row.sha256)
+        assert sticker_file_allowed(session, row.first_frame_sha256)
+        for other in (hashlib.sha256(picture(99)).hexdigest(), "f" * 64, "nope"):
+            assert not sticker_file_allowed(session, other)
+
+
+def test_the_first_frame_of_a_sticker_that_may_not_be_sent_is_not_allowed_out_either(
+    services: Services,
+) -> None:
+    md5 = add_stored_gif(services, animated_gif())
+    row = sticker_row(services, md5)
+    assert row.first_frame_sha256
+    with services.db.transaction() as session:
+        stored = session.get(Sticker, md5)
+        assert stored is not None
+        stored.status = "md5_mismatch"  # the file is kept for recognition, never sent
+    with services.db.session() as session:
+        assert not sticker_file_allowed(session, row.first_frame_sha256)
+
+
+def test_the_first_frame_is_made_again_on_demand_and_only_for_a_gif_of_the_library(
+    services: Services,
+) -> None:
+    md5 = add_stored_gif(services, animated_gif())
+    row = sticker_row(services, md5)
+    first = row.first_frame_sha256
+    assert first
+    assert ensure_first_frame(services.db, services.media, md5) == first  # nothing to do
+    services.media.delete(first)  # the PNG is gone from the store (or the row predates it)
+    with services.db.transaction() as session:
+        session.get(Sticker, md5).first_frame_sha256 = None  # type: ignore[union-attr]
+    again = ensure_first_frame(services.db, services.media, md5)
+    assert again == first and services.media.exists(first)  # the same picture, by its digest
+    with pytest.raises(FirstFrameError, match="not a usable GIF"):
+        ensure_first_frame(services.db, services.media, "0" * 32)
+    png = add_stored_gif(services, picture(21, "PNG"))
+    with pytest.raises(FirstFrameError, match="not a usable GIF"):
+        ensure_first_frame(services.db, services.media, png)
+
+
+def test_making_the_first_frame_tells_the_running_application(services: Services) -> None:
+    from twin.storage.state import current_state_version
+
+    md5 = add_stored_gif(services, animated_gif())
+    with services.db.transaction(bump_state=False) as session:
+        session.get(Sticker, md5).first_frame_sha256 = None  # type: ignore[union-attr]
+    before = current_state_version(services.db)
+    ensure_first_frame(services.db, services.media, md5)
+    assert current_state_version(services.db) > before
+    settled = current_state_version(services.db)
+    ensure_first_frame(services.db, services.media, md5)  # already there: nothing is news
+    assert current_state_version(services.db) == settled
+
+
+def test_the_backfill_gives_every_available_gif_its_first_frame_once(services: Services) -> None:
+    old = [
+        add_stored_gif(services, animated_gif(((n * 40, 0, 0), (0, n * 40, 0))), md5=None)
+        for n in range(1, 4)
+    ]
+    still = add_stored_gif(services, picture(31, "PNG"))
+    broken = add_stored_gif(services, b"GIF89a" + bytes(range(30)))
+    with services.db.transaction() as session:  # stored before the column existed
+        for md5 in old:
+            session.get(Sticker, md5).first_frame_sha256 = None  # type: ignore[union-attr]
+    first = backfill_first_frames(services.db, services.media)
+    assert (first.made, first.present, first.failed) == (3, 0, 1)
+    assert all(sticker_row(services, md5).first_frame_sha256 for md5 in old)
+    assert sticker_row(services, still).first_frame_sha256 is None
+    assert sticker_row(services, broken).first_frame_sha256 is None
+    second = backfill_first_frames(services.db, services.media)
+    assert (second.made, second.present, second.failed) == (0, 3, 1)  # again: nothing to do

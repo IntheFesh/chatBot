@@ -23,10 +23,10 @@ NEW_KINDS = ("consistency", "cost", "report")
 OLD_KINDS = ("blind", "style", "memory", "gate", "stability", "proactive_audit")
 
 
-def test_the_migration_follows_the_proactive_tables_and_is_the_head() -> None:
+def test_the_migration_follows_the_proactive_tables() -> None:
+    """It was also asserted to be the head; each later revision moves the head (0019, R17-38)."""
     history = migrate.revision_history()
-    assert history.index(AFTER) == history.index(BEFORE) + 1
-    assert history[-1] == AFTER
+    assert history.count(AFTER) == 1 and history.index(AFTER) == history.index(BEFORE) + 1
 
 
 def test_it_adds_the_two_tables_and_nothing_else(tmp_path: Path) -> None:

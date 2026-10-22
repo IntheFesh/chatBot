@@ -81,6 +81,8 @@ uv run twin channel probe report     # 生成本文件
 
 报告会给出 `channel.proactive_window_safe_h` 与 `channel.outbound_quota_safe` 的建议值：
 实测值留 {round((1 - MARGIN) * 100)}% 余量（`twin channel probe report` 会先问你，确认后才写入 `config/config.yaml`）。
+还会把会动的 GIF 与静态 PNG 的手机显示并排列出，建议 `stickers.gif_send_mode`
+（`as_is` 原样发送 GIF，`first_frame` 只发静态首帧）；同样只是建议，由你决定。
 在拿到实测数据之前，`config/config.example.yaml` 里的默认值只是保守猜测，不是协议事实。
 
 ## 已知线索（来自协议源码，非实测）
@@ -191,6 +193,35 @@ def _media_section(step: dict[str, Any], summary: ChannelProbeSummary) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _pick(value: bool | None, yes: str, no: str, unknown: str) -> str:
+    return unknown if value is None else (yes if value else no)
+
+
+def _gif_mode_section(summary: ChannelProbeSummary) -> str:
+    """The moving GIF beside the static PNG, and what that suggests for ``stickers.gif_send_mode``."""
+    gif = _pick(summary.gif_animated, "会动", "不会动", "未确定")
+    png = _pick(summary.png_displayed, "PNG 能显示", "PNG 没收到", "未测")
+    mode = summary.gif_send_mode_suggestion
+    if mode == "first_frame":
+        advice = (
+            "建议 `stickers.gif_send_mode: first_frame`：GIF 在手机上不会动，而静态 PNG 能正常显示，"
+            "发静态首帧效果相同，也不依赖平台怎么处理 GIF。"
+        )
+    elif mode == "as_is":
+        advice = "建议 `stickers.gif_send_mode: as_is`：GIF 会动，原样发送就是动图，不需要改。"
+    else:
+        advice = (
+            "没有足够的实测来建议：GIF 是否会动或静态 PNG 是否显示没有测到。保持 `as_is`（默认，"
+            "原样发送）；测到以后重新运行 `twin channel probe report`。"
+        )
+    return (
+        "| 方案 | 手机上的效果 |\n| --- | --- |\n"
+        f"| 原样发送 GIF（`as_is`） | {gif} |\n"
+        f"| 发送静态首帧 PNG（`first_frame`） | {png} |\n\n"
+        f"{advice}只是建议：由你在 `stickers.gif_send_mode` 里决定（R-STK-007）。\n"
+    )
+
+
 def _window_section(step: dict[str, Any]) -> str:
     if step.get("status") != "done":
         reason = f"：{step['skip_reason']}" if step.get("skip_reason") else ""
@@ -261,6 +292,8 @@ def _suggestions_section(summary: ChannelProbeSummary) -> str:
         "| --- | --- | --- |",
         f"| `channel.proactive_window_safe_h` | {_cell(window)} | 窗口下限 × {MARGIN:g} |",
         f"| `channel.outbound_quota_safe` | {_cell(quota)} | N × {MARGIN:g}（向下取整，至少 1） |",
+        f"| `stickers.gif_send_mode` | {_cell(summary.gif_send_mode_suggestion)} | "
+        "GIF 会动则 as_is；GIF 不动而静态 PNG 能显示则 first_frame；否则不建议 |",
         "",
         "这只是建议：`twin channel probe report` 会先问你，确认后才写入 `config/config.yaml`。",
     ]
@@ -308,6 +341,9 @@ def render_report(summary: ChannelProbeSummary) -> str:
 ### 2. 媒体与交互
 
 {_media_section(summary.steps.get("media", {}), summary)}
+### GIF 与静态首帧
+
+{_gif_mode_section(summary)}
 ### 3. 主动发送窗口
 
 {_window_section(summary.steps.get("window", {}))}

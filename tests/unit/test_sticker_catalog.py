@@ -243,3 +243,18 @@ def test_every_status_and_origin_is_found_by_its_hash(
         found = catalog.find_by_hash(sha256=f"{number + 1:064x}")
         assert found is not None and (found.status, found.origin) == (status, origin)
         assert catalog.find_by_hash(md5=f"{number:032x}") == found
+
+
+# ------------------------- R17-38: the first frame is the same sticker (hash and label lookups)
+
+
+def test_the_first_frame_of_a_gif_is_found_as_the_same_sticker(services: Services) -> None:
+    from tests.support.gifs import animated_gif, store_as_sticker
+
+    md5 = store_as_sticker(services, animated_gif())
+    catalog = StickerCatalog(services)
+    record = catalog.require(md5)
+    assert record.first_frame_sha256 and record.sha256
+    assert catalog.find_by_hash(sha256=record.first_frame_sha256) == record
+    assert catalog.find_by_hash(sha256=record.sha256) == record
+    assert catalog.find_by_hash(sha256="0" * 64) is None

@@ -1,10 +1,12 @@
-"""CLI: ``twin stickers`` - download, list, show, tag, untag, disable, enable, tag-all.
+"""CLI: ``twin stickers`` - download, list, show, tag, untag, disable, enable, tag-all, first-frames
 
 ``download`` and ``tag-all`` are HEAVY (they queue jobs).  ``tag-all`` is the backfill command
 of the tagging hook: it plans the tagging of every sticker that still needs it as a one-time
 batch, prints the estimated cost and waits for ``twin jobs approve <batch>`` (R-LLM-014).
-``list`` and ``show`` only read; ``tag``, ``untag``, ``disable`` and ``enable`` are LIGHT.
-Hand-set tags win over everything the models found (R-STK-003).
+``list`` and ``show`` only read; ``tag``, ``untag``, ``disable``, ``enable`` and ``first-frames``
+are LIGHT.  Hand-set tags win over everything the models found (R-STK-003).  ``first-frames`` is
+the backfill command of the still first frame that every GIF stored since round 17 gets with its
+file (R-STK-007, R-IMP-011): it makes it for the GIFs of an older library.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_runni
 from twin.services import Services, get_cli_context
 from twin.stickers.catalog import StickerCatalog, StickerRecord, UnknownStickerError
 from twin.stickers.download import STICKER_JOB, handle_sticker_download, queue_sticker_download
+from twin.stickers.library import backfill_first_frames
 from twin.stickers.tag_jobs import plan_tagging
 from twin.stickers.tags import TagError
 from twin.storage.chat_models import Sticker
@@ -208,6 +211,23 @@ def stickers_enable(
 ) -> None:
     """Allow a disabled sticker again."""
     _switch(md5, False)
+
+
+@stickers_app.command("first-frames")
+@command(CommandKind.LIGHT)
+def stickers_first_frames() -> None:
+    """Give every GIF sticker its still first frame (for stickers.gif_send_mode: first_frame)."""
+    services = get_cli_context().services()
+    done = backfill_first_frames(services.db, services.media)
+    typer.echo(
+        f"first frames: {done.made} made, {done.present} already there, {done.failed} GIF(s) "
+        "that could not be read"
+    )
+    if done.failed:
+        typer.echo(
+            "those are never sent as a still either: with stickers.gif_send_mode first_frame "
+            "such a sticker is skipped, not sent as the animated file"
+        )
 
 
 @stickers_app.command("tag-all")
