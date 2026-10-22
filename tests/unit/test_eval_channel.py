@@ -13,6 +13,7 @@ from tests.fixtures.synth_export import make_image_bytes
 from tests.support.clock import ManualClock
 from twin.channel.base import (
     AuthState,
+    CapabilityNotSupported,
     Channel,
     MediaNotAllowed,
     OutboundKind,
@@ -42,7 +43,7 @@ def channel(clock: ManualClock, **options: object) -> InMemoryChannel:
 async def test_it_implements_the_channel_interface_and_keeps_what_is_sent(
     clock: ManualClock,
 ) -> None:
-    memory = channel(clock)
+    memory = channel(clock, supports_quote=True)  # a channel that can quote keeps the quote
     assert isinstance(memory, Channel)
     await memory.start()
     first = await memory.send_text("你好")
@@ -128,8 +129,35 @@ async def test_typing_and_capabilities(clock: ManualClock) -> None:
     await memory.send_text("好")
     assert not memory.typing  # sending ends the typing, as on the real channels
     caps = memory.capabilities()
-    assert caps.supports_quote and caps.supports_typing and caps.max_text_chars
-    assert not channel(clock, supports_quote=False).capabilities().supports_quote
+    assert caps.supports_typing and caps.max_text_chars
+    # R17-16 (D-661): the capabilities of the running channels, not a more generous channel
+    assert not caps.supports_quote
+    assert channel(clock, supports_quote=True).capabilities().supports_quote
+
+
+async def test_a_channel_that_cannot_quote_refuses_a_quote_like_the_running_channels(
+    clock: ManualClock,
+) -> None:
+    """R17-16 (D-661): ``CapabilityNotSupported``, never a quote that is silently kept."""
+    memory = channel(clock)
+    assert not memory.capabilities().supports_quote
+    with pytest.raises(CapabilityNotSupported):
+        await memory.send_text("在吗", QuoteTarget("in-1", "吃了吗"))
+    assert memory.sent == []
+    assert (await memory.send_text("在吗")).ok
+
+
+async def test_the_capabilities_are_the_ones_the_running_channel_reports(
+    clock: ManualClock,
+) -> None:
+    """R17-16 (D-661): what the M0 probe measured is reported as the iLink channel reports it."""
+    unmeasured = channel(clock).capabilities()
+    assert (unmeasured.gif_animated, unmeasured.proactive_window_h) == (None, None)
+    assert unmeasured.outbound_quota is None
+    measured = channel(clock, measured=(23.5, 9, True)).capabilities()
+    assert measured.proactive_window_h == 23.5 and measured.outbound_quota == 9
+    assert measured.gif_animated is True and not measured.supports_quote
+    assert measured.supports_typing and measured.max_text_chars
 
 
 def test_the_evaluation_never_builds_the_wechat_channel() -> None:

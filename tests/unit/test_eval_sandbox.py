@@ -22,6 +22,7 @@ from tests.support.eval_world import (
 from tests.support.export_world import LATE_FACT, LIVE_STYLE, PAST_MARKER, World
 from tests.support.memory import add_fact
 from twin.channel.ilink.channel import IlinkChannel
+from twin.channel.probe.summary import ChannelProbeSummary, save_summary
 from twin.engine.pipeline import ReplyPipeline
 from twin.engine.turns import BotTurnStore
 from twin.engine.types import Bubble, InboundItem
@@ -45,9 +46,11 @@ from twin.eval.sandbox import (
     with_backend,
 )
 from twin.eval.store import EvalStore
+from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.tokens import CALIBRATION_KEY
-from twin.memory.asof import AsOfView
+from twin.memory.asof import AsOfSource, AsOfView
 from twin.memory.recent import Turn
+from twin.ops.jobs import JobDeferred
 from twin.retrieval.query import QueryTurn
 from twin.stickers.catalog import StickerCatalog
 from twin.storage.models import CostLedger
@@ -113,8 +116,9 @@ async def test_every_backend_is_given_the_same_eight_merged_turns(
     assert all(f"第{i}轮" in sent for i in range(5, 12))  # the newest seven turns are there
     assert not any(f"第{i}轮" in sent for i in range(5))  # the older ones are not
     assert merged_turns(turns, 0) == ()
-    # the channel decides whether the pipeline may quote: the in-memory channel can
-    assert context.limits.supports_quote
+    # the channel decides whether the pipeline may quote: like the running channels, it cannot
+    # (R17-16, D-661: a quote of the bot would be the one thing that gives it away in a blind test)
+    assert not context.limits.supports_quote
 
 
 async def test_a_run_changes_only_the_tables_the_sandbox_may_write(
@@ -277,11 +281,19 @@ async def test_the_sandbox_is_the_one_reply_pipeline_with_an_in_memory_channel(
     component = (SRC / "engine" / "component.py").read_text(encoding="utf-8")
     assert "ReplyPipeline.from_services" in component
     seen: list[object] = []
+    propagated: list[tuple[type[Exception], ...]] = []
     original = ReplyPipeline.run
 
-    async def spy(self: ReplyPipeline, context: object, data: object) -> object:
+    async def spy(
+        self: ReplyPipeline,
+        context: object,
+        data: object,
+        *,
+        propagate: tuple[type[Exception], ...] = (),
+    ) -> object:
         seen.append(data)
-        return await original(self, context, data)  # type: ignore[arg-type]
+        propagated.append(propagate)
+        return await original(self, context, data, propagate=propagate)  # type: ignore[arg-type]
 
     monkeypatch.setattr(ReplyPipeline, "run", spy)
 
@@ -292,6 +304,8 @@ async def test_the_sandbox_is_the_one_reply_pipeline_with_an_in_memory_channel(
     sample = sample_of(world)[0]
     await kit.sandbox.reply(request_for(sample))
     assert len(seen) == 1 and isinstance(seen[0], AsOfView) and seen[0].at == sample.at
+    # R17-21 (D-660): what the evaluation hands back to its job instead of failing the pair
+    assert propagated == [(JobDeferred, CircuitOpenError, BudgetDeniedError)]
     # nothing in the evaluation produces a reply except through the pipeline
     for path in sorted((SRC / "eval").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -345,9 +359,24 @@ async def test_a_sticker_that_cannot_be_sent_is_left_out_like_the_bubble_sender_
     assert len(delivered) == 1
 
 
+def quoting_sandbox(world: World, kit: SandboxKit) -> EvalSandbox:
+    """A sandbox like the kit's whose channel can quote (the delivery of a quote is generic)."""
+    clock = SampleClock(world.services.clock)
+    channel = InMemoryChannel(clock=clock, supports_quote=True)
+    return EvalSandbox(
+        world.services,
+        kit.sandbox.pipeline,
+        mode=SandboxMode.HOLDOUT,
+        channel=channel,
+        clock=clock,
+        past=AsOfSource(world.services),
+    )
+
+
 async def test_a_quote_goes_with_the_first_text_bubble_to_the_message_it_comes_from(
     world: World, kit: SandboxKit
 ) -> None:
+    sandbox = quoting_sandbox(world, kit)
     sample = sample_of(world)[0]
     request = request_for(sample)
     fragment = request.inbound[0].text[:6]
@@ -355,15 +384,63 @@ async def test_a_quote_goes_with_the_first_text_bubble_to_the_message_it_comes_f
     draft = replace(
         reply.draft, bubbles=(Bubble("text", "好呀"), Bubble("text", "再说一句")), quote=fragment
     )
-    delivered, candidate, _ = await kit.sandbox._deliver(draft, request.inbound)
+    delivered, candidate, _ = await sandbox._deliver(draft, request.inbound)
     assert candidate.quote == fragment
     assert delivered[0].quote is not None and delivered[0].quote.message_id == request.inbound[0].id
     assert delivered[1].quote is None  # only the first bubble carries it
     # a fragment that is in none of the messages quotes the last one
     odd = replace(draft, quote="完全没有出现过的话")
-    again, shown, _ = await kit.sandbox._deliver(odd, request.inbound)
+    again, shown, _ = await sandbox._deliver(odd, request.inbound)
     assert again[0].quote is not None and again[0].quote.message_id == request.inbound[-1].id
     assert shown.quote == "完全没有出现过的话"
+
+
+async def test_a_pipeline_quote_is_dropped_when_the_channel_cannot_quote(
+    world: World, api: respx.MockRouter, script: DeepSeekScript, kit: SandboxKit
+) -> None:
+    """R17-16 (D-661): the model writes a quote; the sandbox, like the live channel, drops it.
+
+    Before the fix the in-memory channel accepted quotes: the bot's candidate in a blind test
+    started with ``[引用：…]``, which her real replies (which the live channel cannot send) do
+    only when she quoted.  That was a tell in the bot's disfavour that the live bot never has.
+    """
+    sample = sample_of(world)[0]
+    request = request_for(sample)
+    fragment = request.inbound[0].text[:6]
+    script.reply = lambda body: f"[引用:{fragment}]\n好呀\n哈哈"
+    reply = await kit.sandbox.reply(request)
+    assert reply.usable and reply.draft.quote is None and reply.candidate.quote is None
+    assert "quote_removed" in {a.step for a in reply.draft.actions}
+    assert all(m.quote is None for m in reply.delivered)
+    assert render_candidate(reply.candidate, lambda md5: None).startswith("好呀")
+    assert not kit.sandbox.channel.capabilities().supports_quote
+
+
+async def test_the_sandbox_channel_reports_what_the_probe_measured(
+    world: World, api: respx.MockRouter
+) -> None:
+    """R17-16 (D-661): ``build_sandbox`` hands the stored probe summary to the channel."""
+    async with open_kit(world) as built:  # no probe yet: nothing is reported as measured
+        before = built.sandbox.channel.capabilities()
+    assert (before.proactive_window_h, before.outbound_quota, before.gif_animated) == (
+        None,
+        None,
+        None,
+    )
+    moment = world.services.clock.now_utc().isoformat()
+    summary = ChannelProbeSummary(
+        run_id="chan-1", status="completed", started_at=moment, finished_at=moment,
+        complete=True, verdict="met", reasons=[], n_messages=9, n_capped=False,
+        window_lower_bound_h=23.5, window_upper_bound_h=25.0, gif_animated=False,
+        typing_visible=True, quote_supported=False, quota_shared=True, quota_basis="x",
+        suggestions={}, steps={}, failures=[],
+    )  # fmt: skip
+    with world.services.db.transaction(bump_state=False) as session:
+        save_summary(session, summary, world.services.clock)
+    async with open_kit(world) as built:
+        caps = built.sandbox.channel.capabilities()
+    assert (caps.proactive_window_h, caps.outbound_quota, caps.gif_animated) == (23.5, 9, False)
+    assert not caps.supports_quote
 
 
 async def test_the_preview_is_the_prompt_the_generation_then_sends(

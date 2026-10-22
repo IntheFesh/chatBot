@@ -46,6 +46,7 @@ from typing import TYPE_CHECKING
 
 from twin.channel.base import MediaNotAllowed, QuoteTarget
 from twin.channel.policy import StickerAllowList
+from twin.channel.probe.summary import load_channel_probe_summary, measured_capabilities
 from twin.clock import Clock, ensure_aware
 from twin.config.runtime import ThinkingMode
 from twin.engine.dataview import LiveDataSource, ReplyDataView
@@ -372,9 +373,12 @@ def build_sandbox(
     style_runtime = style or StyleRuntime.from_services(services, runtime)
     pipeline = ReplyPipeline.from_services(services, runtime, extra_backends=style_runtime.backends)
     clock = SampleClock(services.clock)
-    channel = InMemoryChannel(
+    with services.db.session() as session:
+        measured = measured_capabilities(load_channel_probe_summary(session))
+    channel = InMemoryChannel(  # the capabilities of the running channel: no quotes (R17-16)
         clock=clock,
         media_policy=allow if allow is not None else StickerLibraryAllowList(services.db),
+        measured=measured,
     )
     tag = LedgerTag("one_time", batch_id) if batch_id else None
     past = AsOfSource(services) if mode is SandboxMode.HOLDOUT else None

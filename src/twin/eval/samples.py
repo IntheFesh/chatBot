@@ -10,6 +10,11 @@ bot and not the choice of examples:
 * **only replies the bot could have written**: every message of the reply is text, a sticker or a
   quote (``is_reproducible``), no line of it is event text or a media marker (R-SAFE-006 4),
   and the conversation before it ends with the user's turn;
+* **nothing that only her side can show** (R17-16, D-661): a reply that quotes (the running
+  channel cannot send a quote, so the bot's candidate never starts with ``[引用：…]``) and a reply
+  with a sticker the library has no description for (the bot sends only sticker of the library
+  that it can describe; hers would read ``[表情包：未标注]``) are not drawn.  The context is
+  rendered the same for both candidates and is left alone;
 * **stratified**: the sample is spread over the four periods of her local day (night 0-6,
   morning 6-12, afternoon 12-18, evening 18-24) and three lengths of the conversation segment
   before the reply (1-2, 3-5 and 6-8 turns; the retrieval windows hold at most eight), in
@@ -71,6 +76,8 @@ REASON_USED = "context_used_before"
 REASON_NO_USER_TURN = "context_does_not_end_with_the_user"
 REASON_EVENT_TEXT = "reply_has_event_text"
 REASON_EMPTY = "reply_empty"
+REASON_QUOTE = "reply_has_quote"
+REASON_UNDESCRIBED_STICKER = "reply_undescribed_sticker"
 REASON_MISSING = "message_missing"
 
 
@@ -275,6 +282,12 @@ class SampleDrawer:
             return None
         if has_event_text(real):
             result.excluded[REASON_EVENT_TEXT] += 1
+            return None
+        if real.quote is not None:
+            result.excluded[REASON_QUOTE] += 1
+            return None
+        if any(self.describe(md5) is None for md5 in real.stickers):
+            result.excluded[REASON_UNDESCRIBED_STICKER] += 1
             return None
         flat = [m for turn in block.context for m in turn]
         messages: list[BotMessage] = []
