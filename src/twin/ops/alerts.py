@@ -448,7 +448,9 @@ class AlertService:
                 return False
             last = max(self._noticed_at(row) for row in gone)
             if now - last < self._cooldown:
-                due_at = last + self._cooldown
+                # a notice nobody delivered for a day is dropped (STALE_AFTER): never put one off
+                # beyond that, whatever the cooldown is set to
+                due_at = min(last + self._cooldown, now + STALE_AFTER - CLAIM_LEASE)
             session.add(
                 Alert(
                     category=canonical,

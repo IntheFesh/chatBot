@@ -328,6 +328,20 @@ def test_a_recovery_that_was_announced_is_the_hours_notice_for_the_next_alert(
     assert [v.kind for v in views(alerts)] == ["alert", "recovery", "alert"]
 
 
+def test_a_put_off_recovery_is_never_put_off_beyond_the_day_after_which_notices_expire(
+    clock: ManualClock, services: Services
+) -> None:
+    long = AlertService(services.db, clock, cooldown_min=3 * 24 * 60)
+    long.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(60)
+    assert long.recover("disk_low", "back") is True
+    recovery = views(long)[-1]
+    assert recovery.mail_next_at is not None
+    assert recovery.mail_next_at < clock.now_utc() + timedelta(hours=24)
+    clock.set_time(recovery.mail_next_at)
+    assert [view.kind for view in long.claim_due()] == ["alert", "recovery"]  # not expired
+
+
 def test_the_end_of_a_flapping_episode_is_told_when_the_last_news_was_the_alert(
     services: Services, clock: ManualClock
 ) -> None:
