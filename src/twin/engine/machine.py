@@ -30,7 +30,11 @@ States
                 (``engine.paused_until``) holds the round back; after it she has "just seen" the
                 messages.  Her state is looked at again on every pass and before the generation
                 starts: a plan that changed under the queued reply (a time-zone switch) and put the
-                reply into her deep sleep makes it wait for her waking (D-722).
+                reply into her deep sleep makes it wait for her waking (D-722).  The reply is begun
+                ``generation_lead_s`` before the moment drawn - her measured latency contains her
+                typing - and its first bubble is awaited silently until typing it ends at that
+                moment (D-723); a message that comes before the moment still joins the round: the
+                reply made early is dropped and the decision kept.
 ``GENERATING``  :class:`~twin.engine.pipeline.ReplyPipeline` writes the reply as an
                 ``asyncio`` task.  A message of the user cancels it (what was paid for stays in the
                 cost ledger, the cancellation is noted in the reply's actions) and the round goes
@@ -115,7 +119,7 @@ from twin.engine.decision import MAX_RETRIES, Decider, Decision, Situation
 from twin.engine.fallback import ShortAnswers
 from twin.engine.history import HistoryLoader
 from twin.engine.kit import EngineKit
-from twin.engine.pacing import PacingModel
+from twin.engine.pacing import PacingModel, first_bubble_lead
 from twin.engine.rounds import RoundStore
 from twin.engine.roundstate import Outgoing, RoundData
 from twin.engine.safety.crisis import CrisisOutcome
@@ -147,6 +151,8 @@ STEP_FAILURE_PAUSE_S = 5.0
 PROBE_RECHECK_S = 60.0  # while a probe holds the round: look again at least this often
 STEP_FAILURES_BEFORE_RESET = 5
 STOP_GRACE_S = 10.0  # real seconds a stop waits for a bubble that is being handed over (D-721)
+LEAD_MAX_S = 30.0  # the reply is begun at most this long before her delay ends (D-723)
+LEAD_SMOOTHING = 0.3  # weight of the newest reply in the running estimate of its lead
 SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
 CORRECTION_TIMEOUT_S = 30.0  # the question after a correction in plain words may not hold her up
@@ -303,6 +309,7 @@ class ConversationEngine:
         self._failures = 0
         self._gave_up_round: str | None = None  # the round that got the word of ``_give_up_round``
         self._rejudged_for: datetime | None = None  # the planned time ``_rejudge`` last moved
+        self._lead_s: float | None = None  # running estimate of the lead of a reply (D-723)
         self._waiting_until: datetime | None = None
         self._driver: asyncio.Task[None] | None = None
         self._extractor: asyncio.Task[None] | None = None
@@ -416,6 +423,17 @@ class ConversationEngine:
         """The moment the driver is waiting for (the quiet window, her delay, a pause between
         bubbles), or ``None`` when it waits for a message or is busy."""
         return self._waiting_until
+
+    @property
+    def generation_lead_s(self) -> float:
+        """How long before her delay ends a reply is begun (D-723).
+
+        The running estimate (this process only) of how long a reply needs from the start of its
+        generation until its first bubble could appear - the generation, the silent second and
+        the typing of the bubble (:func:`~twin.engine.pacing.first_bubble_lead`) - at most
+        :data:`LEAD_MAX_S`; 0 until the first reply of the process is made.
+        """
+        return min(self._lead_s or 0.0, LEAD_MAX_S)
 
     async def on_state_change(self, _old: int, _new: int) -> None:
         """A setting changed (the state watcher): pause, backend and profile are read again."""
@@ -867,10 +885,13 @@ class ConversationEngine:
         if len(snap.pending) > data.decided_for:
             await self._merge(snap, data, decision, planned)
             return
-        if now >= planned:
+        start_at = planned - timedelta(seconds=self.generation_lead_s)
+        if decision.paused_until is not None:  # nothing is made while the pause lasts
+            start_at = max(start_at, decision.paused_until)
+        if now >= start_at:
             await self._start_generating(snap)
             return
-        await self._wait_wake((planned - now).total_seconds())
+        await self._wait_wake((start_at - now).total_seconds())
 
     async def _merge(
         self,
@@ -1012,7 +1033,41 @@ class ConversationEngine:
             await self._cancelled()  # the user wrote just as the reply was ready
             return
         draft_ms = round((self._clock.monotonic() - started) * 1000)
+        await self._note_generation(draft, draft_ms / 1000.0)
         await self._after_draft(draft, items, data, draft_ms)
+
+    async def _note_generation(self, draft: ReplyDraft, generation_s: float) -> None:
+        """Remember how long a reply needed: the next one is begun that long before it is due.
+
+        Only a reply that was made says anything of it (a failure or silence does not).
+        """
+        if draft.needs_fallback or not draft.bubbles:
+            return
+        first = draft.bubbles[0]
+        pacing = await self._pacing_model()
+        typing_s = pacing.bubble_interval(
+            self._rng, 0 if first.is_sticker else len(first.text), first=True
+        )
+        lead = min(first_bubble_lead(max(generation_s, 0.0), typing_s), LEAD_MAX_S)
+        previous = self._lead_s
+        self._lead_s = (
+            lead if previous is None else (1.0 - LEAD_SMOOTHING) * previous + LEAD_SMOOTHING * lead
+        )
+
+    def _in_her_delay(self, data: RoundData) -> bool:
+        """Is it still before the moment her delay ends, with nothing of the reply out? (D-723)
+
+        A reply that is made or waited for early is still inside the delay she drew: a message
+        that comes then joins the round like any that comes while she waits (R-ENG-004), it does
+        not start the round again.
+        """
+        decision = data.decision
+        out = data.outgoing
+        return (
+            decision is not None
+            and decision.send_at > self._clock.now_utc()
+            and (out is None or (out.reply_id is None and out.in_flight is None))
+        )
 
     async def _race(self, task: asyncio.Task[Any]) -> None:
         """Wait until ``task`` is done or the driver is nudged."""
@@ -1030,6 +1085,8 @@ class ConversationEngine:
 
         def build(current: ConversationSnapshot) -> Change:
             fresh = RoundData.of(current)
+            if fresh.decision is not None and self._in_her_delay(fresh):
+                return self._back_to_her_delay(current, fresh.decision)
             began = fresh.quiet_from or self._clock.now_utc()
             return Change(
                 STATE_COLLECTING,
@@ -1048,6 +1105,26 @@ class ConversationEngine:
             )
 
         await self._apply(build)
+
+    @staticmethod
+    def _back_to_her_delay(current: ConversationSnapshot, decision: Decision) -> Change:
+        """The reply made early is thrown away; the round waits for the time drawn (D-723).
+
+        ``decided_for`` still counts the messages the decision knew, so DECIDING sees the new one
+        and merges it (``_merge``: a short pause after 80 % of the wait, otherwise the drawn time
+        stands).  The notes are read from ``current``: a message that was queued meanwhile has
+        written its clocks there.
+        """
+        fresh = RoundData.of(current)
+        return Change(
+            STATE_DECIDING,
+            {
+                "data": replace(
+                    fresh, cancelled=fresh.cancelled + 1, answering=(), outgoing=None
+                ).to_json(),
+                "planned_send_at": decision.send_at,
+            },
+        )
 
     async def _context(
         self, items: Sequence[InboundItem], snap: ConversationSnapshot, data: RoundData
@@ -1172,6 +1249,7 @@ class ConversationEngine:
             quote_id=quote.message_id if quote else None,
             quote_text=quote.text if quote else None,
             extra_actions=extras,
+            due_at=data.decision.send_at if data.decision is not None else None,
         )
         self._reasoning = draft.reasoning
         log.info("reply_ready", bubbles=len(bubbles), backend=meta.backend, cost_usd=meta.cost_usd)
@@ -1390,6 +1468,7 @@ class ConversationEngine:
                 on_sending=about_to_send,
                 first_of_reply=outgoing.reply_id is None,
                 quote=quote if outgoing.reply_id is None else None,
+                first_due_at=outgoing.due_at,
             )
         finally:
             self._safe_to_cancel.set()  # a send that ended without a bubble: nothing to wait for
@@ -1490,6 +1569,11 @@ class ConversationEngine:
     ) -> None:
         """The user wrote while she was sending: the rest is dropped, the round goes on."""
         log.info("sending_interrupted", unsent=len(outgoing.unsent), out=len(snap.sent))
+        if outgoing.reply_id is None and data.decision is not None and self._in_her_delay(data):
+            decision = data.decision  # the draft was early: the user wrote inside her delay
+            self._reasoning = None
+            await self._apply(lambda current: self._back_to_her_delay(current, decision))
+            return
         if outgoing.reply_id is not None:
             noted = replace(
                 outgoing,

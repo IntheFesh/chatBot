@@ -5,6 +5,9 @@
 * before each bubble it waits as long as she would - her pause between two messages of a burst plus
   the time to type the bubble (:meth:`~twin.engine.pacing.PacingModel.bubble_interval`) - showing
   "typing" while the channel can (``capabilities().supports_typing``);
+* the first bubble of a reply whose generation began before her first delay was over
+  (``first_due_at``, D-723) is awaited silently until it is time to type it, so that it appears
+  at the moment the delay ended - not after the delay plus the generation plus the typing;
 * the wait ends early when the user writes again: the bubbles that are out stay, the rest is not
   sent (the engine writes the rest again with "what she already said", R-ENG-009);
 * before each bubble it asks the channel whether the user is still bound, the login and the window
@@ -50,7 +53,7 @@ from twin.channel.base import (
     RecipientNotAllowed,
 )
 from twin.clock import Clock
-from twin.engine.pacing import PacingModel
+from twin.engine.pacing import PacingModel, silence_before_typing
 from twin.engine.sticker_sender import StickerSender
 from twin.ops.alerts import AlertSink
 from twin.ops.logging import get_logger
@@ -153,6 +156,7 @@ class BubbleSender:
         quote: QuoteTarget | None = None,
         paced: bool = True,
         urgent: bool = False,
+        first_due_at: datetime | None = None,
     ) -> SendReport:
         """Send ``bubbles`` in order.
 
@@ -161,6 +165,11 @@ class BubbleSender:
         under way; ``quote`` goes with the first text bubble; ``paced=False`` (the fixed
         out-of-role answer to a crisis, R-SAFE-001) sends without waiting; ``urgent=True`` (the
         same answer) sends every text bubble as an urgent message of the channel (D-685).
+        ``first_due_at`` is the moment the first bubble of a reply is due (the end of the delay
+        the engine drew): it is awaited silently until typing it would end exactly then - at
+        least :data:`~twin.engine.pacing.MIN_INTERVAL_S` - and the typing is shown afterwards;
+        without it the first bubble comes after its typing time alone (D-723).  A user who
+        writes during the silent wait stops the reply like during any other wait.
         """
         report = SendReport()
         typing = paced and self._channel.capabilities().supports_typing
@@ -168,9 +177,13 @@ class BubbleSender:
         for index, bubble in enumerate(bubbles):
             rest = list(bubbles[index:])
             if paced:
-                delay = pacing.bubble_interval(
-                    self._rng, bubble.chars, first=first_of_reply and index == 0
-                )
+                first = first_of_reply and index == 0
+                delay = pacing.bubble_interval(self._rng, bubble.chars, first=first)
+                if first and first_due_at is not None:
+                    due_in = (first_due_at - self._clock.now_utc()).total_seconds()
+                    if await wait(silence_before_typing(due_in, delay)):
+                        report.stop, report.rest = StopReason.INTERRUPTED, rest
+                        return report
                 if typing:
                     await self._typing(True)
                 if await wait(delay):

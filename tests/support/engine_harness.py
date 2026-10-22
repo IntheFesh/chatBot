@@ -271,15 +271,28 @@ def make_draft(
 
 
 class ScriptedWriter:
-    """The reply pipeline of a test: answers from a script, optionally held back by a gate."""
+    """The reply pipeline of a test: answers from a script, optionally held back by a gate.
 
-    def __init__(self, *answers: ReplyDraft | BaseException) -> None:
+    ``takes_s`` (with ``clock``): the generation lasts that many seconds *of the manual clock* -
+    the test moves the clock (``clock.advance``) while the writer sleeps on it.
+    """
+
+    def __init__(
+        self,
+        *answers: ReplyDraft | BaseException,
+        clock: ManualClock | None = None,
+        takes_s: float = 0.0,
+    ) -> None:
         self.answers: deque[ReplyDraft | BaseException] = deque(answers)
         self.contexts: list[ReplyContext] = []
         self.started = asyncio.Event()
         self.gate: asyncio.Event | None = None
         self.cancelled = 0
         self.calls = 0
+        self.clock = clock
+        self.takes_s = takes_s
+        self.began: list[datetime] = []  # when each generation began (the manual clock)
+        self.sleeping = False  # the generation is lasting (``takes_s``) on the manual clock
 
     def add(self, *answers: ReplyDraft | BaseException) -> None:
         self.answers.extend(answers)
@@ -287,13 +300,20 @@ class ScriptedWriter:
     async def run(self, context: ReplyContext, data: Any) -> ReplyDraft:
         self.calls += 1
         self.contexts.append(context)
+        if self.clock is not None:
+            self.began.append(self.clock.now_utc())
         self.started.set()
-        if self.gate is not None:
-            try:
+        try:
+            if self.gate is not None:
                 await self.gate.wait()
-            except asyncio.CancelledError:
-                self.cancelled += 1
-                raise
+            if self.clock is not None and self.takes_s > 0:
+                self.sleeping = True
+                await self.clock.sleep(self.takes_s)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        finally:
+            self.sleeping = False
         answer = self.answers.popleft() if self.answers else make_draft("好的")
         if isinstance(answer, BaseException):
             raise answer
@@ -576,11 +596,13 @@ async def run_to_idle(
     *,
     limit_s: float = 20.0,
     until: Callable[[], bool] | None = None,
+    writer: ScriptedWriter | None = None,
 ) -> int:
     """Let the engine finish the round: advance to every wait until idle (or ``until`` holds).
 
     Returns how many waits were skipped.  Only real time is bounded (``limit_s``): the engine's
-    own waiting is skipped by moving the manual clock, so a night's sleep costs nothing.
+    own waiting is skipped by moving the manual clock, so a night's sleep costs nothing.  With a
+    ``writer`` that takes time (``takes_s``) the clock also runs through the generation.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + limit_s
@@ -594,6 +616,11 @@ async def run_to_idle(
         waiting = engine.waiting_until
         if waiting is not None and not engine.pending_wake:  # not a wait that is about to end
             await clock.advance(seconds_until(clock, waiting))
+            steps += 1
+        elif (
+            writer is not None and writer.sleeping
+        ):  # the reply is being made: let it take its time
+            await clock.advance(writer.takes_s)
             steps += 1
         else:
             await asyncio.sleep(0.003)

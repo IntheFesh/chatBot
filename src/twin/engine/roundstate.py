@@ -73,6 +73,7 @@ class Outgoing:
     extra_actions: tuple[dict[str, Any], ...] = ()  # what the engine did besides the pipeline
     in_flight: OutBubble | None = None  # handed to the channel, not yet noted as out
     in_flight_at: datetime | None = None  # ... since this moment
+    due_at: datetime | None = None  # the moment her first delay ends: the first bubble is due then
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -84,6 +85,7 @@ class Outgoing:
             "extra_actions": [dict(a) for a in self.extra_actions],
             "in_flight": bubble_to_json(self.in_flight) if self.in_flight else None,
             "in_flight_at": _iso(self.in_flight_at),
+            "due_at": _iso(self.due_at),
         }
 
     @classmethod
@@ -97,6 +99,7 @@ class Outgoing:
             extra_actions=tuple(dict(a) for a in data.get("extra_actions") or ()),
             in_flight=bubble_from_json(data["in_flight"]) if data.get("in_flight") else None,
             in_flight_at=_moment(data.get("in_flight_at")),
+            due_at=_moment(data.get("due_at")),  # rows of before D-723 have none: no early start
         )
 
     def final_meta(self) -> ReplyMeta:

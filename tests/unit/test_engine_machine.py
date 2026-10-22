@@ -28,6 +28,7 @@ from tests.support.waiting import wait_until
 from twin.channel.base import InboundMessage, MediaRef, MessageKind
 from twin.engine.fallback import ShortAnswers
 from twin.engine.inbound import InboundRenderer
+from twin.engine.pacing import MIN_INTERVAL_S
 from twin.engine.roundstate import RoundData
 from twin.engine.state_store import ConversationSnapshot
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
@@ -120,9 +121,12 @@ async def test_the_first_bubble_waits_for_her_delay_and_the_next_for_her_pause(
     await rig.message("周末去看电影吧")
     await run_to_idle(rig.engine, rig.clock)
     first, second = (o.at for o in rig.channel.out if o.kind == "text")
-    # her latency (20 s) + reading seven characters (0.7 s), counted from the message; then she
-    # types "好呀" (2 characters at 0.5 s) before it appears
-    assert first - START == timedelta(seconds=20.7 + 1.0)
+    # her latency (20 s) + reading seven characters (0.7 s), counted from the message.  A new
+    # process knows nothing yet of how long a reply takes, so it is made when the delay is over
+    # (D-723) - late by its generation (none here): she waits the least (a second), then types
+    # "好呀" (2 characters at 0.5 s) before it appears.  The warm case, where the bubble appears
+    # at the moment the delay ends, is in ``test_engine_early_generation.py``.
+    assert first - START == timedelta(seconds=20.7 + MIN_INTERVAL_S + 1.0)
     # the second bubble: her pause between messages (4 s) + typing four characters (2 s)
     assert second - first == timedelta(seconds=6)
     typing = [o.active for o in rig.channel.out if o.kind == "typing"]

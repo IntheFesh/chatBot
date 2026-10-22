@@ -37,6 +37,17 @@ async def rig(services: Services, clock: ManualClock) -> AsyncIterator[Harness]:
 # --------------------------------------------------------------------------- the notes
 
 
+def test_a_stored_reply_without_a_due_time_is_read_as_one_that_has_none() -> None:
+    """R17-34 (D-723): rows written before ``due_at`` existed load, and are sent like before."""
+    meta = ReplyMeta("deepseek")
+    legacy = Outgoing(meta, (OutBubble("text", "好"),)).to_json()
+    del legacy["due_at"]  # the key did not exist
+    loaded = Outgoing.from_json(legacy)
+    assert loaded.due_at is None and loaded.unsent == (OutBubble("text", "好"),)
+    stamped = Outgoing(meta, (OutBubble("text", "好"),), due_at=START + timedelta(seconds=20))
+    assert Outgoing.from_json(stamped.to_json()).due_at == START + timedelta(seconds=20)
+
+
 def test_the_notes_of_a_round_survive_the_trip_through_json() -> None:
     meta = ReplyMeta(
         "hybrid",
@@ -53,6 +64,7 @@ def test_the_notes_of_a_round_survive_the_trip_through_json() -> None:
         quote_id="m1",
         quote_text="去看电影",
         extra_actions=({"step": "decided_free", "count": 1},),
+        due_at=START + timedelta(seconds=20),
     )
     decision = Decision("free", START, START + timedelta(seconds=20), state="free")
     data = RoundData(
