@@ -16,6 +16,7 @@ from twin.training.export_text import (
     QUOTE_NOT_FIRST,
     collapse,
     context_text,
+    event_lines,
     quote_line,
     render_target,
     sticker_line,
@@ -104,6 +105,15 @@ def test_a_text_that_only_looks_like_an_event_text_is_deleted_too() -> None:
     assert target.lines == ["真的好看"]
     assert target.dropped[EVENT_TEXT_LITERAL] == 2
     assert not any(default_detector.is_event_text(line) for line in target.lines)
+
+
+def test_a_line_that_carries_a_placeholder_anywhere_is_not_a_target_line() -> None:
+    """R17-3 (D-670): ``[图片：自拍] 好看吗`` and ``我把[位置]发你`` were kept as targets before."""
+    lines = ["[图片：自拍] 好看吗", "我把[位置]发你", "给你听[语音 8 秒]", "【红包】恭喜发财"]
+    target = render_target([msg(text=line) for line in lines] + [msg(text="真的好看")], label)
+    assert target.lines == ["真的好看"]
+    assert target.dropped[EVENT_TEXT_LITERAL] == len(lines)
+    assert event_lines(["真的好看", *lines]) == lines
 
 
 def test_a_quote_reply_starts_with_the_quote_line_cut_to_thirty_characters() -> None:
