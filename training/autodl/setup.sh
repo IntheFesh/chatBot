@@ -20,7 +20,9 @@ PROFILE_NAME="${1:-}"
 MODE="${2:-install}"
 
 # jieba, nltk and rouge-chinese are not dependencies of the llamafactory wheel, but 0.9.5 checks
-# them as mandatory whenever it generates replies (predict_with_generate, i.e. eval.sh).
+# them as mandatory whenever it generates replies (predict_with_generate, i.e. eval.sh).  The
+# PyTorch stack that ensure_torch has just accepted is frozen with a constraints file, so that no
+# dependency of these packages can replace it with another build (D-632).
 install_packages() {
     local constraints="${TWIN_HOME}/state/torch-constraints.txt"
     mkdir -p "${TWIN_HOME}/state"
