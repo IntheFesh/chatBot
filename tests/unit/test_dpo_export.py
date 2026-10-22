@@ -38,6 +38,9 @@ from twin.learning.pairs import (
     PreferencePairStore,
     PromptSample,
 )
+from twin.ops.foreground import run_jobs_until_idle
+from twin.ops.instance_lock import LOCK_RUN, InstanceLock
+from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, JobView
 from twin.services import Services, build_services
 from twin.storage.ids import new_id
 from twin.storage.learning_models import PreferencePair
@@ -53,6 +56,15 @@ from twin.training.dpo_export import (
     newest_dataset,
 )
 from twin.training.export import ExportError
+from twin.training.export_job import (
+    DPO_STATE_KEY,
+    EXPORT_DPO_JOB,
+    DpoRequest,
+    dpo_summary,
+    handle_training_export_dpo,
+    queue_export_dpo,
+    read_state,
+)
 from twin.training.layout import FILE_DATASET_META, FILE_DPO, FILE_TEST, FILE_TRAIN, FILE_VAL
 from twin.training.registry import LockedVersions
 
@@ -403,7 +415,7 @@ def test_the_command_writes_the_file_and_says_what_comes_next(
         add_pair(services, "快睡吧", "您辛苦了")
 
     with_services(prepare)
-    result = runner.invoke(app, ["train", "export-dpo"])
+    result = runner.invoke(app, ["train", "export-dpo", "--foreground"])
     assert result.exit_code == 0, result.output
     assert "1 preference pair(s) in dpo_train.jsonl" in result.output
     assert "left out: persona_version_missing 1" in result.output  # no card v9 in the store
@@ -416,11 +428,122 @@ def test_the_command_writes_the_file_and_says_what_comes_next(
 def test_the_command_fails_clearly_without_a_dataset_or_pairs(
     data_dir: Path, clock: ManualClock
 ) -> None:
-    result = runner.invoke(app, ["train", "export-dpo"])
+    result = runner.invoke(app, ["train", "export-dpo", "--foreground"])
     assert result.exit_code != 0 and "twin train export" in result.output
     with_services(lambda services: base_dataset(services))
-    result = runner.invoke(app, ["train", "export-dpo"])
+    result = runner.invoke(app, ["train", "export-dpo", "--foreground"])
     assert result.exit_code != 0 and "no preference pairs" in result.output
+
+
+def jobs_of(services: Services) -> list[tuple[str, str, dict[str, Any]]]:
+    queue = JobQueue(services.db, services.clock)
+    return [(j.type, j.status, dict(j.payload)) for j in queue.list_jobs()]
+
+
+def test_the_command_only_queues_one_job_and_writes_nothing(
+    data_dir: Path, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-29 (D-713): the command is HEAVY - the application makes every pair again."""
+    with_services(lambda services: (base_dataset(services), add_pair(services)))
+    monkeypatch.chdir(data_dir)
+    first = runner.invoke(app, ["train", "export-dpo", "--dataset", "ds", "--out", "made/it"])
+    assert first.exit_code == 0, first.output
+    assert "queued (job " in first.output and "twin train export-status" in first.output
+    assert "already waiting" in runner.invoke(app, ["train", "export-dpo"]).output
+    [(job_type, status, payload)] = with_services(jobs_of)
+    assert (job_type, status) == ("training_export_dpo", "pending")
+    # the application has another working directory: what travels in the job is absolute
+    assert payload == {"dataset": str(data_dir / "ds"), "out_dir": str(data_dir / "made" / "it")}
+    created = [p.name for p in (data_dir / "training" / "datasets").iterdir()]
+    assert created == ["ds-test-01"] and not (data_dir / "made").exists()
+    status_text = runner.invoke(app, ["train", "export-status"]).output
+    assert "export-dpo" not in status_text  # nothing has run yet
+
+
+def test_the_foreground_run_yields_to_a_running_application(
+    data_dir: Path, clock: ManualClock
+) -> None:
+    with_services(lambda services: (base_dataset(services), add_pair(services)))
+    lock = with_services(lambda s: InstanceLock(LOCK_RUN, locks_dir=s.paths.locks_dir))
+    assert lock.acquire()
+    try:
+        result = runner.invoke(app, ["train", "export-dpo", "--foreground"])
+    finally:
+        lock.release()
+    assert result.exit_code == 0, result.output
+    assert "the application is running and will execute the job" in result.output
+    assert [t for t, _, _ in with_services(jobs_of)] == ["training_export_dpo"]
+    assert [p.name for p in (data_dir / "training" / "datasets").iterdir()] == ["ds-test-01"]
+
+
+def test_export_status_shows_how_the_dpo_export_ended(data_dir: Path, clock: ManualClock) -> None:
+    def prepare(services: Services) -> None:
+        base_dataset(services)
+        add_pair(services, persona="live:v9")
+        add_pair(services, "快睡吧", "您辛苦了")
+
+    with_services(prepare)
+    done = runner.invoke(app, ["train", "export-dpo", "--foreground"])
+    assert done.exit_code == 0, done.output
+    shown = runner.invoke(app, ["train", "export-status"])
+    assert shown.exit_code == 0, shown.output
+    assert "export-dpo: done" in shown.output
+    assert "1 preference pair(s) in dpo_train.jsonl" in shown.output
+    assert "left out: persona_version_missing 1" in shown.output
+    assert "DPO needs at least 200 pairs" in shown.output
+    state = with_services(lambda services: read_state(services, key=DPO_STATE_KEY))
+    assert state is not None
+    assert state["pairs"] == 1 and state["skipped"] == {"persona_version_missing": 1}
+    assert "快睡吧" not in json.dumps(state, ensure_ascii=False)  # counts and versions, no text
+
+
+def test_a_failed_dpo_export_is_kept_and_shown_and_the_command_fails(
+    data_dir: Path, clock: ManualClock
+) -> None:
+    failed = runner.invoke(app, ["train", "export-dpo", "--foreground"])
+    assert failed.exit_code != 0 and "export-dpo: failed" in failed.output
+    shown = runner.invoke(app, ["train", "export-status"])
+    assert "export-dpo: failed" in shown.output and "twin train export" in shown.output
+
+
+async def test_the_dpo_job_needs_the_services_container(clock: ManualClock) -> None:
+    job = JobView(
+        id="J" * 26, type=EXPORT_DPO_JOB, payload={}, priority=80, status="running", attempts=1,
+        max_attempts=1, run_after=NOW, offpeak_only=False, deadline=None, last_error=None,
+        batch_id=None, estimated_cost_usd=None, requires_approval=False, approved_at=None,
+        approved_usd=None, started_at=NOW, finished_at=None, created_at=NOW, updated_at=NOW,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="services container"):
+        await handle_training_export_dpo(JobContext(job=job, services=None, clock=clock))
+
+
+async def test_the_job_writes_the_same_file_as_the_synchronous_export(
+    services: Services, tmp_path: Path
+) -> None:
+    """The handler is ``export_dpo`` in a thread: the same lines, the same counts."""
+    base_dataset(services)
+    add_pair(services, persona="live:v9")
+    add_pair(services, "快睡吧", "您辛苦了")
+    add_pair(services, "抱抱你", "哈哈 辛苦啦")
+    direct = export_dpo(services, out_dir=tmp_path / "direct", now=NOW)
+    queued = queue_export_dpo(services, DpoRequest(out_dir=tmp_path / "queued"))
+    assert not queued.already_queued
+    registry = HandlerRegistry()
+    registry.register(EXPORT_DPO_JOB, handle_training_export_dpo)
+    summary = await run_jobs_until_idle(services, registry)
+    assert summary.done == 1 and summary.failed == 0
+    state = read_state(services, key=DPO_STATE_KEY)
+    assert state is not None and state["state"] == "done"
+    assert (state["pairs"], state["regenerated"], state["skipped"]) == (
+        direct.pairs,
+        direct.regenerated,
+        direct.skipped,
+    )
+    assert state["directory"] == str(tmp_path / "queued")
+    assert (tmp_path / "queued" / FILE_DPO).read_bytes() == (
+        tmp_path / "direct" / FILE_DPO
+    ).read_bytes()
+    assert dpo_summary(direct)["enough"] is state["enough"]
 
 
 def test_the_retrain_check_reports_the_pairs_for_dpo(data_dir: Path, clock: ManualClock) -> None:
