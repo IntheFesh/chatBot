@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 
 from twin.llm.errors import UnsupportedImageError
 from twin.llm.images import sniff_mime
-from twin.ops.logging import get_logger
+from twin.ops.logging import exception_summary, get_logger
 from twin.storage.chat_models import Sticker
 from twin.storage.crypto import DecryptionError
 from twin.storage.db import Database
@@ -143,7 +143,7 @@ def store_sticker_file(sticker: Sticker, data: bytes, media: MediaStore, now: da
             try:
                 attach_first_frame(sticker, data, media)
             except FirstFrameError as exc:  # the GIF stays; the still is made again on demand
-                log.warning("first_frame_not_made", reason=str(exc))
+                log.warning("first_frame_not_made", error=exception_summary(exc))
     else:
         sticker.status, sticker.reason = "md5_mismatch", "md5_mismatch"
     return sticker.status
