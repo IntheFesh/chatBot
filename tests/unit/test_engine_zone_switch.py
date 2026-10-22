@@ -167,6 +167,21 @@ async def test_a_reply_queued_for_her_waking_keeps_its_time_when_a_switch_wakes_
         await harness.engine.stop()
 
 
+async def test_the_generation_does_not_start_when_the_plan_changed_after_the_last_pass(
+    world: Harness,
+) -> None:
+    """R17-32: the look right before the generation starts: the plan changed in the gap between
+    the pass of DECIDING and the start (the driver is stopped, the step is called by hand)."""
+    await wait_for_the_reply_to_be_planned(world)
+    await world.engine.stop()
+    assert isinstance(world.day, ZonedDay)
+    world.day.zone = SHANGHAI
+    await world.engine._start_generating(world.engine.snapshot())  # type: ignore[attr-defined]
+    queued = decision_of(world.engine)
+    assert queued is not None and queued.woke_up and queued.wake_at == SHANGHAI_WAKE
+    assert world.engine.snapshot().state == "DECIDING" and world.writer.calls == 0
+
+
 async def test_a_time_that_was_moved_once_is_not_moved_again_and_the_driver_does_not_spin(
     services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
 ) -> None:

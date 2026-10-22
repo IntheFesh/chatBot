@@ -27,6 +27,7 @@ from tests.support.engine_harness import (
 )
 from tests.support.waiting import wait_until
 from twin.channel.base import OutboundKind, OutboundResult
+from twin.engine import machine
 from twin.engine.roundstate import RoundData
 from twin.schedule.events import Resumed
 from twin.services import Services
@@ -364,6 +365,24 @@ async def test_a_stop_waits_for_the_bubble_that_is_being_sent_and_writes_it_down
         assert second.engine.snapshot().state == "IDLE"
     finally:
         await second.engine.stop()
+
+
+async def test_a_send_that_could_not_even_be_noted_does_not_hold_the_stop(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-25: nothing was handed to the channel, so the stop has nothing to wait for."""
+    first = build_harness(services, clock, stop_grace_s=60.0)
+    await first.engine.start()
+
+    def broken(*args: Any) -> Any:
+        raise RuntimeError("the note of the send could not be made")
+
+    monkeypatch.setattr(machine, "_with_in_flight", broken)
+    await first.message("在吗")
+    await run_to_idle(first.engine, clock, until=lambda: "engine_error" in first.alerts.categories)
+    assert first.engine._safe_to_cancel.is_set()  # type: ignore[attr-defined]
+    await asyncio.wait_for(first.engine.stop(), 10)  # not the sixty seconds of the grace
+    assert first.channel.texts == []
 
 
 async def test_a_stop_gives_up_on_a_send_that_never_answers_after_the_grace(
