@@ -247,6 +247,8 @@ uv run twin profile rollback <版本>       # 切回旧版本（连同当时的�
 
 `profile show` 会请你**确认推断出的睡眠时段**。推断的睡眠核心如果落在当地白天（10:00–18:00），会有醒目警告和一条告警：多半是 `time.source_timezone`（导出里 `createTimeText` 的时区）设错了；她某段时间在国内时用 `time.source_timezone_ranges` 按日期区间指定，改完 `twin profile rebuild`。
 
+回复延迟按日类型（工作日 / 周末 / 节假日）分开学，日类型与日程用的是同一份日历（含 `pricing.extra_peak_dates` / `extra_offpeak_dates` 和手动节假日区间）。升级后、或改了这些日期之后，运行 `uv run twin profile rebuild` 与 `uv run twin retrieval rebuild`，已存下的画像、作息模型和示例窗口才会按新日类型重算。
+
 作息不对时手动修正（手动修正优先于推断，持久化）：
 
 ```powershell
@@ -580,6 +582,7 @@ uv run twin timezone history           # 切换历史
 - `time.source_timezone`（导出记录的时区，默认芝加哥）**不要**因为机器人换时区而改；它描述的是过去的记录。如果她的记录里有一段时间在国内，用 `time.source_timezone_ranges`（按日期区间）说明，然后 `uv run twin profile rebuild`。
 - DeepSeek 的高峰/非高峰判定用北京时间的工作日，与机器人时区无关；`twin doctor` 的 `holiday-calendar` 提醒你 `chinese-calendar` 是否覆盖当年。
 - 回美国时同样：`/时区 芝加哥`（或 `uv run twin timezone set America/Chicago`）。
+- 与机器人的聊天按**当时**的时区定日期：切换前的晚上仍属于切换前的那一天（芝加哥 10 月 5 日 23:30 切到北京后依然是 5 号），每日摘要也按那一天当时的时区切。一天只用一个时区，所以切换前后两天的区间会重叠 13 小时（芝加哥→北京）或留出 13 小时的空档（北京→芝加哥）。升级前已经写下、日期标错的每日摘要不会自动改：对切换前一天、当天、后一天各重跑一次 `uv run twin memory summarize <日期> --scope bot --force`（排队，非高峰执行）。
 
 ---
 
