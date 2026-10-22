@@ -14,7 +14,13 @@
 * **the edge of sleep** - at most ``edge_of_sleep_weekly_max`` messages sent at the edge of her
   sleep in any seven days;
 * **observed** - the scheduler opened the day (it was running): a day without a mark was not
-  watched, so it counts for nothing and ends the streak of observed days.
+  watched, so it counts for nothing and ends the streak of observed days;
+* **active** (R17-14, D-663) - the day was one on which she could write: no row of the day says
+  the switch was off and the upper end of the range is above zero.  A quiet day with proactive
+  messages off, or planned for ``0-0``, breaks no rule and is ``compliant``, but it shows nothing
+  of what the gate is about, so only **active** days count in the streak: a week with the switch
+  off is "not enough yet", never "passed".  Sending on such a day is still a violation (its range
+  is ``0-0``).
 
 Besides the verdict it keeps the distribution of the local hours the messages went out, the number
 of messages the window suppressed, the reasons of the other refusals and the ratings of the period.
@@ -42,6 +48,7 @@ from twin.schedule.proactive.types import OUTSIDE_REASONS, WINDOW_REASONS
 from twin.schedule.time_service import TimeService
 
 WEEK = timedelta(days=7)
+INACTIVE_NOTE = "当天主动消息关闭/范围 0-0，不计入观察"
 OUTSIDE = frozenset(reason.value for reason in OUTSIDE_REASONS)
 WINDOW = frozenset(reason.value for reason in WINDOW_REASONS)
 
@@ -64,12 +71,26 @@ class DayAudit:
     refused: dict[str, int]
     excused: bool
     hours: dict[int, int]
+    switched_off: bool = False  # a row of the day says the switch was off (``enabled`` False)
+
+    @property
+    def effective_range(self) -> tuple[int, int] | None:
+        """The range the count of the day is held to: ``0-0`` while the switch was off."""
+        if self.high is None or self.low is None:
+            return None
+        return (0, 0) if self.enabled is False else (self.low, self.high)
+
+    @property
+    def active(self) -> bool:
+        """A watched day on which she could write (see the module description)."""
+        return self.observed and not self.switched_off and self.high is not None and self.high > 0
 
     @property
     def count_ok(self) -> bool:
-        if self.high is None or self.low is None:
+        bounds = self.effective_range
+        if bounds is None:
             return False
-        low, high = (self.low, self.high) if self.enabled is not False else (0, 0)
+        low, high = bounds
         if self.sent > high:
             return False
         return self.sent >= low or self.excused
@@ -82,14 +103,19 @@ class DayAudit:
         if self.deep_sleep:
             found.append(f"深睡时段发了 {self.deep_sleep} 条")
         if not self.count_ok:
-            low = self.low if self.enabled is not False else 0
-            high = self.high if self.enabled is not False else 0
-            found.append(f"发了 {self.sent} 条，不在 {low}-{high} 范围内")
+            bounds = self.effective_range
+            span = f"{bounds[0]}-{bounds[1]}" if bounds is not None else "未知"
+            found.append(f"发了 {self.sent} 条，不在 {span} 范围内")
         if self.spacing_violations:
             found.append(f"{self.spacing_violations} 次间隔不足")
         if self.chase_violations:
             found.append(f"{self.chase_violations} 次追发超限")
         return found
+
+    @property
+    def notes(self) -> list[str]:
+        """What is worth saying about a day that breaks no rule: it is watched but idle."""
+        return [INACTIVE_NOTE] if self.observed and not self.active else []
 
     @property
     def compliant(self) -> bool:
@@ -99,6 +125,7 @@ class DayAudit:
         return {
             "day": self.day.isoformat(),
             "observed": self.observed,
+            "active": self.active,
             "low": self.low,
             "high": self.high,
             "enabled": self.enabled,
@@ -122,7 +149,7 @@ class Audit:
     first_day: date
     last_day: date
     days: tuple[DayAudit, ...]
-    streak: int  # observed days in a row, ending with the last day
+    streak: int  # active days in a row (watched, switch on, range above 0), ending the last day
     edge_max_week: int
     edge_weekly_max: int
     ratings: tuple[RatingRow, ...]
@@ -171,12 +198,18 @@ class Audit:
     def missing_days(self) -> int:
         return max(0, len(self.days) - self.streak)
 
+    @property
+    def inactive_days(self) -> int:
+        """Watched days that do not count: proactive messages were off or the range was ``0-0``."""
+        return sum(1 for day in self.days if day.observed and not day.active)
+
     def to_json(self) -> dict[str, Any]:
         return {
             "first_day": self.first_day.isoformat(),
             "last_day": self.last_day.isoformat(),
             "days": [day.to_json() for day in self.days],
             "streak": self.streak,
+            "inactive_days": self.inactive_days,
             "sent": self.sent,
             "deep_sleep": self.deep_sleep,
             "spacing_violations": self.spacing_violations,
@@ -268,13 +301,14 @@ def audit_days(
                 refused=dict(refused),
                 excused=any(key in OUTSIDE for key in refused),
                 hours=dict(hours),
+                switched_off=any(row.enabled is False for row in of_day),
             )
         )
         day += timedelta(days=1)
 
     streak = 0
     for item in reversed(days):
-        if not item.observed:
+        if not item.active:
             break
         streak += 1
     start = rating_from if rating_from is not None else now - WEEK

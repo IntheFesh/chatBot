@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from twin.eval.proactive_audit import Audit
+from twin.eval.proactive_audit import Audit, DayAudit
 from twin.schedule.proactive.store import LogEntry
 from twin.schedule.proactive.types import KIND_LABELS, REASON_LABELS
 
@@ -41,6 +41,7 @@ def print_audit(console: Console, audit: Audit) -> None:
     for column in (
         "日期",
         "已监测",
+        "计入观察",
         "条数",
         "范围",
         "深睡",
@@ -60,9 +61,12 @@ def print_audit(console: Console, audit: Audit) -> None:
         verdict = "合规" if day.compliant else "；".join(day.problems)
         if day.compliant and day.excused and day.low is not None and day.sent < day.low:
             verdict = "合规（少于下限，但被窗口/暂停等拦下）"
+        if day.compliant and day.notes:  # watched and quiet, but not a day of "会主动" (R17-14)
+            verdict = "；".join(["合规", *day.notes])
         days.add_row(
             Text(day.day.isoformat()),
             Text("是" if day.observed else "否"),
+            Text("是" if day.active else "否"),
             Text(str(day.sent)),
             Text(span),
             Text(str(day.deep_sleep)),
@@ -70,7 +74,7 @@ def print_audit(console: Console, audit: Audit) -> None:
             Text(str(day.spacing_violations)),
             Text(str(day.chase_violations)),
             Text(str(day.suppressed_window)),
-            Text(verdict, style="green" if day.compliant else "red"),
+            Text(verdict, style=_verdict_style(day)),
         )
     console.print(days)
     print_hours(console, audit.hours)
@@ -96,7 +100,12 @@ def print_audit(console: Console, audit: Audit) -> None:
     console.print(
         Text(
             f"连续观察 {audit.streak}/{len(audit.days)} 天。"
-            + ("" if audit.complete else f"还差 {audit.missing_days} 天。"),
+            + ("" if audit.complete else f"还差 {audit.missing_days} 天。")
+            + (
+                f"其中 {audit.inactive_days} 天主动消息关闭或范围为 0-0，不计入观察。"
+                if audit.inactive_days
+                else ""
+            ),
         )
     )
     console.print(
@@ -105,6 +114,12 @@ def print_audit(console: Console, audit: Audit) -> None:
             style="green" if audit.compliant and audit.complete else "red",
         )
     )
+
+
+def _verdict_style(day: DayAudit) -> str:
+    if not day.compliant:
+        return "red"
+    return "yellow" if day.notes else "green"
 
 
 def print_hours(console: Console, hours: dict[int, int]) -> None:

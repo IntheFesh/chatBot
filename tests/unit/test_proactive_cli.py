@@ -52,6 +52,7 @@ def write_day(
     *,
     sent: tuple[tuple[int, str], ...] = ((10, "free"), (15, "free"), (20, "free")),
     opened: bool = True,
+    enabled: bool = True,
 ) -> None:
     time = schedule_kit(services).time
     log = ProactiveLogStore(services.db, services.clock)
@@ -73,7 +74,7 @@ def write_day(
                 bubbles_sent=1 if sealed else 0,
                 range_min=1 if kind == "day" else None,
                 range_max=6 if kind == "day" else None,
-                enabled=True if kind == "day" else None,
+                enabled=enabled if kind == "day" else None,
                 plan_reason=SECRET_REASON if sealed else None,
                 content={"bubbles": [SECRET_TEXT]} if sealed else None,
                 backend="deepseek" if sealed else None,
@@ -215,6 +216,27 @@ def test_the_ratings_of_the_week_are_reported_and_the_gate_reads_them(data_dir: 
     assert cli("eval", "gate", "M3", "--check").exit_code == 0
     runs = with_services(lambda s: EvalStore(s.db, s.clock).list_runs("gate"))
     assert runs[0].milestone == "M3" and runs[0].verdict == "passed"
+
+
+def test_a_week_with_the_switch_off_is_reported_as_not_counted_and_the_gate_asks_for_more(
+    data_dir: Path,
+) -> None:
+    """R17-14 (D-663): the report says which days do not count and the gate is not passed."""
+
+    def seed(services: Services) -> None:
+        write_week(services, sent=(), enabled=False)
+        rate(services, 5)
+
+    with_services(seed)
+    report = cli("eval", "proactive")
+    assert report.exit_code == 1, report.output  # compliant, but not a week that counts
+    assert "计入观察" in report.output
+    assert "连续观察 0/7 天" in report.output
+    assert "其中 7 天主动消息关闭或范围为 0-0，不计入观察" in report.output
+    assert "审计结论：不合规或未满" in report.output
+    gate = cli("eval", "gate", "M3")
+    assert gate.exit_code == 1 and "样本不足" in gate.output and "主动消息关闭" in gate.output
+    assert cli("eval", "gate", "M3", "--check").exit_code == 1
 
 
 def test_the_gate_asks_for_a_rating_and_for_the_missing_days(data_dir: Path) -> None:
