@@ -29,6 +29,7 @@ import socket
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -170,6 +171,36 @@ def _loop_classes() -> list[type]:
             continue
         found.append(getattr(imported, name))
     return found
+
+
+@contextmanager
+def resolving(names: dict[str, str]) -> Iterator[None]:
+    """Make these names resolve to these (IPv4) addresses, whatever the DNS of this machine says.
+
+    A test of the guard that connects "by name" must not depend on a resolver: on a machine with
+    no DNS (a sandbox, a train, a CI runner without a network) the name never resolves, no
+    connection is attempted and the guard has nothing to record.  The address is one that belongs
+    to nobody (see ``NOWHERE`` in the tests), so the guard still has to refuse the connection.
+    Every other name goes to the real resolver.
+    """
+    real = socket.getaddrinfo
+
+    def lookup(
+        host: Any, port: Any, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0
+    ) -> list[tuple[Any, ...]]:
+        name = host.decode("ascii", "replace") if isinstance(host, bytes) else host
+        key = name.strip().lower().rstrip(".") if isinstance(name, str) else None
+        if key in names:
+            if family not in (0, socket.AF_INET):
+                raise socket.gaierror(socket.EAI_ADDRFAMILY, "no address of that family")
+            number = int(port) if port not in (None, "") else 0
+            return [
+                (socket.AF_INET, type or socket.SOCK_STREAM, proto or 6, "", (names[key], number))
+            ]
+        return real(host, port, family, type, proto, flags)
+
+    with patch.object(socket, "getaddrinfo", lookup):
+        yield
 
 
 @contextmanager

@@ -29,6 +29,7 @@ from tests.support.offline import (
     guard_network,
     is_local,
     network_allowed,
+    resolving,
 )
 
 NOWHERE = "192.0.2.1"  # TEST-NET-1 (RFC 5737): never a real host
@@ -91,10 +92,26 @@ def test_a_blocking_connection_to_another_computer_is_refused_and_recorded() -> 
 
 
 def test_a_library_that_connects_by_name_is_refused_at_the_address_it_found() -> None:
-    with guard_network() as guard, pytest.raises(NetworkBlocked):
+    """R17-52: the name is resolved by the test itself (``resolving``), so it needs no DNS."""
+    with (
+        resolving({"api.deepseek.com": NOWHERE}),
+        guard_network() as guard,
+        pytest.raises(NetworkBlocked),
+    ):
         socket.create_connection(("api.deepseek.com", 443), timeout=1)
     [attempt] = guard.attempts  # (the name is looked up first: the connection is what is stopped)
-    assert attempt.startswith("connect ") and attempt.endswith(":443")
+    assert attempt == f"connect {NOWHERE}:443"
+
+
+def test_resolving_gives_a_name_an_address_without_a_resolver() -> None:
+    """R17-52: the helper the tests above use; any other name still goes to the real resolver."""
+    with resolving({"api.deepseek.com": NOWHERE}):
+        found = socket.getaddrinfo("API.deepseek.com.", 443, socket.AF_INET)
+        assert [entry[4] for entry in found] == [(NOWHERE, 443)]
+        assert socket.getaddrinfo("127.0.0.1", 80)[0][4][0] == "127.0.0.1"
+        with pytest.raises(socket.gaierror):
+            socket.getaddrinfo("api.deepseek.com", 443, socket.AF_INET6)
+    assert socket.getaddrinfo("127.0.0.1", 80)[0][4][0] == "127.0.0.1"
 
 
 def test_a_server_on_loopback_still_answers() -> None:
@@ -166,12 +183,12 @@ def test_an_http_client_that_nobody_mocked_cannot_reach_out() -> None:
 
 
 async def test_the_async_http_client_is_stopped_too() -> None:
-    with guard_network() as guard:
+    with resolving({"api.deepseek.com": NOWHERE}), guard_network() as guard:
         async with httpx.AsyncClient(timeout=2) as client:
             with pytest.raises(httpx.ConnectError):
                 await client.get("https://api.deepseek.com/v1/models")
     [attempt] = guard.attempts
-    assert attempt.endswith(":443")
+    assert attempt == f"connect {NOWHERE}:443"
 
 
 def test_what_respx_answers_never_reaches_a_socket() -> None:
@@ -220,11 +237,11 @@ def test_a_proxy_in_the_environment_does_not_open_a_way_around_the_guard(
 ) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")  # a local proxy, as developers have
     monkeypatch.setenv("https_proxy", "http://127.0.0.1:7890")
-    with guard_network() as guard:
+    with resolving({"api.deepseek.com": NOWHERE}), guard_network() as guard:
         assert "HTTPS_PROXY" not in os.environ and os.environ["NO_PROXY"] == "*"
         with pytest.raises(httpx.ConnectError):
             httpx.get("https://api.deepseek.com/v1/models", timeout=2)  # direct, so refused
-    assert guard.attempts and guard.attempts[0].endswith(":443")
+    assert guard.attempts == [f"connect {NOWHERE}:443"]
     assert os.environ["HTTPS_PROXY"] == "http://127.0.0.1:7890"  # and put back afterwards
 
 
