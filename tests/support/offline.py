@@ -192,7 +192,9 @@ def resolving(names: dict[str, str]) -> Iterator[None]:
         key = name.strip().lower().rstrip(".") if isinstance(name, str) else None
         if key in names:
             if family not in (0, socket.AF_INET):
-                raise socket.gaierror(socket.EAI_ADDRFAMILY, "no address of that family")
+                raise socket.gaierror(
+                    getattr(socket, "EAI_FAMILY", -6), "no address of that family"
+                )
             number = int(port) if port not in (None, "") else 0
             return [
                 (socket.AF_INET, type or socket.SOCK_STREAM, proto or 6, "", (names[key], number))

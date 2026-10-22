@@ -237,7 +237,7 @@ def check_keyring(ctx: DoctorContext) -> CheckResult:
             return CheckResult(
                 "keyring",
                 CheckStatus.WARN,
-                f"read/write ok via the encrypted file store, which is allowed explicitly "
+                f"read/write ok via encrypted file fallback, which is allowed explicitly "
                 f"({ENV_ALLOW_FILE}=1): {info.detail}",
                 "a development or test switch: the key file sits next to the secrets file; "
                 "production on Windows uses the Credential Manager (unset TWIN_KEYRING_BACKEND)",
