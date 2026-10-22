@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.embedding import HashingBackend
 from tests.support.ingest import make_export, start_import
 from tests.support.waiting import wait_until
 from twin.ingest.importer import ImportRunner, RunOutcome
@@ -176,9 +177,14 @@ async def test_the_handler_needs_the_services_container() -> None:
 
 
 async def test_the_running_application_executes_a_queued_import(
-    services: Services, tmp_path: Path, clock: ManualClock
+    services: Services, tmp_path: Path, clock: ManualClock, embedder: HashingBackend
 ) -> None:
-    """R-ARCH-006.3: with the application running, ``twin import`` only queues; the app imports."""
+    """R-ARCH-006.3: with the application running, ``twin import`` only queues; the app imports.
+
+    The application also runs the hooks of the import (profile, retrieval index); the offline
+    ``embedder`` is the model they find, so a slow machine that gets as far as the index job
+    before the application stops never reaches for the network (R17: it did, on a CI shard).
+    """
     export = make_export(tmp_path, target_messages=80)
     run_id = start_import(services, export)
     application, _watcher = build_application(services)
