@@ -30,6 +30,14 @@ from typing import Final
 
 from twin.training.lf_template import LLAMAFACTORY_VERSION
 
+PYTHON_MIN: Final = "3.11"
+"""The oldest Python the instance may have: LLaMA-Factory 0.9.5 declares ``Requires-Python >=3.11``.
+
+``setup.sh`` refuses an older ``python3``; ``training/autodl/tools/remote_job.py`` and the two
+``twin`` modules in the package's ``pylib`` must run (and parse) on it;
+``scripts/check_remote_job.py`` runs the tool under the interpreters CI has, 3.11 and 3.12.3
+(D-630).
+"""
 TORCH: Final = "2.9.1"
 TORCHVISION: Final = "0.24.1"
 TORCHAUDIO: Final = "2.9.1"
@@ -80,6 +88,7 @@ def versions_env() -> str:
     """The pinned versions as ``KEY=value`` lines (``training/autodl/versions.env``)."""
     values = {
         "TWIN_LLAMAFACTORY": LLAMAFACTORY_VERSION,
+        "TWIN_PYTHON_MIN": PYTHON_MIN,
         "TWIN_TORCH": TORCH,
         "TWIN_TORCHVISION": TORCHVISION,
         "TWIN_TORCHAUDIO": TORCHAUDIO,

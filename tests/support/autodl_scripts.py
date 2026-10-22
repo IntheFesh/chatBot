@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -31,6 +32,37 @@ posix_only = pytest.mark.skipif(
     reason="the AutoDL scripts are bash programs for the Linux instance; the static checks "
     "(shellcheck, structure, tool tests) run everywhere",
 )
+
+
+def installed_pythons(minimum: tuple[int, int] = (3, 11)) -> list[tuple[str, str]]:
+    """``(version, executable)`` of every different Python on this machine the instance could run.
+
+    The AutoDL instance has whatever ``python3`` its image ships; LLaMA-Factory 0.9.5 needs 3.11 or
+    newer, so the interpreters that matter are 3.11 and 3.12.0-3.12.6 next to the 3.12 the tests run
+    under (R17-2, D-630).  The test interpreter comes first; each version appears once.
+    """
+    candidates = [sys.executable]
+    for name in ("python3.11", "python3.12", "python3.13", "python3"):
+        for directory in os.get_exec_path():  # every one on the PATH, not only the first
+            found = shutil.which(name, path=directory)
+            if found:
+                candidates.append(found)
+    seen: dict[str, str] = {}
+    for executable in candidates:
+        done = subprocess.run(
+            [executable, "-c", "import sys; print('%d.%d.%d' % sys.version_info[:3])"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        version = done.stdout.strip()
+        if done.returncode != 0 or not version:
+            continue
+        major, minor, _ = (int(part) for part in version.split("."))
+        if (major, minor) >= minimum:
+            seen.setdefault(version, executable)
+    return list(seen.items())
 
 
 def install_scripts(workdir: Path, profile: str, *, dpo_min_pairs: int = 200) -> Path:

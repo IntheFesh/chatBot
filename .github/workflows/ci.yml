@@ -7,6 +7,7 @@ name: ci
 #                             sequential inside (named mutexes and fixed ports are per machine)
 #   coverage (<os>)           merges the coverage data of the shards of one OS and applies the
 #                             unchanged gate (total >= 85 %, each package >= 75 %)
+#   remote-tools (py X)       the instance's job tool under Python 3.11 and 3.12.3 (round 17)
 #   ci gate                   one check that is green only if everything above is
 #
 # Which files a shard runs is computed by scripts/shard_tests.py from the files on disk, never
@@ -217,10 +218,39 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # round 17 (D-630): the job tool of the AutoDL instance (training/autodl/tools/remote_job.py)
+  # runs under the `python3` of the instance image, which is 3.11 or newer (LLaMA-Factory 0.9.5)
+  # and so can be older than the 3.12 of every other job.  `argparse` before 3.12.7 once made
+  # `start ... -- COMMAND` fail on 3.11 and 3.12.0-3.12.6, and no test noticed.  Standard
+  # library only: no project dependencies (pyproject needs 3.12), so `uv run --no-project`.
+  remote-tools:
+    name: remote-tools (py ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12.3"]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+
+      - name: Install Python ${{ matrix.python }}
+        run: uv python install "${{ matrix.python }}"
+
+      - name: remote_job.py under Python ${{ matrix.python }} (start, status, tail, stop)
+        run: uv run --no-project --python "${{ matrix.python }}" python scripts/check_remote_job.py
+
   gate:
     name: ci gate
     if: ${{ always() }}
-    needs: [lint, tests, coverage]
+    needs: [lint, tests, coverage, remote-tools]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -229,6 +259,8 @@ jobs:
           echo "lint: ${{ needs.lint.result }}"
           echo "tests: ${{ needs.tests.result }}"
           echo "coverage: ${{ needs.coverage.result }}"
+          echo "remote-tools: ${{ needs.remote-tools.result }}"
           test "${{ needs.lint.result }}" = success
           test "${{ needs.tests.result }}" = success
           test "${{ needs.coverage.result }}" = success
+          test "${{ needs.remote-tools.result }}" = success

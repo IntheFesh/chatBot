@@ -15,6 +15,7 @@ from pathlib import Path
 import asyncssh
 import pytest
 
+from tests.support.autodl_scripts import installed_pythons
 from tests.support.clock import ManualClock
 from tests.support.ssh_server import PASSWORD, USER, LocalSSHServer
 from tests.support.waiting import wait_until
@@ -397,6 +398,33 @@ async def test_a_job_is_followed_to_its_end_and_reports_the_exit_code(tmp_path: 
         assert ok.ok and "fine" in "".join(seen)
         assert (await jobs.status("j1")).exit_code == 4
         assert (await jobs.status("never")).state == "none"
+
+
+async def test_a_job_is_started_through_the_python3_of_every_instance_image(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): ``python3 remote_job.py start ... --`` on the 3.11 / 3.12.3 of an image.
+
+    The server runs ``python3`` of the command line as the given interpreter; before the fix the
+    start failed with "unrecognized arguments" on the old ones and every remote step died with it.
+    """
+    layout = RemoteLayout("work")
+    for version, executable in installed_pythons():
+        home = tmp_path / version
+        async with (
+            LocalSSHServer(home / "srv", python=executable) as server,
+            session_for(server, home) as session,
+        ):
+            assert session.python == "python3"
+            await install_job_tool(session, layout)
+            jobs = RemoteJobs(session, layout, SystemClock(), poll_seconds=0.05)
+            seen: list[str] = []
+            code = "import sys; print('python', '%d.%d.%d' % sys.version_info[:3], *sys.argv[1:])"
+            outcome = await jobs.run(
+                "old", [executable, "-c", code, "--name", "x"], emit=seen.append
+            )
+            assert outcome.ok, (version, "".join(seen))
+            assert "".join(seen).split() == ["python", version, "--name", "x"]
 
 
 async def test_a_dropped_connection_does_not_stop_the_job_and_the_log_goes_on_from_the_offset(

@@ -1,6 +1,6 @@
 # CI：矩阵分片
 
-`.github/workflows/ci.yml` 把原来的"每个 OS 一个作业顺序跑完全部"拆成四类作业。所有质量门槛的语义不变（ruff、mypy --strict、全部测试、覆盖率 总计 ≥ 85 % 且每个子包 ≥ 75 %、隐私扫描、追溯检查、CLI 冒烟），只是分到不同的虚拟机上并行执行。取舍与理由见 `docs/DECISIONS.md` D-490～D-497。
+`.github/workflows/ci.yml` 把原来的"每个 OS 一个作业顺序跑完全部"拆成五类作业。所有质量门槛的语义不变（ruff、mypy --strict、全部测试、覆盖率 总计 ≥ 85 % 且每个子包 ≥ 75 %、隐私扫描、追溯检查、CLI 冒烟），只是分到不同的虚拟机上并行执行。取舍与理由见 `docs/DECISIONS.md` D-490～D-497。
 
 ## 作业
 
@@ -9,7 +9,8 @@
 | `lint (ubuntu-latest)`、`lint (windows-latest)` | 2 | `uv sync --frozen` → `ruff check` → `ruff format --check` → `mypy src/twin` →（仅 Linux）`mypy src/twin --platform win32` → `privacy_scan.py` → `trace_check.py`（全局一致性）→ `stub_scan.py`（`src/` 里没有桩、占位和玩具实现，白名单 `scripts/stub_scan_allowlist.toml` 逐条写理由）→ `decisions_check.py`（`DECISIONS.md` 的编号唯一、引用的 D-xxx 与测试都存在、取舍表覆盖 SPEC 列出的全部取舍点）→ `shard_tests.py --check-collection` → `twin --help`、`twin doctor`。Windows 上的 mypy 与 `twin doctor` 是原生运行的，不再在每个测试分片里重复。 |
 | `tests (ubuntu-latest, i/3)`、`tests (windows-latest, i/5)` | 3 + 5 | 每片一台独立虚拟机：`uv sync --frozen` → `shard_tests.py` 算出本片的测试文件 → `pytest -q -m "not live" --cov=src/twin -p no:cacheprovider --junitxml=junit.xml <文件…>`。片内顺序执行。上传 `.coverage.<os>.<i>-of-<n>` 与 junit 报告，并在作业摘要里列出本片每个测试文件的耗时。 |
 | `coverage (ubuntu-latest)`、`coverage (windows-latest)` | 2 | `needs: tests`：下载该 OS 全部分片的覆盖率数据 → `shard_tests.py --check-shard-set`（`1-of-n … n-of-n` 一片不缺）→ `coverage combine` → `coverage json -o coverage.json` → `scripts/coverage_gate.py`（门槛与参数没有改）。只装 dev 依赖组，不装 torch 等项目依赖。 |
-| `ci gate` | 1 | `if: always()`，仅当 `lint`、`tests`、`coverage` 全部成功才通过；需要"必需检查"时只设这一项。 |
+| `remote-tools (py 3.11)`、`remote-tools (py 3.12.3)` | 2 | 第 17 轮（D-630）。AutoDL 实例上的作业工具 `training/autodl/tools/remote_job.py` 跑在**实例镜像自带的 `python3`** 上：LLaMA-Factory 0.9.5 要求 3.11 以上，所以可能是 3.11 或 3.12.0–3.12.6，比其它作业用的 3.12.13 旧；这些版本的 `argparse` 曾让 `start … -- 命令` 报 `unrecognized arguments`，所有远程步骤因此失败，而没有哪个测试发现。`uv python install <版本>` → `uv run --no-project --python <版本> python scripts/check_remote_job.py`：只用标准库（项目依赖要求 3.12，所以不装），真实运行 start/status/tail/stop，并按 `TWIN_PYTHON_MIN` 的语法解析实例上运行的全部 Python 文件。主测试里的 `test_autodl_tools.py::test_remote_job_starts_a_command_on_every_installed_python` 在本机枚举的每个解释器上跑同一个脚本（`ubuntu-latest` 自带 3.12.3，所以 `tests (ubuntu-latest, …)` 也能抓到）。 |
+| `ci gate` | 1 | `if: always()`，仅当 `lint`、`tests`、`coverage`、`remote-tools` 全部成功才通过；需要"必需检查"时只设这一项。 |
 
 并发控制不变（同一分支的新推送取消旧运行）。`windows-subset.yml`（只在 `ci/windows-subset.txt` 变化时跑指定测试）保留，用来在几分钟内复现某个 Windows 问题。
 

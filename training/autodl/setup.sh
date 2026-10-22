@@ -3,10 +3,10 @@
 #
 #   setup.sh <profile> [install|verify]
 #
-# install (default)  checks the GPU, the data disk and the memory, makes sure PyTorch is a CUDA
-#                    12.8 build for Blackwell, installs the pinned training packages and
-#                    downloads the base model from ModelScope.  Run it again after an
-#                    interruption: every step skips what is already done.
+# install (default)  checks the Python (3.11 or newer), the GPU, the data disk and the memory,
+#                    makes sure PyTorch is a CUDA 12.8 build for Blackwell, installs the pinned
+#                    training packages and downloads the base model from ModelScope.  Run it
+#                    again after an interruption: every step skips what is already done.
 # verify             runs after decrypt.sh: the template consistency check (R-TRN-011) and a
 #                    one-step trial run whose batch size is lowered until it no longer runs out
 #                    of memory.
@@ -90,6 +90,7 @@ run_install() {
     start_logging setup
     log "profile ${TWIN_PROFILE}: ${TWIN_BASE_MODEL}, ${TWIN_METHOD}"
     mkdir -p "${TWIN_HOME}" "${TWIN_MODELS}"
+    run_python_check || exit 1
     use_data_disk
     run_resource_checks || exit 1
     ensure_zstd

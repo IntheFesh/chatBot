@@ -319,6 +319,72 @@ def test_out_of_memory_is_recognised_in_a_log(env_for, tmp_path: Path) -> None: 
     assert call_function(autodl, env, f"oom_in_log {fine}").returncode == 1
 
 
+@posix_only
+@pytest.mark.parametrize(
+    ("found", "ok"),
+    [
+        ("3.11.0", True),
+        ("3.11.17", True),
+        ("3.12.3", True),
+        ("3.13.1", True),
+        ("3.10.12", False),
+        ("3.9.18", False),
+        ("3.8.10", False),
+    ],
+)
+def test_the_python_of_the_instance_must_be_new_enough_for_llamafactory(  # type: ignore[no-untyped-def]
+    env_for, found: str, ok: bool
+) -> None:
+    """R17-2 (D-630): LLaMA-Factory 0.9.5 needs Python >= 3.11 (``TWIN_PYTHON_MIN``)."""
+    autodl, env = env_for("5090-8b")
+    done = call_function(autodl, env, f"check_python_version {found} $TWIN_PYTHON_MIN")
+    assert (done.returncode == 0) is ok, done.stderr
+    if not ok:
+        assert f"is {found}" in done.stderr and "3.11 or newer" in done.stderr
+        assert "请在 AutoDL 控制台换带 Python 3.11 及以上的镜像" in done.stderr
+
+
+@posix_only
+def test_the_python_version_is_probed_and_recorded(env_for, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """R17-2 (D-630): ``state/python.version`` says which Python the run used."""
+    autodl, env = env_for("5090-8b")
+    real = call_function(autodl, env, "probe_python_version").stdout.strip()
+    assert real == ".".join(str(part) for part in sys.version_info[:3])
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(tmp_path, probe_python_version="echo 3.12.3")
+    done = call_function(autodl, env, "run_python_check")
+    assert done.returncode == 0, done.stderr
+    assert (Path(env["TWIN_HOME"]) / "state" / "python.version").read_text("utf-8") == "3.12.3\n"
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(tmp_path, probe_python_version="echo 3.10.4")
+    old = call_function(autodl, env, "run_python_check")
+    assert old.returncode == 1
+    assert (Path(env["TWIN_HOME"]) / "state" / "python.version").read_text("utf-8") == "3.12.3\n"
+
+
+@posix_only
+def test_setup_install_stops_on_an_old_python_before_it_checks_or_installs_anything(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): the cheapest check is the first one; nothing is installed on a 3.10 image."""
+    workdir = tmp_path / "twin"
+    install_scripts(workdir, "5090-8b")
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path,
+            probe_python_version="echo 3.10.12",
+            # if the order ever changes, the resource check fails before anything is installed
+            probe_free_gb="echo 0",
+            probe_present_gb="echo 0",
+            probe_ram_gb="echo 0",
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "install")
+    assert done.returncode == 1
+    assert "needs Python 3.11 or newer" in done.stderr and "disk:" not in done.stderr
+    assert not (workdir / "state" / "python.version").exists()
+
+
 # ------------------------------------------------------------------------- export plan
 
 

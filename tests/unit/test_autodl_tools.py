@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -12,11 +13,17 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from tests.support.autodl_scripts import AUTODL
+from tests.support.autodl_scripts import AUTODL, ROOT, installed_pythons
 from tests.support.waiting import wait_until_sync as wait_until
+from twin.training import bundle
+from twin.training.profiles import PROFILES
+from twin.training.versions import PYTHON_MIN
 
 TOOLS = AUTODL / "tools"
+CHECK_SCRIPT = ROOT / "scripts" / "check_remote_job.py"
 
 
 def load_tool(name: str) -> ModuleType:
@@ -28,6 +35,16 @@ def load_tool(name: str) -> ModuleType:
     return module
 
 
+def load_script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"script_{name}", ROOT / "scripts" / f"{name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+check_remote_job = load_script("check_remote_job")
 remote_job = load_tool("remote_job")
 summarize_train = load_tool("summarize_train")
 make_eval = load_tool("make_eval_generations")
@@ -222,6 +239,139 @@ def test_start_without_a_command_is_a_usage_error(tmp_path: Path) -> None:
         timeout=30,
     )
     assert done.returncode == 2
+
+
+def run_check(python: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+    command = [python, str(CHECK_SCRIPT)]
+    if root is not None:
+        command += ["--root", str(root)]
+    return subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=180
+    )
+
+
+def test_remote_job_starts_a_command_on_every_installed_python() -> None:
+    """R17-2 (D-630): the tool runs under the Python of the instance, not only under ours.
+
+    ``start ... -- COMMAND`` once failed with "unrecognized arguments" on Python 3.11 and
+    3.12.0-3.12.6 (``argparse`` before 3.12.7 handles ``--`` after the options differently); the
+    tests ran under the newest 3.12 only.  ``scripts/check_remote_job.py`` runs start, status,
+    tail and stop for real under the interpreter that runs it; here under every different Python
+    this machine has (the system 3.11 and 3.12.3 of ``ubuntu-latest`` among them), and CI runs it
+    under 3.11 and 3.12.3 in its own job.
+    """
+    pythons = installed_pythons()
+    assert pythons, "not even the interpreter of the tests is usable"
+    failures = {}
+    for version, executable in pythons:
+        done = run_check(executable)
+        if done.returncode != 0:
+            failures[version] = done.stderr
+        else:
+            assert f"works under Python {version}" in done.stdout
+    assert not failures, failures
+
+
+def test_the_command_may_look_like_options(tmp_path: Path) -> None:
+    """R17-2 (D-630): everything after the first ``--`` is the command, verbatim."""
+    words = ["--name", "x", "--dir", "y", "--", "--env", "K=V", "start", "-h"]
+    code = "import sys, json; print(json.dumps(sys.argv[1:]))"
+    for version, executable in installed_pythons():
+        jobs = tmp_path / f"jobs-{version}"
+        tool = [executable, str(TOOLS / "remote_job.py")]
+        started = subprocess.run(
+            [
+                *tool,
+                "start",
+                "--dir",
+                str(jobs),
+                "--name",
+                "o",
+                "--",
+                executable,
+                "-c",
+                code,
+                *words,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=60,
+        )
+        assert started.returncode == 0, (version, started.stderr)
+        wait_until(lambda jobs=jobs: (jobs / "o" / "exit_code").exists(), timeout=30)
+        assert json.loads((jobs / "o" / "log").read_text("utf-8")) == words, version
+
+
+def test_only_the_first_double_dash_ends_the_options_and_only_start_takes_a_command(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): the split of the arguments is ours, not ``argparse``'s."""
+    head, tail = remote_job.split_command(["start", "--name", "n", "--", "a", "--", "b"])
+    assert (head, tail) == (["start", "--name", "n"], ["a", "--", "b"])
+    assert remote_job.split_command(["status", "--name", "n"]) == (["status", "--name", "n"], [])
+    jobs = str(tmp_path / "jobs")
+    for action in ("status", "tail", "stop"):
+        with_command = [action, "--dir", jobs, "--name", "n", "--", "echo", "hi"]
+        assert remote_job.main(with_command) == 2  # a command only makes sense for start
+    assert remote_job.main(["start", "--dir", jobs, "--name", "n", "--"]) == 2
+    with pytest.raises(SystemExit) as refused:  # words without ``--`` are not a command
+        remote_job.main(["start", "--dir", jobs, "--name", "n", "echo", "hi"])
+    assert refused.value.code == 2
+
+
+@given(
+    head=st.lists(st.text(min_size=1, max_size=8).filter(lambda word: word != "--"), max_size=6),
+    tail=st.lists(st.text(max_size=8), max_size=6),
+)
+def test_the_split_gives_back_what_was_joined(head: list[str], tail: list[str]) -> None:
+    """R17-2 (D-630): whatever the command looks like, it comes out unchanged."""
+    assert remote_job.split_command([*head, "--", *tail]) == (head, tail)
+    assert remote_job.split_command(head) == (head, [])
+
+
+def test_the_check_script_reads_the_minimum_python_and_lists_what_the_instance_runs() -> None:
+    """R17-2 (D-630): one source for the minimum, and the files checked are the files shipped."""
+    check = check_remote_job
+    assert check.minimum_python(ROOT) == tuple(int(part) for part in PYTHON_MIN.split("."))
+    assert check.PYLIB_MODULES == bundle.PYLIB_MODULES
+    uploaded = bundle.plain_upload_files(PROFILES["5090-8b"])
+    tools = {Path(name).name for name in uploaded if name.startswith("autodl/tools/")}
+    listed = {path.name for path in check.instance_files(ROOT)}
+    assert {name for name in tools if name.endswith(".py")} <= listed
+    assert {f"{name}.py" for name in bundle.PYLIB_MODULES} <= listed
+
+
+def copy_instance_files(root: Path) -> None:
+    """A repository with only what ``check_remote_job.py`` looks at."""
+    shutil.copytree(TOOLS, root / "training" / "autodl" / "tools")
+    shutil.copy(AUTODL / "versions.env", root / "training" / "autodl" / "versions.env")
+    package = root / "src" / "twin" / "training"
+    package.mkdir(parents=True)
+    for name in (*check_remote_job.TOOL_MODULES, *bundle.PYLIB_MODULES):
+        shutil.copy(ROOT / "src" / "twin" / "training" / f"{name}.py", package)
+
+
+def test_the_check_refuses_syntax_that_the_minimum_python_cannot_parse(tmp_path: Path) -> None:
+    """R17-2 (D-630): a tool written for 3.12 must not reach an instance with 3.11."""
+    copy_instance_files(tmp_path)
+    clean = run_check(sys.executable, tmp_path)
+    assert clean.returncode == 0, clean.stderr
+    new_syntax = tmp_path / "training" / "autodl" / "tools" / "generic.py"
+    new_syntax.write_text("def first[T](items: list[T]) -> T:\n    return items[0]\n", "utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1
+    assert "training/autodl/tools/generic.py:1" in done.stderr
+    assert f"Python {PYTHON_MIN}" in done.stderr
+
+
+def test_the_check_needs_the_minimum_to_be_written_down(tmp_path: Path) -> None:
+    copy_instance_files(tmp_path)
+    versions = tmp_path / "training" / "autodl" / "versions.env"
+    versions.write_text("TWIN_TORCH=2.9.1\n", encoding="utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1 and "TWIN_PYTHON_MIN" in done.stderr
 
 
 # ------------------------------------------------------------------------- the others

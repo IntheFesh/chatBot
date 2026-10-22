@@ -59,6 +59,20 @@ version_ge() {
     [ "$(printf '%s\n%s\n' "${b}" "${a}" | sort -V | head -n1)" = "${b}" ]
 }
 
+# check_python_version FOUND MIN: success when the Python of the instance is new enough.
+# LLaMA-Factory declares Requires-Python >=3.11 (TWIN_PYTHON_MIN); the tools of the instance
+# (tools/remote_job.py and the others) are written for exactly that and newer.
+check_python_version() {
+    local found="$1" minimum="$2"
+    if version_ge "${found}" "${minimum}"; then
+        log "python: ${found} (${minimum} or newer needed) - ok"
+        return 0
+    fi
+    log "python: ${TWIN_PYTHON} is ${found}, but LLaMA-Factory ${TWIN_LLAMAFACTORY:-?} needs Python ${minimum} or newer" >&2
+    log "请在 AutoDL 控制台换带 Python ${minimum} 及以上的镜像 (choose an image with Python ${minimum} or newer, or point TWIN_PYTHON at one)" >&2
+    return 1
+}
+
 # check_disk_space FREE_GB REQUIRED_GB SPEC_GB: success when the free space is enough.
 check_disk_space() {
     local free="$1" required="$2" spec="$3"
@@ -214,6 +228,11 @@ probe_gpu() {
     nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader | head -n1
 }
 
+# probe_python_version: "major.minor.micro" of TWIN_PYTHON.
+probe_python_version() {
+    "${TWIN_PYTHON}" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])'
+}
+
 # probe_torch: "version cuda arch,arch,..." of the installed PyTorch, or "none none ".
 probe_torch() {
     "${TWIN_PYTHON}" - <<'PY' 2>/dev/null || echo "none none "
@@ -225,6 +244,16 @@ PY
 }
 
 # ------------------------------------------------------------------ combined checks
+
+# run_python_check: the Python is new enough; its version is recorded in state/python.version
+# (what a report of a failed run on another image needs to know).
+run_python_check() {
+    local found
+    found="$(probe_python_version)" || die "${TWIN_PYTHON} cannot be run; the instance needs Python ${TWIN_PYTHON_MIN} or newer"
+    check_python_version "${found}" "${TWIN_PYTHON_MIN}" || return 1
+    mkdir -p "${TWIN_HOME}/state"
+    printf '%s\n' "${found}" >"${TWIN_HOME}/state/python.version"
+}
 
 # run_resource_checks: the disk and memory checks of the profile in profile.env.
 run_resource_checks() {
