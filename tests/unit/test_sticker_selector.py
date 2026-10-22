@@ -460,3 +460,14 @@ def test_a_derived_selector_draws_with_the_generator_it_was_given(
     seen = {base.with_rng(random.Random(n)).choose("开心", "").md5 for n in range(40)}  # type: ignore[union-attr]
     assert len(seen) > 1  # and another generator gives another draw
     assert base.with_rng(random.Random(1)).view == base.view
+
+
+def test_a_selector_can_be_given_the_uses_it_should_start_from(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given = UsageTable({A: [day(2, 12), day(3, 12)]})  # only A, used twice
+    monkeypatch.setattr(
+        UsageTable, "load", classmethod(lambda cls, services: pytest.fail("read again"))
+    )
+    ranked = StickerSelector(services, usage=given, rng=random.Random(1)).rank("开心", "")
+    assert [(c.record.md5, c.uses) for c in ranked] == [(A, 2)]

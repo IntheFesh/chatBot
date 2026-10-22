@@ -465,3 +465,30 @@ def test_a_picture_is_described_by_its_structure_only(svc: Services) -> None:
     voice = MediaRef(junk.sha256, MediaKind.VOICE, junk.size, None, None)
     line = describe_inbound(InboundMessage("m", at, MessageKind.VOICE, media_ref=voice), svc)
     assert "library=" not in line and "mime=" not in line
+
+
+def test_the_edges_of_the_listen_diagnostic_and_of_the_conversation_count(
+    svc: Services, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import sqlite3
+    from datetime import UTC, datetime
+
+    from twin.channel.base import InboundMessage, MediaRef, MessageKind
+    from twin.channel.cli import describe_inbound
+    from twin.ingest.conversations import count_conversations_in_file
+    from twin.storage.media import MediaKind
+
+    ref = MediaRef("ab" * 32, MediaKind.IMAGE, 100, None, None)  # nothing of it is stored
+    at = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    line = describe_inbound(InboundMessage("m", at, MessageKind.IMAGE, media_ref=ref), svc)
+    assert "file=unreadable" in line and "library=none" in line
+    assert f"sha256={'ab' * 4}" in line
+
+    database = tmp_path / "twin.db"
+    database.write_bytes(b"x")
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(sqlite3, "connect", refuse)
+    assert count_conversations_in_file(database) is None

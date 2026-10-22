@@ -710,3 +710,69 @@ def test_the_backfill_gives_every_available_gif_its_first_frame_once(services: S
     assert sticker_row(services, broken).first_frame_sha256 is None
     second = backfill_first_frames(services.db, services.media)
     assert (second.made, second.present, second.failed) == (0, 3, 1)  # again: nothing to do
+
+
+# ------------------------------- the edges of the new code (a gone file, a damaged summary, ...)
+
+
+def test_the_first_frame_cannot_be_made_when_the_file_of_the_gif_is_gone(
+    services: Services,
+) -> None:
+    md5 = add_stored_gif(services, animated_gif())
+    row = sticker_row(services, md5)
+    assert row.sha256 and row.first_frame_sha256
+    services.media.delete(row.sha256)
+    services.media.delete(row.first_frame_sha256)
+    with services.db.transaction() as session:
+        session.get(Sticker, md5).first_frame_sha256 = None  # type: ignore[union-attr]
+    with pytest.raises(FirstFrameError, match="file of the GIF cannot be read"):
+        ensure_first_frame(services.db, services.media, md5)
+
+
+def test_the_summary_of_a_download_says_why_and_when_it_was_stopped(services: Services) -> None:
+    from twin.stickers.download_summary import (
+        DownloadSummary,
+        load_download_summary,
+        save_download_summary,
+    )
+
+    summary = DownloadSummary(
+        at=NOW,
+        attempted=3,
+        available=1,
+        md5_mismatch=0,
+        unavailable=2,
+        reasons={"timeout": 2},
+        stopped=True,
+    )
+    line = summary.describe()
+    assert "尝试 3，可用 1，MD5 不符 0，不可用 2" in line and "原因：timeout × 2" in line
+    assert "被中途停止" in line and "2026-10-09 12:00 UTC" in line
+    save_download_summary(services, summary)
+    assert load_download_summary(services) == summary
+
+
+def test_a_damaged_summary_in_the_settings_is_not_trusted(services: Services) -> None:
+    from twin.stickers.download_summary import SUMMARY_KEY, load_download_summary
+    from twin.storage.settings_store import put_setting
+
+    for damaged in ({"at": "not a date"}, {"attempted": 3}, {"at": NOW.isoformat(), "reasons": 5}):
+        with services.db.transaction(bump_state=False) as session:
+            put_setting(session, SUMMARY_KEY, damaged, clock=services.clock, record_history=False)
+        assert load_download_summary(services) is None
+    with services.db.transaction(bump_state=False) as session:
+        put_setting(session, SUMMARY_KEY, "text", clock=services.clock, record_history=False)
+    assert load_download_summary(services) is None
+
+
+def test_a_picture_too_big_to_be_a_sticker_is_never_read_for_its_md5(
+    services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.stickers.incoming import recognise_library_sticker
+    from twin.stickers.library import MAX_STICKER_BYTES
+
+    def never(self: object, sha256: str) -> bytes:
+        raise AssertionError("a big photo must not be read to look it up")
+
+    monkeypatch.setattr(type(services.media), "read_bytes", never)
+    assert recognise_library_sticker(services, "ab" * 32, MAX_STICKER_BYTES + 1) is None

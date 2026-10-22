@@ -96,5 +96,5 @@ def load_download_summary(services: Services) -> DownloadSummary | None:
         return None
     try:
         return DownloadSummary.from_json(value)
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, AttributeError):
         return None
