@@ -44,6 +44,7 @@ FLAG_VOICE_UNTRANSCRIBED = "voice_untranscribed"
 FLAG_VIDEO_NO_COVER = "video_no_cover"
 FLAG_MEDIA_UNAVAILABLE = "media_unavailable"
 FLAG_UNKNOWN_ITEM_TYPE = "unknown_item_type"
+FLAG_CONVERT_FAILED = "convert_failed"  # the conversion crashed: what is certain was kept (D-682)
 
 
 @dataclass(frozen=True)

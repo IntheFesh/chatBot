@@ -31,6 +31,7 @@ from tests.support.ilink import (
     updates,
 )
 from twin.channel.base import (
+    FLAG_CONVERT_FAILED,
     FLAG_MEDIA_UNAVAILABLE,
     FLAG_UNKNOWN_ITEM_TYPE,
     FLAG_VIDEO_NO_COVER,
@@ -41,7 +42,7 @@ from twin.channel.base import (
 from twin.channel.ilink.inbound import InboundConverter, extract_partial, message_time
 from twin.channel.ilink.wire import PartialText, WireMessage
 from twin.storage.db import Database
-from twin.storage.media import MediaKind
+from twin.storage.media import MediaIntegrityError, MediaKind, MediaStore
 
 GET_UPDATES = f"{API}/ilink/bot/getupdates"
 KEY = bytes(range(1, 17))
@@ -450,9 +451,14 @@ async def test_a_flaky_download_is_retried_before_giving_up(
     assert route.call_count == 2 and received.media_ref is not None
 
 
-async def test_a_crash_while_converting_one_message_does_not_stop_the_batch(
+async def test_a_crash_while_converting_one_message_delivers_it_degraded_and_goes_on(
     api: respx.MockRouter, h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R17-47 (D-682) rewrites the old "converter bug" case, which pinned the loss of the message.
+
+    The cursor advances in the same commit, so a message dropped here was gone for good.  Now
+    it is delivered without what could not be converted (its words stay) and flagged; the
+    failure is still counted, and the next message of the batch is not affected."""
     real = InboundConverter.convert
 
     async def flaky(self: InboundConverter, wire: WireMessage, message_id: str) -> Any:
@@ -468,5 +474,148 @@ async def test_a_crash_while_converting_one_message_does_not_stop_the_batch(
     ]
     api.post(GET_UPDATES).respond(200, json=updates(batch, cursor="C"))
     await h.channel.poll_once()
-    assert [m.text for m in h.store.inbox()] == ["好"]
+    first, second = h.store.inbox()
+    assert (first.id, first.kind, first.text) == ("1", MessageKind.TEXT, "坏")
+    assert first.flags == frozenset({FLAG_CONVERT_FAILED})
+    assert (second.id, second.text, second.flags) == ("2", "好", frozenset())
     assert h.store.item_stats().failures["convert_error"] == 1
+    assert h.store.cursor() == "C"  # the batch was taken in, as before
+
+
+@pytest.mark.parametrize(
+    ("item", "kind", "flags", "text"),
+    [
+        pytest.param(
+            {"type": 2, "image_item": {"media": {"encrypt_query_param": "X"}}},
+            MessageKind.IMAGE,
+            {FLAG_CONVERT_FAILED, FLAG_MEDIA_UNAVAILABLE},
+            None,
+            id="image",
+        ),
+        pytest.param(
+            {"type": 3, "voice_item": {"text": "语音的字"}},
+            MessageKind.VOICE,
+            {FLAG_CONVERT_FAILED},
+            "语音的字",
+            id="voice with a transcript",
+        ),
+        pytest.param(
+            {"type": 3, "voice_item": {"playtime": 3}},
+            MessageKind.VOICE,
+            {FLAG_CONVERT_FAILED, FLAG_VOICE_UNTRANSCRIBED},
+            None,
+            id="voice without one",
+        ),
+        pytest.param(
+            {"type": 4, "file_item": {"file_name": "a.pdf"}},
+            MessageKind.FILE,
+            {FLAG_CONVERT_FAILED},
+            "a.pdf",
+            id="file",
+        ),
+        pytest.param(
+            {"type": 5, "video_item": {"thumb_media": {"encrypt_query_param": "T"}}},
+            MessageKind.VIDEO,
+            {FLAG_CONVERT_FAILED, FLAG_VIDEO_NO_COVER},
+            None,
+            id="video",
+        ),
+        pytest.param(
+            {"type": 99},
+            MessageKind.UNKNOWN,
+            {FLAG_CONVERT_FAILED, FLAG_UNKNOWN_ITEM_TYPE},
+            None,
+            id="unknown",
+        ),
+    ],
+)
+async def test_the_degraded_form_of_each_item_type_keeps_what_is_certain(
+    item: dict[str, Any],
+    kind: MessageKind,
+    flags: set[str],
+    text: str | None,
+    h: Harness,
+) -> None:
+    """R17-47 (D-682): ``InboundConverter.degraded`` never touches the network or the store."""
+    wire = WireMessage.model_validate(message(item, mid=5, created_ms=now_ms(h.clock)))
+    [degraded] = h.channel._poller._converter.degraded(wire, "5").messages
+    assert (degraded.id, degraded.kind, degraded.text) == ("5", kind, text)
+    assert degraded.flags == frozenset(flags) and degraded.media_ref is None
+    assert degraded.quote is None and degraded.item_type == item["type"]
+
+
+async def test_the_degraded_form_numbers_several_items_like_the_normal_one(h: Harness) -> None:
+    """R17-47 (D-682): the ids are the ones ``convert`` would have made (a redelivery matches)."""
+    wire = WireMessage.model_validate(
+        message(
+            text_item("一"),
+            {"type": 11},  # a tool call item is dropped, as in ``convert``
+            {"type": 2, "image_item": {}},
+            mid=8,
+            created_ms=now_ms(h.clock),
+        )
+    )
+    first, second = h.channel._poller._converter.degraded(wire, "8").messages
+    assert (first.id, first.text) == ("8#0", "一") and second.id == "8#1"
+    assert second.kind is MessageKind.IMAGE
+    nothing = h.channel._poller._converter.degraded(WireMessage.model_validate(message(mid=9)), "9")
+    assert nothing.messages == [] and nothing.quote_entries == []
+    quotable = h.channel._poller._converter.degraded(wire, "8").quote_entries
+    assert [text for _, text in quotable] == ["一"]
+
+
+async def test_a_failing_degraded_conversion_still_delivers_an_unknown_message(
+    api: respx.MockRouter, h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-47 (D-682): even the fallback must not lose the message: the last resort is a bare
+    ``unknown`` message with both flags."""
+
+    async def broken(self: InboundConverter, wire: WireMessage, message_id: str) -> Any:
+        raise RuntimeError("converter bug")
+
+    def also_broken(self: InboundConverter, wire: WireMessage, message_id: str) -> Any:
+        raise RuntimeError("fallback bug")
+
+    monkeypatch.setattr(InboundConverter, "convert", broken)
+    monkeypatch.setattr(InboundConverter, "degraded", also_broken)
+    api.post(GET_UPDATES).respond(
+        200, json=updates([message(text_item("字"), mid=3, created_ms=now_ms(h.clock))])
+    )
+    await h.channel.poll_once()
+    [only] = h.store.inbox()
+    assert (only.id, only.kind, only.text) == ("3", MessageKind.UNKNOWN, None)
+    assert only.flags == frozenset({FLAG_CONVERT_FAILED, FLAG_UNKNOWN_ITEM_TYPE})
+
+
+async def test_a_store_that_cannot_be_written_does_not_lose_the_picture_message(
+    api: respx.MockRouter, h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-47 (D-682): an ``OSError`` of the media store (disk full, locked file) is a media
+    failure like a failed download: the message arrives as an image without media."""
+    serve(api, "DL-S", encrypt(KEY, image_bytes("PNG")))
+
+    def full(self: MediaStore, data: Any, kind: MediaKind) -> Any:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(MediaStore, "put", full)
+    [received] = await receive(h, api, image_item("DL-S", hex_key=KEY.hex()))
+    assert received.kind is MessageKind.IMAGE and received.media_ref is None
+    assert received.flags == frozenset({FLAG_MEDIA_UNAVAILABLE})  # not CONVERT_FAILED: the
+    # conversion itself worked, only the media is missing
+    failures = h.store.item_stats().failures
+    assert failures["image.store_failed"] == 1 and "convert_error" not in failures
+
+
+async def test_a_media_error_of_the_store_is_a_store_failure_too(
+    api: respx.MockRouter, h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-47 (D-682): ``MediaError`` (an integrity problem of the store) is handled alike."""
+    serve(api, "DL-E", encrypt(KEY, image_bytes("PNG")))
+
+    def damaged(self: MediaStore, data: Any, kind: MediaKind) -> Any:
+        raise MediaIntegrityError("damaged")
+
+    monkeypatch.setattr(MediaStore, "put", damaged)
+    [received] = await receive(h, api, image_item("DL-E", hex_key=KEY.hex()))
+    assert received.media_ref is None and received.flags == frozenset({FLAG_MEDIA_UNAVAILABLE})
+    assert h.store.item_stats().failures["image.store_failed"] == 1

@@ -14,7 +14,7 @@ import binascii
 import hashlib
 import secrets
 from dataclasses import dataclass
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from cryptography.hazmat.primitives import padding
@@ -134,10 +134,35 @@ def encode_media_key(key: bytes) -> str:
 # -------------------------------------------------------------------- URLs
 
 
+CDN_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def _cdn_url(value: str | None) -> str | None:
+    """A ready-made CDN address from the server: ``http`` or ``https`` with a host, else ``None``.
+
+    Only these two addresses (``full_url``, ``upload_full_url``) may be plain ``http``: what is
+    sent to them is ciphertext and no request to the CDN carries the bearer token.  The hosts that
+    do receive the token (the API base from the login, the redirect host) are https-only
+    (``login.normalise_base_url``, ``login.redirect_base``).  Anything else (``ftp:``, ``file:``,
+    no host, leading blanks) is not used and the address is built from the parameter instead
+    (D-681).
+    """
+    if not value or any(ord(char) <= 0x20 or ord(char) == 0x7F for char in value):
+        return None  # blanks and control characters have no place in an address
+    try:
+        parts = urlsplit(value)
+    except ValueError:  # e.g. an unclosed IPv6 bracket
+        return None
+    if parts.scheme.lower() not in CDN_URL_SCHEMES or not parts.netloc:
+        return None
+    return value
+
+
 def download_url(media: CdnMedia, *, cdn_base: str = CDN_BASE) -> str | None:
-    """The full https URL if the message gave one, else built from ``encrypt_query_param``."""
-    if media.full_url and media.full_url.startswith("https://"):
-        return media.full_url
+    """The full URL if the message gave one, else built from ``encrypt_query_param``."""
+    full = _cdn_url(media.full_url)
+    if full is not None:
+        return full
     if media.encrypt_query_param:
         return (
             f"{cdn_base}/download?encrypted_query_param={quote(media.encrypt_query_param, safe='')}"
@@ -148,8 +173,9 @@ def download_url(media: CdnMedia, *, cdn_base: str = CDN_BASE) -> str | None:
 def upload_url(
     *, upload_full_url: str | None, upload_param: str | None, filekey: str, cdn_base: str = CDN_BASE
 ) -> str | None:
-    if upload_full_url and upload_full_url.startswith("https://"):
-        return upload_full_url
+    full = _cdn_url(upload_full_url)
+    if full is not None:
+        return full
     if upload_param:
         return (
             f"{cdn_base}/upload?encrypted_query_param={quote(upload_param, safe='')}"
@@ -171,7 +197,13 @@ class UploadedImage:
 
 
 class CdnClient:
-    """Downloads and uploads encrypted media on the CDN."""
+    """Downloads and uploads encrypted media on the CDN.
+
+    Both directions follow redirects (D-681): the CDN may answer with one, and nothing sent there
+    carries a credential (ciphertext only; the shared client's ``follow_redirects=False`` still
+    holds for every request that has the bearer token).  Like ``fetch`` in the official client, a
+    301/302/303 turns a POST into a GET, while 307/308 keep the method and the body.
+    """
 
     def __init__(self, http: IlinkHttp, clock: Clock, *, cdn_base: str = CDN_BASE) -> None:
         self._http = http
@@ -183,7 +215,9 @@ class CdnClient:
         last = MediaTransferError("no attempt was made")
         for attempt in range(attempts):
             try:
-                response = await self._http.client.get(url, timeout=CDN_TIMEOUT_S)
+                response = await self._http.client.get(
+                    url, timeout=CDN_TIMEOUT_S, follow_redirects=True
+                )
             except httpx.HTTPError as exc:
                 last = MediaTransferError(type(exc).__name__)
             else:
@@ -215,6 +249,7 @@ class CdnClient:
                     content=ciphertext,
                     headers={"Content-Type": "application/octet-stream"},
                     timeout=CDN_TIMEOUT_S,
+                    follow_redirects=True,
                 )
             except httpx.HTTPError as exc:
                 last = MediaTransferError(type(exc).__name__)

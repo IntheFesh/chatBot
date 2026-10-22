@@ -326,11 +326,74 @@ async def test_an_upload_retries_after_a_dropped_connection(
     assert route.call_count == 2
 
 
-def test_addresses_that_are_not_https_are_never_used() -> None:
-    plain = CdnMedia(full_url="http://cdn.example/x", encrypt_query_param="P")
-    assert download_url(plain) == f"{CDN}/download?encrypted_query_param=P"
-    assert download_url(CdnMedia(full_url="http://cdn.example/x")) is None
+def test_cdn_media_addresses_may_be_plain_http_or_https_and_nothing_else() -> None:
+    """R17-46 (D-681) replaces ``test_addresses_that_are_not_https_are_never_used``.
+
+    The old rule ("only https") was too strict for the CDN: the server may hand out an ``http://``
+    ``full_url`` (the official client uses whatever it is given).  What travels there is ciphertext
+    and carries no token, so ``http`` is accepted for ``full_url`` / ``upload_full_url``; any other
+    scheme (or no host) still falls back to the address built from the parameter.  The hosts that
+    do receive the bearer token stay https-only (``test_ilink_login``: ``baseurl``,
+    ``redirect_host``)."""
+    plain = CdnMedia(full_url="http://cdn.example/x?y=1", encrypt_query_param="P")
+    assert download_url(plain) == "http://cdn.example/x?y=1"
+    assert download_url(CdnMedia(full_url="http://cdn.example/x")) == "http://cdn.example/x"
+    assert download_url(CdnMedia(full_url="HTTPS://cdn.example/x")) == "HTTPS://cdn.example/x"
     assert upload_url(upload_full_url="http://cdn.example/u", upload_param="P", filekey="K") == (
-        f"{CDN}/upload?encrypted_query_param=P&filekey=K"
+        "http://cdn.example/u"
     )
-    assert upload_url(upload_full_url="ftp://cdn.example/u", upload_param=None, filekey="K") is None
+    for bad in (
+        "ftp://cdn.example/x",
+        "file:///etc/passwd",
+        "//cdn.example/x",
+        "cdn.example/x",
+        "https://",
+        "http:///x",
+        "javascript:alert(1)",
+        " http://cdn.example/x",
+        "http://[::1",
+    ):
+        fallback = f"{CDN}/download?encrypted_query_param=P"
+        assert download_url(CdnMedia(full_url=bad, encrypt_query_param="P")) == fallback, bad
+        assert download_url(CdnMedia(full_url=bad)) is None, bad
+        assert upload_url(upload_full_url=bad, upload_param=None, filekey="K") is None, bad
+        assert upload_url(upload_full_url=bad, upload_param="P", filekey="K") == (
+            f"{CDN}/upload?encrypted_query_param=P&filekey=K"
+        ), bad
+
+
+async def test_a_download_follows_a_redirect_to_the_final_address(
+    router: respx.MockRouter, cdn: CdnClient, clock: ManualClock
+) -> None:
+    """R17-46 (D-681): the CDN answers some requests with a redirect (302 for a GET)."""
+    router.get(f"{CDN}/download").respond(302, headers={"location": "http://edge.example/blob/1"})
+    final = router.get("http://edge.example/blob/1").respond(200, content=b"cipher-bytes")
+    got = await drive(cdn.download(f"{CDN}/download?encrypted_query_param=P"), clock)
+    assert got == b"cipher-bytes"
+    sent = final.calls.last.request
+    assert "authorization" not in sent.headers and "x-wechat-uin" not in sent.headers
+
+
+async def test_an_upload_follows_a_method_preserving_redirect_with_its_ciphertext(
+    router: respx.MockRouter, cdn: CdnClient, clock: ManualClock
+) -> None:
+    """R17-46 (D-681): a 307 keeps the POST and its body (like ``fetch`` in the official client)."""
+    router.post(f"{CDN}/upload").respond(
+        307, headers={"location": "https://edge.example/upload/2?k=1"}
+    )
+    final = router.post("https://edge.example/upload/2").respond(
+        200, headers={"x-encrypted-param": "DL-REDIRECTED"}
+    )
+    uploaded = await drive(cdn.upload(f"{CDN}/upload?encrypted_query_param=P", b"cipher"), clock)
+    assert uploaded == "DL-REDIRECTED"
+    request = final.calls.last.request
+    assert request.method == "POST" and request.content == b"cipher"
+    assert "authorization" not in request.headers
+
+
+async def test_a_redirect_that_never_ends_fails_instead_of_looping(
+    router: respx.MockRouter, cdn: CdnClient, clock: ManualClock
+) -> None:
+    router.get(f"{CDN}/loop").respond(302, headers={"location": f"{CDN}/loop"})
+    with pytest.raises(MediaTransferError):
+        await drive(cdn.download(f"{CDN}/loop"), clock)

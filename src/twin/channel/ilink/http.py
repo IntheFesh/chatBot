@@ -27,7 +27,12 @@ TIMEOUT_POLL_MARGIN_S = 5.0
 TIMEOUT_DEFAULT_POLL_S = 35.0
 TIMEOUT_SEND_S = 15.0
 TIMEOUT_QUICK_S = 10.0
-TIMEOUT_QR_S = 15.0
+TIMEOUT_QR = httpx.Timeout(None, connect=TIMEOUT_QUICK_S)
+"""``get_bot_qrcode``: no read timeout (the official client has none, protocol document section
+2.4; a slow answer is not an error, the login has its own deadline), but a host that cannot be
+reached at all still fails after the connect timeout (D-680)."""
+
+TimeoutSpec = float | httpx.Timeout | None
 
 
 class IlinkError(Exception):
@@ -178,7 +183,7 @@ class IlinkHttp:
         *,
         base_url: str,
         token: str | None,
-        timeout_s: float,
+        timeout_s: TimeoutSpec,
         query: dict[str, str] | None = None,
         with_base_info: bool = True,
     ) -> IlinkResponse:
@@ -203,7 +208,7 @@ class IlinkHttp:
         params: dict[str, str],
         *,
         base_url: str,
-        timeout_s: float,
+        timeout_s: TimeoutSpec,
     ) -> IlinkResponse:
         """``GET <base>/ilink/bot/<endpoint>`` without credentials (the login status poll)."""
         url = f"{base_url.rstrip('/')}/ilink/bot/{endpoint}"
@@ -224,7 +229,7 @@ class IlinkHttp:
         url: str,
         *,
         headers: dict[str, str],
-        timeout_s: float,
+        timeout_s: TimeoutSpec,
         params: dict[str, str] | None,
         json_body: dict[str, Any] | None,
     ) -> IlinkResponse:

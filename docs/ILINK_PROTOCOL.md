@@ -441,6 +441,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 - **下载**：优先媒体引用里的 `full_url`；否则
   `<cdn>/download?encrypted_query_param=<urlencode(encrypt_query_param)>`（W:src/cdn/cdn-url.ts:9-11；src/cdn/pic-decrypt.ts:66-73；A:weixin_oc_client.py:65-69）。官方留有开关 `ENABLE_CDN_URL_FALLBACK=true`（服务端以后可能只给 `full_url`）。
 - 其中 `<cdn>` 默认 `https://novac2c.cdn.weixin.qq.com/c2c`。**下载不带任何自定义头**（W:src/cdn/pic-decrypt.ts:11）。
+- **第 17 轮（D-681）**：`full_url` / `upload_full_url` 可以是 `http://` 或 `https://`（官方客户端对服务器给出的地址一视同仁；那里传的是密文、不带 token），其它协议头（`ftp:`、`file:`、无主机、含空白）一律不用，改按参数拼接；CDN 的下载与上传**跟随重定向**（与官方 `fetch` 一致：301/302/303 会把 POST 变成 GET，307/308 保留方法与请求体）。带 bearer token 的主机（登录响应的 `baseurl`、`redirect_host`）仍只接受 https，API 请求不跟随重定向。
 
 ### 7.3 上传流程（出站图片）
 
@@ -736,8 +737,9 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 退避 | §10.4 | `min(60, 2^(n-1)) × U(0.5, 1.5)` 之后**再封顶 60 s**（抖动不会超过上限）；长轮询读超时不退避，但如果一次轮询在不足 1 s 内就返回空结果，补一个 1 s 的停顿，避免对"立刻返回"的服务器空转；客户端读超时 = `longpolling_timeout_ms`（默认 35 s）+ 5 s |
 | 登录失效 | §8、§10.6 | 任何接口的 `ret`/`errcode == -14` → `NEEDS_RELOGIN`（`alerts` 一条 critical、控制台红色面板，一个周期只报一次）；每小时用旧 token 做一次恢复探测（成功或读超时视为恢复，写一条 info 告警）。**HTTP 401/403 不当作 -14**（源码没有这样的约定），按普通错误退避，连续 3 次写 warning |
 | 发送 | §10.6 | 与表一致；补充：结果未知（读超时、5xx、坏响应）的发送**计入**条数，连接失败和被服务器拒绝的不计入；`ret=-2` 之后窗口保持关闭到下一条入站，不再发请求；文字 > 4000 字符或为空直接拒绝（不拆分、不发空串） |
-| 入站 | §6.5 | 一个 `WeixinMessage` 去掉工具调用 item 后只有一个 item → `id = message_id`，多个 → `message_id#<序号>`；**文件不下载**，只取文件名（D-128）；窗口与 context_token 以"用户的任意消息"为准（即使消息里没有可交付的内容）；`create_time_ms` 同时接受毫秒与秒；引用的 `partial_text` 下标按 0 起算【推断：源码示例是 0，未被证实】，有 `quotemd5` 时用它在两种读法里选，没有时取"全局第 n 次" |
-| 地址 | §7.2 | `baseurl`、`redirect_host`、`full_url`、`upload_full_url` 只接受 https |
+| 入站 | §6.5 | 一个 `WeixinMessage` 去掉工具调用 item 后只有一个 item → `id = message_id`，多个 → `message_id#<序号>`；**文件不下载**，只取文件名（D-128）；窗口与 context_token 以"用户的任意消息"为准（即使消息里没有可交付的内容）；`create_time_ms` 同时接受毫秒与秒；引用的 `partial_text` 下标按 0 起算【推断：源码示例是 0，未被证实】，有 `quotemd5` 时用它在两种读法里选，没有时取"全局第 n 次"；转换或媒体库写入失败不丢消息（D-682，第 17 轮）：写入失败按"媒体不可用"降级，其它异常由 `InboundConverter.degraded` 造出不带媒体、带 `convert_failed` 标志的消息照常投递 |
+| 地址 | §7.2 | `baseurl`、`redirect_host` 只接受 https（它们收到 bearer token）；`full_url`、`upload_full_url` 接受 `http://` 与 `https://`（只传密文，D-681，第 17 轮放宽），CDN 下载与上传跟随重定向，API 请求不跟随 |
+| 超时 | §2.4 | `get_bot_qrcode` 不设读超时（官方也没有），连接超时 10 s（`http.TIMEOUT_QR`，D-680，第 17 轮；此前误用 15 s 读超时）；`get_qrcode_status` 仍是 35 s + 5 s |
 | 绑定 | D-012 | 未绑定时消息不处理，只记录第一个发送者和它的 `context_token`；绑定时沿用该 token，所以 `send-test` 在绑定后立刻可用 |
 
 ### 14.1 02c/02d 的实现对照（实现者笔记，不是协议事实）

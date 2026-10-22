@@ -123,6 +123,31 @@ async def test_a_scan_and_confirmation_produce_the_credentials(
     assert polled.headers["ilink-app-id"] == "bot"
 
 
+async def test_the_login_code_request_has_no_read_timeout_but_a_connect_timeout(
+    router: respx.MockRouter, http: IlinkHttp, clock: ManualClock
+) -> None:
+    """R17-45 (D-680): the official client puts no timeout on ``get_bot_qrcode``; a slow answer
+    must not be cut off after 15 s (the whole login has its own deadline), but a host that cannot
+    be reached at all still fails fast."""
+    qr_route = router.post(f"{API}/ilink/bot/get_bot_qrcode").mock(side_effect=[code_response(1)])
+    statuses(router, confirmed())
+    await login(http, clock, ScriptedUI())
+    timeout = qr_route.calls.last.request.extensions["timeout"]
+    assert timeout["read"] is None and timeout["write"] is None
+    assert timeout["connect"] == 10
+
+
+async def test_the_status_poll_keeps_its_read_timeout(
+    router: respx.MockRouter, http: IlinkHttp, clock: ManualClock
+) -> None:
+    """R17-45: only the code request lost its read timeout; the long poll of the scan status
+    keeps the 35 s + 5 s of the official client."""
+    router.post(f"{API}/ilink/bot/get_bot_qrcode").mock(side_effect=[code_response(1)])
+    status_route = statuses(router, confirmed())
+    await login(http, clock, ScriptedUI())
+    assert status_route.calls.last.request.extensions["timeout"]["read"] == 40.0
+
+
 async def test_an_expired_code_is_replaced_up_to_three_codes(
     router: respx.MockRouter, http: IlinkHttp, clock: ManualClock
 ) -> None:
@@ -297,6 +322,10 @@ def test_redirect_hosts_are_validated() -> None:
     assert redirect_base(None, "https://old") == "https://old"
     with pytest.raises(LoginError, match="invalid host"):
         redirect_base("bad host/../x", "https://old")
+    # R17-46 (D-681): only the CDN media URLs may be plain http; hosts that receive the bearer
+    # token (the API base, the redirect host) stay https-only.
+    with pytest.raises(LoginError, match="invalid host"):
+        redirect_base("http://h.example.com", "https://old")
 
 
 # -------------------------------------------------------------------- QR
