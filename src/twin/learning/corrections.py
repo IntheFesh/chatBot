@@ -8,7 +8,8 @@ yes only counts as the answer to the question while the persona has not said any
 "是" in the middle of the conversation is a "是" to whatever she asked).
 
 *Noticing.*  A local rule (:func:`looks_like_correction`) reads the message first - most chat never
-reaches the model - and only a message that matches is judged by DeepSeek
+reaches the model, and the rule favours recall (D-673) - and only a message that matches is judged
+by DeepSeek
 (``correction_check`` template: is this about the way the reply was said?).  A message the model
 does not confirm, a model that is not reachable, a budget that does not allow it: no question.
 
@@ -55,15 +56,50 @@ MAX_REMARK_CHARS = 200  # a longer message is a conversation, not a remark about
 SLASHES = ("/", "／")
 MAX_REPLY_CHARS = 400
 
+# The local rule is a pre-filter that favours recall (D-673): it only decides what is worth one
+# small model call, and DeepSeek's ``correction_check`` is the judge.  The messages are read
+# normalised (white space and punctuation removed, width folded, case folded), so the parts below
+# are plain strings of that text.
+_ADVERB = r"(?:才|从来|根本|一般|肯定|绝对|压根|真的|其实|本来|就)?"
+_NOT = r"(?:不会|不爱|不用|不说|不是|不像|从不|从来不|才不|没有|没)"
+_THIS = r"(?:这么|这样|那么|那样|这种|那种|这个|那个|这类|这句)"
+_SAY = r"(?:说|讲|回|用|写|发|叫|喊)"
+_WORDS = r"(?:话|词|语气|口气|说法|用词|措辞|称呼|口吻|腔调|语调)"
+_MANNER = (
+    r"(?:正式|书面|客气|官方|生硬|啰嗦|机械|刻板|死板|礼貌|严肃|文艺|肉麻|油腻|做作|刻意|僵硬|"
+    r"公式化)"
+)
+_SPEECH = r"(?:说话|讲话|语气|口气|措辞|用词|说法|口吻|腔调|称呼|风格)"
+_ASK_NOT_TO = r"(?:别|不要|不许|不准|少)"
+
 _PATTERNS = tuple(
     re.compile(pattern)
     for pattern in (
-        r"她(?:才|从来|根本|一般|肯定|绝对)?不会(?:这么|这样|那么|那样|用这种)(?:说|讲|回|讲话|说话|语气)",
-        r"她不(?:是)?(?:这么|这样|那么|那样)(?:说话|讲话|说|讲)",
-        r"不像她",
-        r"不是她(?:的)?(?:说话|讲话|语气|口气|风格|方式)",
-        r"(?:别|不要|不许|不准|少)(?:这么|这样|那样|那么)(?:说话|讲话|说|讲|回)",
-        r"(?:说话|语气|口气|风格)(?:方式)?(?:不对|不像)",
+        # 她 + not + "this way" + a way of speaking / a manner: 她不会这么说, 她没这么正式
+        rf"她{_ADVERB}{_NOT}{_THIS}(?:{_SAY}|{_WORDS}|{_MANNER})",
+        # 她 + not + say/use + (this) + words: 她不会说这种话, 她从来不用这个词
+        rf"她{_ADVERB}{_NOT}{_SAY}{_THIS}?{_WORDS}",
+        # her way of speaking + not + "this way": 她说话没这么正式, 她的语气不是这样的
+        rf"她(?:的)?{_SPEECH}{_ADVERB}{_NOT}{_THIS}",
+        # not like her / not like a person: 不像她, 不像真人, 不是她会说的
+        r"不像(?:她|真人|个人|人说|人话)",
+        r"不是她(?:的)?(?:说话|讲话|语气|口气|风格|方式|口吻|腔调|说的|会说|会讲|能说)",
+        # how it sounds: 听起来好假, 听起来像机器人, 像客服, ai味, 书面腔
+        r"听起来(?:很|好|太|有点|特别|挺|都)?(?:假|不像|像|机器|书面|生硬|刻意|官方|客服|奇怪|怪)",
+        r"像(?:个|是)?(?:机器人|客服|ai|助手|机器)",
+        r"(?:ai|书面|客服|机器|翻译|官方|公文)(?:腔|味)",
+        # too formal / too polite: 太正式了, 这么客气, 好生硬, 太假
+        rf"(?:太|这么|好|很|有点|特别|过于|过分){_MANNER}",
+        r"(?:太|好|很|有点|特别)假",
+        # her way of speaking is off: 语气不对, 说话不像, 措辞太生硬, 说法有点怪
+        rf"{_SPEECH}(?:方式)?(?:不对|不像|不太对|不太像|不自然|不对劲|有点怪|很怪|怪怪的|太|"
+        r"没这么|不够|有问题)",
+        # asking for another way: 别这么说话, 别用这种语气, 换个语气
+        rf"{_ASK_NOT_TO}(?:这么|这样|那样|那么)(?:说话|讲话|说|讲|回|客气|正式|书面|严肃|啰嗦)",
+        rf"{_ASK_NOT_TO}{_SAY}{_THIS}{_WORDS}",
+        rf"(?:换|改)(?:个|种|一种|一下|下)(?:{_WORDS}|说话方式|说话的方式)",
+        # saying what she would say: 她一般会说哈哈, 她平时都回好呀
+        r"她(?:一般|通常|平时|平常|应该|肯定|大概|多半|总是|一定|都){1,2}(?:会)?(?:说|回|讲)",
     )
 )
 _FILLER = re.compile(r"[\s,.!?;:~，。！？；：、…]+")

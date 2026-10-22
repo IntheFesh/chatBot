@@ -18,6 +18,8 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from hypothesis import given
+from hypothesis import strategies as st
 from sqlalchemy import select
 
 from tests.support.clock import ManualClock
@@ -101,6 +103,108 @@ def test_a_remark_about_the_wording_is_noticed_by_the_local_rule(text: str) -> N
     ],
 )
 def test_ordinary_chat_is_not_taken_for_a_correction(text: str) -> None:
+    assert not looks_like_correction(text)
+
+
+# R17-23 (D-673): the local rule is a recall-oriented pre-filter, DeepSeek's correction_check is
+# the judge, so it must let the usual ways of saying "this is not how she talks" through
+RECALLED_REMARKS = [
+    "她不会说这种话",
+    "她从来不说这种话",
+    "她不会用这个词",
+    "她不会用这种语气",
+    "她说话没这么正式",
+    "她说话才不这样",
+    "她的语气不是这样的",
+    "她没这么客气",
+    "她不是这种语气",
+    "不是她会说的",
+    "这不是她说的",
+    "不像真人",
+    "这不像人话",
+    "听起来好假",
+    "听起来不像她",
+    "听起来像机器人",
+    "你像客服一样",
+    "ai味太重了",
+    "书面腔",
+    "太正式了",
+    "太书面了吧",
+    "这么客气干嘛",
+    "好生硬啊",
+    "有点啰嗦",
+    "太机械了",
+    "好假",
+    "语气不对",
+    "语气太冲了",
+    "措辞不太对",
+    "用词不对",
+    "说法有点怪",
+    "别用这种语气",
+    "别用这个词",
+    "不要说这种话",
+    "别这么客气",
+    "换个语气",
+    "换种说法吧",
+    "她平时都回哈哈",
+    "她一般会说哈哈哈",
+    "她应该说好呀",
+]
+
+
+@pytest.mark.parametrize("text", RECALLED_REMARKS)
+def test_the_usual_ways_of_saying_she_does_not_talk_like_that_are_noticed(text: str) -> None:
+    """R17-23: fails before the fix (the rule only knew "不会这么/这样/那么/那样/用这种 + 说")."""
+    assert looks_like_correction(text), text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "她不会来了",
+        "哈哈哈",
+        "她说话声音好听",
+        "她不会游泳",
+        "她一般不吃辣",
+        "她平时都在学校",
+        "太好吃了",
+        "今天太累了",
+        "这个太贵了",
+        "语气词太多了",
+        "我们说话算数",
+        "我不会用这个软件",
+        "她不是我同学",
+        "我想去吃饭",
+        "你像我哥",
+        "换个地方吃饭吧",
+        "我真假分不清",
+    ],
+)
+def test_ordinary_remarks_are_not_taken_for_a_correction_either(text: str) -> None:
+    assert not looks_like_correction(text), text
+
+
+@given(
+    st.sampled_from(RECALLED_REMARKS),
+    st.lists(
+        st.sampled_from(["", "", " ", "\u3000", "，", "。", "！", "?", "~", "…"]), min_size=60
+    ),
+)
+def test_spacing_punctuation_and_width_do_not_hide_a_remark(text: str, fillers: list[str]) -> None:
+    """R17-23 hypothesis: the rule reads the message without white space and punctuation."""
+    spread = "".join(fillers[i] + char for i, char in enumerate(text))
+    assert looks_like_correction(spread), spread
+    assert looks_like_correction(text.upper().replace("AI", "ＡＩ"))
+
+
+@given(
+    st.text(
+        alphabet=list("今天好累呀吃饭睡觉我们去玩哈嗯哦的了吗呢吧a1 ，。！"),
+        min_size=0,
+        max_size=40,
+    )
+)
+def test_chat_without_a_word_about_her_way_of_talking_is_not_a_remark(text: str) -> None:
     assert not looks_like_correction(text)
 
 
