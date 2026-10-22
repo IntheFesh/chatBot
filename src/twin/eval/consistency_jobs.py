@@ -73,8 +73,6 @@ async def handle_consistency(ctx: JobContext) -> None:
         raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
-    finally:
-        await runtime.client.aclose()
     if outcome.findings:
         services.alerts.raise_alert(
             REVIEW_ALERT,

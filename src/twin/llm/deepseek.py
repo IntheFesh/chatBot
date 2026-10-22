@@ -25,9 +25,12 @@ Messages and replies are never logged above DEBUG level; at DEBUG the logger red
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hashlib
+import hmac
 import json
 import random
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
@@ -46,6 +49,7 @@ from twin.llm.errors import (
     InsufficientBalanceError,
     InvalidRequestError,
     LlmConfigError,
+    LoopAffinityError,
     RetriesExhaustedError,
     StructuredOutputError,
 )
@@ -83,6 +87,7 @@ from twin.llm.scope import current_call_scope
 from twin.llm.tokens import TokenEstimator
 from twin.llm.types import (
     DAILY,
+    LIVE_PURPOSES,
     OFFLINE_PURPOSES,
     ChatMessage,
     ChatResult,
@@ -284,6 +289,26 @@ def parse_usage(raw: Mapping[str, Any]) -> Usage:
 # ----------------------------------------------------------------------------- client
 
 
+def _digest(secret: str) -> bytes:
+    """SHA-256 of a key: what is compared and remembered instead of a second copy of the key."""
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+
+@dataclass
+class _Connection:
+    """The SDK client of one API key, and how many requests are using it right now."""
+
+    sdk: openai.AsyncOpenAI
+    secret: str  # kept to scrub the key out of error messages of the requests on this connection
+    digest: bytes
+    leases: int = 0
+    retired: bool = False
+
+    async def close(self) -> None:
+        with contextlib.suppress(Exception):  # a connection that cannot close is gone anyway
+            await self.sdk.close()
+
+
 class DeepSeekClient:
     """Async client for the DeepSeek chat API with budget, ledger and safety built in."""
 
@@ -320,8 +345,7 @@ class DeepSeekClient:
         self._health = health
         self._breaker.listen(on_open=self._on_circuit_open)
         if health is not None:
-            self._breaker.listen(on_open=lambda _failures: health.breaker_opened())
-            self._breaker.listen(on_close=health.breaker_closed)
+            health.register_breaker(self._breaker)  # the health check reads its state (D-701)
         self._estimator = estimator or TokenEstimator()
         self._cache = cache_monitor
         self._budget = budget
@@ -331,9 +355,14 @@ class DeepSeekClient:
         self._redactor = redactor
         self._save_calibration = save_calibration
         self._deadline_slack_s = deadline_slack_s
+        # offline work may hold all but one of the slots; the last is for the live conversation
+        self._offline_slots = max(1, config.max_concurrency - 1)
+        # the limits and the connection pool belong to one event loop: see :meth:`_enter`
+        self._loop: asyncio.AbstractEventLoop | None = None
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
-        self._sdk: openai.AsyncOpenAI | None = None
-        self._secret: str = ""
+        self._offline_semaphore = asyncio.Semaphore(self._offline_slots)
+        self._conn: _Connection | None = None  # what new requests use (see ``_lease``)
+        self._closing: set[asyncio.Future[None]] = set()  # retired connections being closed
         self._warned: set[str] = set()
         self._alerted_at: dict[str, float] = {}
         self._unsaved_samples = 0
@@ -363,18 +392,138 @@ class DeepSeekClient:
             return self._config.offline_model
         return self._config.chat_model
 
-    def _client(self) -> openai.AsyncOpenAI:
-        if self._sdk is None:
-            self._secret = self._api_key()
-            self._sdk = openai.AsyncOpenAI(
-                base_url=self._config.base_url, api_key=self._secret, max_retries=0
-            )
-        return self._sdk
+    # -------------------------------------------------------------- the connection
+
+    def _lease(self) -> _Connection:
+        """The connection a request will use, made (and the key read) on first use.
+
+        A request holds its lease from here until it has its answer.  When the key changes, the
+        connection that carries the old one is retired: requests already on it finish, new ones
+        get a fresh connection, and the retired one is closed when the last lease is returned
+        (D-702).
+        """
+        conn = self._conn
+        if conn is None:
+            secret = self._api_key()
+            conn = _Connection(sdk=self._make_sdk(secret), secret=secret, digest=_digest(secret))
+            self._conn = conn
+        conn.leases += 1
+        return conn
+
+    def _make_sdk(self, secret: str) -> openai.AsyncOpenAI:
+        return openai.AsyncOpenAI(base_url=self._config.base_url, api_key=secret, max_retries=0)
+
+    async def _return(self, conn: _Connection) -> None:
+        """Give a lease back; the last one of a retired connection closes it."""
+        conn.leases -= 1
+        if conn.retired and conn.leases == 0:
+            await conn.close()
+
+    def reset_key(self) -> None:
+        """Drop the connection that holds the API key: the next request reads the key again.
+
+        Requests in flight are not cut off; their connection is closed when they are done.  Used
+        when the key was replaced or deleted (:meth:`refresh_key`) and when DeepSeek rejects it.
+        """
+        conn, self._conn = self._conn, None
+        if conn is None:
+            return
+        conn.retired = True
+        if conn.leases == 0:  # nothing on it: closing is a coroutine, so hand it to the loop
+            self._retire_idle(conn)
+
+    def _retire_idle(self, conn: _Connection) -> None:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return  # its pool died with its loop
+        task = loop.create_task(conn.close())
+        self._closing.add(task)
+        task.add_done_callback(self._closing.discard)
+
+    async def refresh_key(self) -> bool:
+        """Compare the key in the credential store with the one in use; ``True`` if it changed.
+
+        The store is read in a thread (the Windows credential manager blocks) and only a SHA-256
+        of what it says is compared with the one of the key in use: no second copy of the key is
+        kept and nothing about it is logged.  A key that was deleted or cannot be read counts as
+        changed, so the next request fails at once with the store's clear message instead of
+        going on with a key that is gone.
+        """
+        conn = self._conn
+        if conn is None:
+            return False  # not used yet: the first request reads the key anyway
+        try:
+            fresh: bytes | None = await asyncio.to_thread(self._digest_of_stored_key)
+        except Exception as exc:  # deleted, or the store is unavailable: either way, start over
+            log.warning("deepseek_key_unreadable", reason=type(exc).__name__)
+            fresh = None
+        if conn is not self._conn:
+            return False  # replaced while we were reading
+        if fresh is not None and hmac.compare_digest(fresh, conn.digest):
+            return False
+        self.reset_key()
+        log.info("deepseek_key_changed", readable=fresh is not None)
+        return True
+
+    def _digest_of_stored_key(self) -> bytes:
+        return _digest(self._api_key())
+
+    async def on_state_change(self, old_version: int, new_version: int) -> None:
+        """The state watcher's call (``twin secrets set`` bumps the version): look at the key."""
+        await self.refresh_key()
 
     async def aclose(self) -> None:
-        if self._sdk is not None:
-            await self._sdk.close()
-            self._sdk = None
+        """Close the connection (after the requests in flight); a later request opens a new one."""
+        if self._health is not None:
+            self._health.unregister_breaker(self._breaker)
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            conn.retired = True
+            if conn.leases == 0:
+                await conn.close()
+        if self._closing:
+            await asyncio.gather(*self._closing, return_exceptions=True)
+
+    def _enter(self) -> None:
+        """Bind the client to the running event loop and make sure the health record sees it.
+
+        The SDK's connection pool and a contended semaphore belong to the loop they were used on.
+        The application has one loop, but a command may call ``asyncio.run`` several times and
+        every test has a loop of its own.  When the loop has changed and the old one is over, the
+        pool and the limits are made again for the new one; when the old one is still running
+        (another thread), sharing would corrupt both, so that is an error (D-701).
+        """
+        if self._health is not None:
+            self._health.register_breaker(self._breaker)  # again, if the client was closed
+        loop = asyncio.get_running_loop()
+        if loop is self._loop:
+            return
+        previous = self._loop
+        if previous is not None and previous.is_running():
+            raise LoopAffinityError(
+                "the DeepSeek client is in use on another running event loop; "
+                "one process shares one client on one loop"
+            )
+        if previous is not None:
+            self._conn = None  # its connections died with the old loop
+        self._loop = loop
+        self._semaphore = asyncio.Semaphore(self._config.max_concurrency)
+        self._offline_semaphore = asyncio.Semaphore(self._offline_slots)
+
+    @contextlib.asynccontextmanager
+    async def _slot(self, purpose: Purpose) -> AsyncIterator[None]:
+        """A concurrency slot: the live conversation may use all of them, the rest all but one.
+
+        The offline limit is taken first, so a call that is waiting for it holds no slot of the
+        shared limit and cannot keep the reply out (R-NFR-001, D-701).  With a single slot
+        nothing can be kept back: everything shares it.
+        """
+        if purpose in LIVE_PURPOSES or self._offline_slots >= self._config.max_concurrency:
+            async with self._semaphore:
+                yield
+            return
+        async with self._offline_semaphore, self._semaphore:
+            yield
 
     def _alert(
         self,
@@ -465,7 +614,14 @@ class DeepSeekClient:
         )
         working = normalize_messages(raw_messages)
 
+        use_json = json_mode or json_schema is not None
         thinking = self._gate(purpose, thinking, tag)
+        if use_json and thinking and not caps.json_in_thinking:
+            # the probe found that this API turns JSON down in thinking mode (D-117): ask without
+            # thinking instead of failing on every call (the probe itself passes the documented
+            # capabilities, so it keeps testing thinking)
+            log.info("thinking_disabled_for_json", purpose=purpose.value)
+            thinking = False
         effort = reasoning_effort or self._config.reasoning_effort
 
         image_count = count_images(working)
@@ -485,7 +641,6 @@ class DeepSeekClient:
         if total_images and self._pricing.resolve(chosen) not in VISION_MODELS:
             raise LlmConfigError(f"model {chosen!r} cannot read images")
 
-        use_json = json_mode or json_schema is not None
         if use_json:
             working = with_json_instruction(working, json_schema)
         sent, redacted = redact_messages(working, redactor or self._redactor)
@@ -560,29 +715,35 @@ class DeepSeekClient:
         image_count: int,
     ) -> ChatResult:
         attempts = 0
+        self._enter()
         while True:
             attempts += 1
             self._breaker.before_call()
             started_at = self._clock.now_utc()
             started = self._clock.monotonic()
+            conn: _Connection | None = None
             try:
-                async with self._semaphore:
-                    async with asyncio.timeout(timeout_s + self._deadline_slack_s):
-                        response = await self._client().chat.completions.create(
-                            timeout=timeout_s, **body.kwargs
-                        )
+                async with self._slot(purpose):
+                    conn = self._lease()
+                    try:
+                        async with asyncio.timeout(timeout_s + self._deadline_slack_s):
+                            response = await conn.sdk.chat.completions.create(
+                                timeout=timeout_s, **body.kwargs
+                            )
+                    finally:
+                        await self._return(conn)
             except asyncio.CancelledError:
                 self._breaker.abandon()
                 raise
             except Exception as exc:
-                failure = self._failure_of(exc)
+                failure = self._failure_of(exc, conn.secret if conn is not None else "")
                 if failure is None:
                     self._breaker.abandon()
                     raise
                 if not failure.retryable:
                     self._breaker.record_success()  # the service answered
                     self._note_attempt(failure.kind not in (FailureKind.AUTH, FailureKind.BALANCE))
-                    self._raise_for(failure)
+                    self._raise_for(failure, conn)
                 self._breaker.record_failure()
                 self._note_attempt(False)
                 log.warning(
@@ -624,16 +785,17 @@ class DeepSeekClient:
         if self._health is not None:
             self._health.record(ok)
 
-    def _failure_of(self, exc: BaseException) -> Failure | None:
-        secrets = (self._secret,) if self._secret else ()
+    def _failure_of(self, exc: BaseException, secret: str) -> Failure | None:
+        secrets = (secret,) if secret else ()
         if isinstance(exc, TimeoutError):
             return Failure(FailureKind.TIMEOUT, True, None, "request timed out")
         return classify(exc, secrets)
 
-    def _raise_for(self, failure: Failure) -> None:
+    def _raise_for(self, failure: Failure, conn: _Connection | None) -> None:
         """Turn a non-retryable failure into its exception (and alert where it matters)."""
         if failure.kind is FailureKind.AUTH:
-            self._sdk = None  # the key may have been replaced: read it again next time
+            if conn is not None and conn is self._conn:
+                self.reset_key()  # the key may have been replaced: read it again next time
             self._alert(
                 "llm_auth",
                 "llm_auth",

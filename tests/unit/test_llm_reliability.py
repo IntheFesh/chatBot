@@ -152,6 +152,33 @@ def test_half_open_lets_one_probe_through_and_the_outcome_decides(clock: ManualC
     breaker.before_call()  # closed again: calls flow
 
 
+def test_a_failed_probe_does_not_announce_the_same_outage_again(clock: ManualClock) -> None:
+    """R17-10 (D-701): ``on_open`` is the CLOSED -> OPEN edge, not every re-arm of the timer."""
+    opened: list[int] = []
+    closed: list[bool] = []
+    breaker = CircuitBreaker(
+        clock, failure_threshold=3, on_open=opened.append, on_close=lambda: closed.append(True)
+    )
+    for _ in range(3):
+        breaker.before_call()
+        breaker.record_failure()
+    assert opened == [3]
+    for _ in range(4):  # four probes in a row fail: the outage is the same one
+        clock.tick(301)
+        breaker.before_call()
+        breaker.record_failure()
+        assert breaker.state is BreakerState.OPEN
+    assert opened == [3] and closed == []
+    clock.tick(301)
+    breaker.before_call()
+    breaker.record_success()
+    assert closed == [True]
+    for _ in range(3):  # a new outage is announced again
+        breaker.before_call()
+        breaker.record_failure()
+    assert opened == [3, 3]
+
+
 def test_an_abandoned_probe_frees_the_slot(clock: ManualClock) -> None:
     breaker = CircuitBreaker(clock, failure_threshold=1)
     breaker.before_call()

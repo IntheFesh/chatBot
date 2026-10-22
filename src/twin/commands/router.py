@@ -171,7 +171,9 @@ class CommandRouter:
         register_builtin(
             registry, CommandDeps(sources, turn_store, feedback_store, forget, forget_sharing)
         )
-        views = data or LazyViewSource(lambda: LiveDataSource(services, memory=known_memory))
+        views = data or LazyViewSource(
+            lambda: LiveDataSource(services, memory=known_memory, estimator=llm.estimator)
+        )
         learner = recorder or NotLikeRecorder(
             turn_store,
             feedback_store,

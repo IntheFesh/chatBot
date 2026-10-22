@@ -121,6 +121,11 @@ class AsOfSource:
     ) -> None:
         self._services = services
         self._memory = memory or Memory(services)
+        # Deliberately not calibrated (D-703): the training export and the evaluation read this
+        # view (iron rule 13), and what they build must be the same on every run.  A calibration
+        # factor moves with every paid reply, so trimming with it would make the same moment
+        # render a different memory block tomorrow.  The live view takes the calibrated
+        # estimator of the running client instead.
         self._assembler = MemoryAssembler(self._memory)
         self._memory.refresh()
         self._place = LocalPlace.create(services)

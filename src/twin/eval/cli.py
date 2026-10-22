@@ -87,7 +87,7 @@ from twin.eval.summary_report import VERDICT_WORDS, write_report
 from twin.eval.ui import BlindSession, KeySource, TerminalKeys
 from twin.llm.errors import LlmError
 from twin.llm.onetime import BatchStatus
-from twin.llm.runtime import build_llm_runtime
+from twin.llm.runtime import build_llm_runtime, closing_llm_runtime
 from twin.memory.api import Memory
 from twin.ops.cost import CostReportError, parse_month
 from twin.ops.foreground import run_jobs_until_idle
@@ -586,10 +586,7 @@ def _print_audit_result(console: Console, run: RunView) -> None:
 
 async def _audit_now(services: Services, days: int | None) -> AuditOutcome:
     runtime = build_llm_runtime(services)
-    try:
-        return await run_audit(services, runtime.client, days=days)
-    finally:
-        await runtime.client.aclose()
+    return await closing_llm_runtime(services, run_audit(services, runtime.client, days=days))
 
 
 def _run_to_review(store: EvalStore, cstore: ConsistencyStore) -> RunView | None:

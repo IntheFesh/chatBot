@@ -171,7 +171,9 @@ def build_engine(
     clock = services.clock
     time = time_service_for(services)
     chance = rng or random.Random()  # noqa: S311 - her pacing and word choice, not security
-    source = LiveDataSource(services, time_service=time, rng=chance)
+    # the memory block is trimmed with the estimator the client calibrates on every paid reply:
+    # the process's one (D-701), so a measured factor narrows the block (D-703)
+    source = LiveDataSource(services, time_service=time, rng=chance, estimator=llm.estimator)
     writer = pipeline or ReplyPipeline.from_services(
         services, llm, extra_backends=styled.backends, rng=chance
     )

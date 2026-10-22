@@ -406,6 +406,7 @@ class LlmProbe:
         successes = {False: 0, True: 0}
         parse_failures = {False: 0, True: 0}
         api_failures = {False: 0, True: 0}
+        rejected = {False: 0, True: 0}  # 400/422: the API said no, which is not a hiccup
         for thinking in (False, True):
             for index in range(samples):
                 label = f"json_{'on' if thinking else 'off'}_{index + 1}"
@@ -428,6 +429,11 @@ class LlmProbe:
                     raise ProbeAborted(str(exc)) from exc
                 except StructuredOutputError as exc:
                     parse_failures[thinking] += 1
+                    out.requests.append(self._failed(label, started, exc))
+                    continue
+                except InvalidRequestError as exc:
+                    api_failures[thinking] += 1
+                    rejected[thinking] += 1
                     out.requests.append(self._failed(label, started, exc))
                     continue
                 except LlmError as exc:
@@ -457,12 +463,19 @@ class LlmProbe:
             "thinking_on_parse_failures": parse_failures[True],
             "thinking_off_api_failures": api_failures[False],
             "thinking_on_api_failures": api_failures[True],
+            "thinking_off_invalid_request": rejected[False],
+            "thinking_on_invalid_request": rejected[True],
         }
         out.passed = successes[False] == samples and successes[True] == samples
         if successes[True] != samples:
             out.notes.append(
                 f"JSON with thinking enabled parsed {successes[True]} of {samples} times; "
                 "the proactive planner depends on it"
+            )
+        if rejected[True]:
+            out.notes.append(
+                f"the API rejected {rejected[True]} of {samples} JSON requests with thinking "
+                "enabled (400/422); the client will answer such calls without thinking"
             )
         if successes[False] != samples:
             out.notes.append(f"JSON with thinking disabled parsed {successes[False]} of {samples}")
@@ -618,8 +631,14 @@ def derive_capabilities(checks: list[CheckResult], at: datetime) -> LlmCapabilit
     gif_ok = vision.metrics.get("gif_ok") if vision.ran else None
     gif_rejected = bool(vision.metrics.get("gif_rejected")) if vision.ran else False
     json_check = by_id["json_output"]
+    # JSON in thinking mode is "not usable" on evidence only: replies that did not parse, or the
+    # API answering 400/422 to the request (it says no every time).  A 5xx, a rate limit or a
+    # timeout says nothing about thinking mode and leaves the default (D-117, round 17).
     json_on = (
-        json_check.metrics.get("thinking_on_parse_failures", 0) == 0 if json_check.ran else None
+        json_check.metrics.get("thinking_on_parse_failures", 0) == 0
+        and json_check.metrics.get("thinking_on_invalid_request", 0) == 0
+        if json_check.ran
+        else None
     )
     table = by_id["image_tokens"].metrics.get("per_image") if by_id["image_tokens"].ran else None
     return LlmCapabilities(

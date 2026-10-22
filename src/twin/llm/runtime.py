@@ -5,10 +5,19 @@ ledger, budget manager, token estimator, one-time batches and the DeepSeek clien
 :class:`~twin.services.Services` container, and registers the production off-peak policy with
 the job queue (R-ARCH-003, R-LLM-007).  :func:`activate_offpeak_policy` does only that last step
 and needs no API key: the job worker calls it before it starts.
+
+There is **one runtime per container** (D-701, round 17): the engine, every job handler, the
+sticker description, the commands and the health check all ask for it and get the same object,
+so the circuit breaker, the concurrency limit (``deepseek.max_concurrency`` is the limit of the
+process, not of each caller), the token calibration, the budget manager and its events are
+shared.  It is kept in ``services.extras``; whoever ends the process or the command calls
+:func:`close_llm_runtime` - a job never closes it, the others are using it.
 """
 
 from __future__ import annotations
 
+import threading
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -33,6 +42,10 @@ if TYPE_CHECKING:
 log = get_logger("twin.llm.runtime")
 
 DEEPSEEK_SECRET = "deepseek_api_key"  # noqa: S105 - the credential store entry name, not a secret
+EXTRAS_KEY = "llm_runtime"
+# The health check builds the runtime from a worker thread while the application starts it on
+# the loop; one lock for the process is enough, building takes milliseconds.
+_BUILD_LOCK = threading.Lock()
 
 
 @dataclass
@@ -48,6 +61,14 @@ class LlmRuntime:
     budget: BudgetManager
     batches: OneTimeBatches
     client: DeepSeekClient
+
+    async def aclose(self) -> None:
+        """Release the connections.  The runtime stays usable: the client opens them again."""
+        await self.client.aclose()
+
+    async def on_state_change(self, old_version: int, new_version: int) -> None:
+        """A state-watcher listener: notice a replaced or deleted API key (D-702)."""
+        await self.client.on_state_change(old_version, new_version)
 
 
 def _pricing(services: Services) -> Pricing:
@@ -68,7 +89,43 @@ def activate_offpeak_policy(services: Services) -> Pricing:
 
 
 def build_llm_runtime(services: Services, *, style: StyleBackendStatus | None = None) -> LlmRuntime:
-    """Create the LLM layer for this process (the API key is read on the first call)."""
+    """The LLM layer of this process: made on the first call, the same one after that.
+
+    The API key is read when the first request goes out, not here.  ``style`` (who answers "may
+    the style model take over?") is applied to the shared budget manager whenever it is given.
+    """
+    with _BUILD_LOCK:
+        found = services.extras.get(EXTRAS_KEY)
+        if isinstance(found, LlmRuntime):
+            if style is not None:
+                found.budget.set_style_status(style)
+            return found
+        runtime = _make_runtime(services, style)
+        services.extras[EXTRAS_KEY] = runtime
+        return runtime
+
+
+async def close_llm_runtime(services: Services) -> None:
+    """End the shared runtime: close its connections and forget it (the next ask builds anew).
+
+    Called where the process or a command ends (``twin run``, the one-shot commands); calling it
+    when there is none, or twice, does nothing.
+    """
+    with _BUILD_LOCK:
+        found = services.extras.pop(EXTRAS_KEY, None)
+    if isinstance(found, LlmRuntime):
+        await found.aclose()
+
+
+async def closing_llm_runtime[T](services: Services, work: Awaitable[T]) -> T:
+    """Await ``work``, then close the shared runtime: the coroutine of a one-shot command."""
+    try:
+        return await work
+    finally:
+        await close_llm_runtime(services)
+
+
+def _make_runtime(services: Services, style: StyleBackendStatus | None) -> LlmRuntime:
     settings = services.settings
     clock = services.clock
     pricing = activate_offpeak_policy(services)

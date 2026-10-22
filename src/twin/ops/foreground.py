@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 
-from twin.llm.runtime import activate_offpeak_policy
+from twin.llm.runtime import activate_offpeak_policy, close_llm_runtime
 from twin.ops.jobs import HandlerRegistry, JobQueue, RunSummary, Worker
 from twin.services import Services
 
@@ -45,6 +45,8 @@ async def run_jobs_until_idle(
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         raise
+    finally:
+        await close_llm_runtime(services)  # the jobs shared the process's one client (D-701)
     if on_tick is not None:
         await on_tick()
     return task.result()

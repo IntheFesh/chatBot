@@ -158,10 +158,7 @@ async def queue_missing_plans(services: Services, result: ExportResult) -> PlanQ
     store.register(result.missing_plans)
     wanted = sorted({*result.missing_plans, *store.pending_ids()})
     runtime = build_llm_runtime(services)
-    try:
-        return await asyncio.to_thread(queue_plan_batches, services, runtime, wanted)
-    finally:
-        await runtime.client.aclose()
+    return await asyncio.to_thread(queue_plan_batches, services, runtime, wanted)
 
 
 def summary_of(result: ExportResult) -> dict[str, Any]:

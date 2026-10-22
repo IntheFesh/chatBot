@@ -6,9 +6,11 @@ run, the documented behaviour is assumed.  The values change what the client sen
 
 * ``detail_supported`` false - :class:`~twin.llm.images.ImageInput` stops sending ``detail``;
 * ``gif_supported`` false - a GIF is reduced to its first frame (as PNG) before sending;
-* ``json_in_thinking`` false - structured calls with thinking enabled are refused by
-  :meth:`DeepSeekClient.chat_json` instead of failing at random (the proactive planner needs
-  to know);
+* ``json_in_thinking`` false - the probe saw JSON replies in thinking mode that did not parse,
+  or the API turning such requests down (400/422): :meth:`DeepSeekClient.chat` then asks for
+  JSON *without* thinking (it degrades, as the budget does, and does not refuse), so the
+  proactive planner gets its JSON either way.  A server error or a timeout is no evidence and
+  leaves the default;
 * ``image_tokens`` - measured tokens per image size, used by the estimators.
 """
 

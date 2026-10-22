@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import logging
 import random
+import threading
 from collections.abc import Awaitable, Iterator
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -20,6 +22,7 @@ from tests.support.alerts import RecordingAlerts
 from tests.support.clock import ManualClock
 from tests.support.deepseek import API, TEST_KEY, completion, error, ok, request_json
 from tests.support.synthetic import mobile
+from tests.support.waiting import wait_until
 from twin.config.loader import load_settings
 from twin.config.settings import Settings
 from twin.llm import deepseek as deepseek_module
@@ -43,6 +46,7 @@ from twin.llm.errors import (
     InsufficientBalanceError,
     InvalidRequestError,
     LlmConfigError,
+    LoopAffinityError,
     RetriesExhaustedError,
     StructuredOutputError,
     UnknownModelError,
@@ -522,6 +526,43 @@ def test_json_helpers() -> None:
     assert isinstance(appended, list) and appended[-1]["type"] == "text"  # type: ignore[typeddict-item]
 
 
+async def test_json_in_thinking_mode_is_asked_without_thinking_when_the_probe_found_it_unusable(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-19 (D-117): ``json_in_thinking`` used to be stored and printed, and nothing read it."""
+    rig = Rig(db, clock, capabilities=LlmCapabilities(json_in_thinking=False, measured_at="x"))
+    route = mock(api, ok(content='{"topic": "a", "score": 1}'), ok(content="plain"))
+    result = await rig.client.chat_json([user("x")], Plan, purpose="plan", thinking=True)
+    body = request_json(route.calls.last.request)
+    assert body["thinking"] == {"type": "disabled"} and result.chat.thinking is False
+    assert body["response_format"] == {"type": "json_object"}
+    assert "reasoning_effort" not in body
+    # a call that does not ask for JSON still thinks, and so does the probe (it passes the
+    # documented capabilities to keep measuring thinking mode)
+    await rig.client.chat([user("x")], purpose="plan", thinking=True)
+    assert request_json(route.calls.last.request)["thinking"] == {"type": "enabled"}
+
+
+async def test_json_in_thinking_mode_stays_on_when_nothing_is_known_against_it(
+    rig: Rig, api: respx.MockRouter
+) -> None:
+    route = mock(api, ok(content='{"topic": "a", "score": 1}', reasoning="r"))
+    result = await rig.client.chat_json([user("x")], Plan, purpose="plan", thinking=True)
+    assert request_json(route.calls.last.request)["thinking"] == {"type": "enabled"}
+    assert result.chat.thinking is True
+
+
+async def test_the_probe_can_still_ask_for_json_with_thinking_on(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    rig = Rig(db, clock, capabilities=LlmCapabilities(json_in_thinking=False, measured_at="x"))
+    route = mock(api, ok(content='{"topic": "a", "score": 1}', reasoning="r"))
+    await rig.client.chat_json(
+        [user("x")], Plan, purpose="probe", thinking=True, capabilities=LlmCapabilities()
+    )
+    assert request_json(route.calls.last.request)["thinking"] == {"type": "enabled"}
+
+
 async def test_json_mode_without_a_schema_still_names_json(rig: Rig, api: respx.MockRouter) -> None:
     route = mock(api, ok(content="{}"))
     await rig.client.chat([user("x")], purpose="extract", json_mode=True)
@@ -774,6 +815,132 @@ async def test_concurrency_is_limited_by_a_semaphore(
     assert state["peak"] == 2
 
 
+async def test_a_flood_of_offline_calls_cannot_starve_a_live_reply(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-10 (D-701, user decision D10): offline purposes keep one slot free for the reply.
+
+    With the client shared by the whole process, a night job that fires many calls at once
+    would otherwise queue ahead of a message that arrives meanwhile (R-NFR-001).
+    """
+    rig = Rig(db, clock, overrides={"deepseek": {"max_concurrency": 3}})
+    gate = asyncio.Event()
+    seen: list[str] = []
+    state = {"active": 0, "peak": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        who = str(request_json(request)["messages"][-1]["content"])
+        seen.append(who)
+        state["active"] += 1
+        state["peak"] = max(state["peak"], state["active"])
+        try:
+            if who.startswith("offline"):
+                await gate.wait()  # a slow job call
+            return ok(content=who)
+        finally:
+            state["active"] -= 1
+
+    api.post(API).mock(side_effect=handler)
+    flood = [
+        asyncio.create_task(rig.client.chat([user(f"offline {i}")], purpose="summary"))
+        for i in range(8)
+    ]
+    await wait_until(lambda: len(seen) == 2)  # two of three slots: the third is for the reply
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert len(seen) == 2 and not any(task.done() for task in flood)
+    reply = await asyncio.wait_for(rig.client.chat([user("live")], purpose="reply"), 5)
+    assert reply.content == "live" and len(seen) == 3 and not any(t.done() for t in flood)
+    assert state["peak"] == 3  # the two offline calls and the reply: never more than the limit
+    gate.set()
+    done = await asyncio.gather(*flood)
+    assert len(done) == 8 and state["peak"] == 3
+
+
+@pytest.mark.parametrize("purpose", ["reply", "plan", "proactive"])
+async def test_every_live_purpose_may_use_all_the_slots(
+    db: Database, clock: ManualClock, api: respx.MockRouter, purpose: str
+) -> None:
+    rig = Rig(db, clock, overrides={"deepseek": {"max_concurrency": 3}})
+    gate = asyncio.Event()
+    active = {"now": 0, "peak": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        active["now"] += 1
+        active["peak"] = max(active["peak"], active["now"])
+        await gate.wait()
+        active["now"] -= 1
+        return ok()
+
+    api.post(API).mock(side_effect=handler)
+    calls = [
+        asyncio.create_task(rig.client.chat([user(str(i))], purpose=purpose)) for i in range(5)
+    ]
+    await wait_until(lambda: active["now"] == 3)
+    gate.set()
+    await asyncio.gather(*calls)
+    assert active["peak"] == 3
+
+
+async def test_with_a_single_slot_offline_work_still_runs(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """One slot cannot be shared: nothing is reserved, so the background jobs are not locked out."""
+    rig = Rig(db, clock, overrides={"deepseek": {"max_concurrency": 1}})
+    api.post(API).mock(return_value=ok())
+    result = await rig.client.chat([user("x")], purpose="summary")
+    assert result.content
+
+
+def test_a_client_that_moves_to_another_event_loop_builds_its_connections_again(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-10 (D-701): the SDK's connection pool and the limits belong to the loop they ran on."""
+    rig = Rig(db, clock, overrides={"deepseek": {"max_concurrency": 2}})
+    api.post(API).mock(return_value=ok())
+
+    async def one_round() -> None:
+        await asyncio.gather(
+            *[rig.client.chat([user(str(i))], purpose="summary") for i in range(4)]
+        )
+
+    asyncio.run(one_round())
+    assert rig.key_reads == 1
+    asyncio.run(one_round())  # the first loop is gone: a fresh pool, not the dead one
+    assert rig.key_reads == 2
+
+
+async def test_a_client_that_is_still_in_use_on_another_loop_is_not_taken_over(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """Two running loops cannot share one pool: the second user gets an error, not a corruption."""
+    rig = Rig(db, clock)
+    release = threading.Event()
+    entered = threading.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        entered.set()
+        await asyncio.to_thread(release.wait, 10)
+        return ok()
+
+    api.post(API).mock(side_effect=handler)
+    outcome: list[object] = []
+
+    def other_thread() -> None:
+        outcome.append(asyncio.run(rig.client.chat([user("x")], purpose="reply")))
+
+    thread = threading.Thread(target=other_thread)
+    thread.start()
+    try:
+        await asyncio.to_thread(entered.wait, 5)
+        with pytest.raises(LoopAffinityError):
+            await rig.client.chat([user("y")], purpose="reply")
+    finally:
+        release.set()
+        thread.join(10)
+    assert len(outcome) == 1
+
+
 async def test_a_call_that_never_answers_times_out_and_is_reported(
     db: Database, clock: ManualClock, api: respx.MockRouter
 ) -> None:
@@ -839,6 +1006,62 @@ async def test_every_attempt_and_the_state_of_the_breaker_reach_the_health_recor
     mock(api, ok(content="back"))
     await rig.client.chat([user("x")], purpose="reply")  # the probe works: the breaker closes
     assert not health.snapshot(900).circuit_open and health.snapshot(900).calls == 5
+
+
+async def test_a_failed_probe_does_not_leave_the_circuit_flag_stuck(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-10 (D-701): a half-open probe that fails used to be counted as a second opening.
+
+    The recovery closed the breaker once, so the health record said "open" for ever and the
+    monitor kept raising the critical alert every six hours.
+    """
+    health = LlmHealth(clock)
+    rig = Rig(db, clock, retry=RetryPolicy(max_retries=0), failure_threshold=3, health=health)
+    mock(api, *[error(500) for _ in range(3)])
+    for _ in range(3):
+        with pytest.raises(RetriesExhaustedError):
+            await rig.client.chat([user("x")], purpose="reply")
+    assert health.snapshot(900).circuit_open
+    clock.tick(301)
+    assert not health.snapshot(900).circuit_open  # half-open: one probe may go, not "open"
+    mock(api, error(500))
+    with pytest.raises(RetriesExhaustedError):  # the probe fails: open for another five minutes
+        await rig.client.chat([user("x")], purpose="reply")
+    assert health.snapshot(900).circuit_open
+    clock.tick(301)
+    mock(api, ok(content="back"))
+    await rig.client.chat([user("x")], purpose="reply")
+    assert rig.breaker.state is BreakerState.CLOSED
+    assert not health.snapshot(900).circuit_open
+
+
+async def test_a_closed_client_and_a_dropped_breaker_leave_the_health_record(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-10 (D-701): the health record follows the breaker objects, not event counts."""
+    health = LlmHealth(clock)
+    rig = Rig(db, clock, retry=RetryPolicy(max_retries=0), failure_threshold=1, health=health)
+    mock(api, error(500))
+    with pytest.raises(RetriesExhaustedError):
+        await rig.client.chat([user("x")], purpose="reply")
+    assert health.snapshot(60).circuit_open
+    await rig.client.aclose()  # nobody will use this client again
+    assert not health.snapshot(60).circuit_open
+    mock(api, error(500))
+    with pytest.raises(CircuitOpenError):
+        await rig.client.chat([user("x")], purpose="reply")  # used again after all: counted again
+    assert health.snapshot(60).circuit_open
+    lonely = CircuitBreaker(clock, failure_threshold=1)
+    health.register_breaker(lonely)
+    lonely.before_call()
+    lonely.record_failure()
+    assert health.snapshot(60).circuit_open
+    await rig.client.aclose()
+    assert health.snapshot(60).circuit_open  # the lonely breaker is still open
+    del lonely
+    gc.collect()
+    assert not health.snapshot(60).circuit_open  # dropped: it cannot keep the record open
 
 
 async def test_client_errors_do_not_trip_the_breaker(
@@ -1102,7 +1325,7 @@ async def test_unexpected_errors_are_raised_and_do_not_count_against_the_service
         raise RuntimeError("a bug in our own code")
 
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=broken_create)))
-    monkeypatch.setattr(rig.client, "_client", lambda: sdk)
+    monkeypatch.setattr(rig.client, "_make_sdk", lambda secret: sdk)
     for _ in range(3):
         with pytest.raises(RuntimeError, match="our own code"):
             await rig.client.chat([user("x")], purpose="reply")
