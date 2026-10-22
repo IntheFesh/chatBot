@@ -197,7 +197,9 @@ def test_dpo_of_a_bf16_profile_makes_a_new_adapter_on_the_merged_sft_model(name:
     assert "quantization_bit" not in config
     assert config["output_dir"].endswith("/output/dpo")
     assert config["lora_rank"] == profile.lora_rank and config["lora_alpha"] == profile.lora_alpha
-    assert config["per_device_train_batch_size"] == 1 and config["gradient_accumulation_steps"] == 16
+    assert (
+        config["per_device_train_batch_size"] == 1 and config["gradient_accumulation_steps"] == 16
+    )
 
 
 def test_dpo_of_the_4bit_profile_holds_the_sft_model_as_an_explicit_4bit_reference() -> None:

@@ -8,6 +8,14 @@ The manifest lists every file below the artifacts directory with its size and sh
 the files a model registry should register (``models``).  The versions the model was trained
 with - template, persona card, profile and dataset - are copied from the training package's
 manifest, so ``twin model register`` can lock the model to them (R-SRV-001).
+
+The adapter stack that was kept (``adapter_stack.json`` of ``adapter_stack.py``: ``sft``,
+``sft+dpo`` or ``dpo``, every layer with its sha256, and the one adapter vLLM serves) goes into the
+manifest as ``adapter_stack``; each layer is checked against the file on the disk first, so a
+layer that changed after it was recorded stops the export (D-653).  How the preference run got its
+reference model (``dpo/dpo_reference.json``, D-651) and which stack won the evaluation
+(``eval/stack_choice.json``, D-655) are copied as ``dpo`` and ``stack_choice``.  The metrics of the
+evaluation are those of the stack that was kept.
 """
 
 from __future__ import annotations
@@ -21,6 +29,10 @@ from pathlib import Path
 
 SCHEMA = 1
 BLOCK = 1 << 20
+STACK_FILE = "adapter_stack.json"
+DPO_REFERENCE_FILE = "dpo/dpo_reference.json"
+STACK_CHOICE_FILE = "eval/stack_choice.json"
+DEFAULT_SERVED = "adapter/adapter_model.safetensors"
 LOCKED_KEYS = (
     "profile",
     "base_model",
@@ -49,17 +61,39 @@ def read_json(path: Path) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+def check_stack(stack: dict[str, object], files: dict[str, str]) -> None:
+    """Every layer and the served adapter must be a listed file with the recorded sha256."""
+    layers = stack.get("layers")
+    served = stack.get("served")
+    if not isinstance(layers, list) or not layers or not isinstance(served, dict):
+        raise ValueError(f"{STACK_FILE} lists no layers or no served adapter")
+    for entry in [*layers, served]:
+        if not isinstance(entry, dict):
+            raise ValueError(f"{STACK_FILE} has an entry that is not an object")
+        path = str(entry.get("path", ""))
+        if path not in files:
+            raise ValueError(f"{path} of {STACK_FILE} is not on the disk")
+        if files[path] != entry.get("sha256"):
+            raise ValueError(f"{path} changed after {STACK_FILE} was written")
+
+
 def build(
     artifacts: Path, bundle: dict[str, object], quants: list[str], adapter_kind: str, run_id: str
 ) -> dict[str, object]:
     profile = str(bundle["profile"])
+    stack = read_json(artifacts / STACK_FILE)
+    served_entry = stack.get("served")
+    adapter = (
+        str(served_entry["path"])
+        if isinstance(served_entry, dict) and served_entry.get("path")
+        else DEFAULT_SERVED
+    )
     models: list[dict[str, str]] = []
     for quant in quants:
         path = f"gguf/{profile}-{quant}.gguf"
         if not (artifacts / path).is_file():
             raise FileNotFoundError(f"{path} is missing")
         models.append({"quant": quant, "kind": "gguf", "path": path})
-    adapter = "adapter/adapter_model.safetensors"
     if not (artifacts / adapter).is_file():
         raise FileNotFoundError(f"{adapter} is missing")
     models.append({"quant": "lora", "kind": "adapter", "path": adapter})
@@ -75,13 +109,21 @@ def build(
                 "size": path.stat().st_size,
             }
         )
+    if stack:
+        check_stack(stack, {str(entry["path"]): str(entry["sha256"]) for entry in files})
+    kept = str(stack.get("choice") or adapter_kind or "sft")
     train = read_json(artifacts / "train" / "metrics.json")
-    evaluation = read_json(artifacts / "eval" / "eval_metrics.json")
+    evaluation = read_json(artifacts / "eval" / kept / "eval_metrics.json") or read_json(
+        artifacts / "eval" / "eval_metrics.json"
+    )
     manifest: dict[str, object] = {
         "schema": SCHEMA,
         "run_id": run_id or None,
         "created_at": datetime.now(UTC).isoformat(),
         "adapter_kind": adapter_kind,
+        "adapter_stack": stack or None,
+        "dpo": read_json(artifacts / DPO_REFERENCE_FILE) or None,
+        "stack_choice": read_json(artifacts / STACK_CHOICE_FILE) or None,
         "quant_set": quants,
         "models": models,
         "files": files,

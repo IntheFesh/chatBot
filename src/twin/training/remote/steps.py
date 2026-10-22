@@ -10,7 +10,12 @@ Each public method of :class:`RemoteSteps` is one command of ``twin train remote
     ``setup.sh install`` -> ``decrypt.sh`` (the passphrase goes through standard input of that one
     command and is never stored) -> ``setup.sh verify``;
 ``train``, ``dpo``, ``evaluate``, ``export``
-    one script each, as a background job that survives a dropped connection;
+    one script each, as a background job that survives a dropped connection.  ``dpo`` copies how
+    the reference model was chosen (``artifacts/dpo/dpo_reference.json``: the SFT model, or - for
+    the 4-bit profile only - the base after a fall-back) into the run record (D-651); ``evaluate``
+    runs both adapter stacks on the same test contexts when a DPO adapter exists, compares them
+    on this machine (:mod:`twin.training.stack_choice`) and writes the winner back to the
+    instance, where ``export.sh`` reads it (D-655);
 ``download``
     the files named by ``artifacts/manifest.json`` into ``data/models/<run_id>/``, every one
     checked against its sha256;
@@ -40,8 +45,18 @@ from twin.training.remote.connection import RemoteError
 from twin.training.remote.jobs import JobOutcome, RemoteJobs
 from twin.training.remote.session import RemoteSession
 from twin.training.runs import RunStore, RunView
+from twin.training.stack_choice import (
+    STACKS,
+    StackChoiceError,
+    StackFiles,
+    StackJudge,
+    StackVerdict,
+)
 
 PROGRESS_STEP_PERCENT = 10
+DPO_REFERENCE_FILE = "dpo/dpo_reference.json"
+STACK_CHOICE_JSON = "eval/stack_choice.json"
+STACK_CHOICE_STATE = "state/stack_choice"
 
 
 @dataclass(frozen=True)
@@ -60,6 +75,34 @@ class StepReport:
 
 class StepFailedError(RemoteError):
     """A script on the instance ended with an error."""
+
+
+DPO_RECORD_KEYS = (
+    "mode",
+    "reference",
+    "reference_quantization_bit",
+    "fallback",
+    "fallback_reason",
+    "per_device_batch",
+    "accumulation",
+)
+
+
+def dpo_record_fields(reference: Mapping[str, Any]) -> dict[str, Any]:
+    """The part of ``dpo_reference.json`` that goes into the record of the ``dpo`` step."""
+    return {key: reference.get(key) for key in DPO_RECORD_KEYS}
+
+
+def dpo_reference_line(reference: Mapping[str, Any]) -> str:
+    """One line about the reference model of the preference run; a fall-back is said plainly."""
+    if reference.get("fallback"):
+        return (
+            "dpo: FALLBACK - the reference model is the BASE (adapter switched off), not the SFT "
+            f"model: {reference.get('fallback_reason')}"
+        )
+    bits = reference.get("reference_quantization_bit")
+    detail = f" (explicit, {bits}-bit)" if bits else " (the merged SFT model, no second copy)"
+    return f"dpo: the reference model is the SFT model{detail}"
 
 
 async def inspect_instance(session: RemoteSession, layout: RemoteLayout) -> ConnectionReport:
@@ -93,9 +136,11 @@ class RemoteSteps:
         models_dir: Path,
         echo: Callable[[str], None],
         passphrase: Callable[[], str] | None = None,
+        stack_judge: StackJudge | None = None,
         shell: str = "bash",
         poll_seconds: float = 2.0,
     ) -> None:
+        self._stack_judge = stack_judge
         self._session = session
         self._layout = layout
         self._profile = profile
@@ -317,11 +362,81 @@ class RemoteSteps:
 
     async def dpo(self, run_id: str, *, again: bool = False) -> StepReport:
         outcome = await self._run_job(run_id, "dpo", "dpo.sh", again=again)
+        if outcome.ok:
+            reference = await self._read_json(f"{self._layout.artifacts}/{DPO_REFERENCE_FILE}")
+            if reference:  # no record: the step was skipped (too few pairs)
+                self._store.set_step_fields(run_id, "dpo", **dpo_record_fields(reference))
+                self._emit(dpo_reference_line(reference))
         return self._finish(run_id, "dpo", outcome)
 
     async def evaluate(self, run_id: str, *, again: bool = False) -> StepReport:
         outcome = await self._run_job(run_id, "eval", "eval.sh", "auto", again=again)
+        if outcome.ok:
+            try:
+                verdict = await self._choose_stack()
+            except (RemoteError, StackChoiceError) as exc:
+                self._store.end_step(
+                    run_id, "eval", self._clock.now_utc(), exit_code=1, error=str(exc)
+                )
+                raise StepFailedError(
+                    f"the two adapter stacks could not be compared: {exc}; "
+                    "fix it and run the evaluation again"
+                ) from exc
+            if verdict is not None:
+                self._store.set_step_fields(
+                    run_id,
+                    "eval",
+                    stack_kept=verdict.keep,
+                    stack_reason=verdict.reason,
+                    stack_verdict=verdict.to_json(),
+                )
+                for line in verdict.lines():
+                    self._emit(line)
         return self._finish(run_id, "eval", outcome)
+
+    async def _choose_stack(self) -> StackVerdict | None:
+        """Compare the stacks ``eval.sh`` evaluated and tell the instance which one is kept.
+
+        ``None`` when only the SFT stack was evaluated (there is no DPO adapter): nothing to
+        choose, and ``export.sh`` takes the SFT stack by itself.
+        """
+        base = f"{self._layout.artifacts}/eval"
+        dpo_metrics = await self._read_json(f"{base}/dpo/eval_metrics.json")
+        if dpo_metrics is None:
+            return None
+        if self._stack_judge is None:
+            raise RemoteError("no judge for the adapter stacks was given")
+        texts: dict[str, str] = {}
+        metrics: dict[str, dict[str, Any]] = {"dpo": dpo_metrics}
+        for stack in STACKS:
+            remote = f"{base}/{stack}/eval_generations.jsonl"
+
+            async def read(remote: str = remote) -> str | None:
+                return await self._read_text(remote)
+
+            text = await self._session.retrying(
+                read, what=f"reading the generations of the {stack} stack"
+            )
+            if text is None:
+                raise RemoteError(f"the instance has no {remote}")
+            texts[stack] = text
+        sft_metrics = await self._read_json(f"{base}/sft/eval_metrics.json")
+        metrics["sft"] = sft_metrics or {}
+        verdict = self._stack_judge(StackFiles(texts, metrics))
+
+        async def write() -> None:
+            handle = await self._session.files()
+            await handle.makedirs(f"{self._layout.workdir}/state")
+            await handle.write_bytes(
+                f"{self._layout.workdir}/{STACK_CHOICE_STATE}", f"{verdict.keep}\n".encode()
+            )
+            payload = json.dumps(verdict.to_json(), indent=2) + "\n"
+            await handle.write_bytes(
+                f"{self._layout.artifacts}/{STACK_CHOICE_JSON}", payload.encode("utf-8")
+            )
+
+        await self._session.retrying(write, what="writing the stack that was kept")
+        return verdict
 
     async def export(self, run_id: str, *, again: bool = False) -> StepReport:
         outcome = await self._run_job(

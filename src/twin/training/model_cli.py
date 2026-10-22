@@ -17,6 +17,9 @@ from rich.table import Table
 from twin.ops.process_model import CliError, CommandKind, ExitCode, command
 from twin.services import get_cli_context
 from twin.training.registry import (
+    EVAL_ADAPTER_STACK,
+    EVAL_DPO_REFERENCE,
+    EVAL_STACK_CHOICE,
     ModelView,
     RegistryError,
     get_model,
@@ -25,6 +28,14 @@ from twin.training.registry import (
 )
 
 model_app = typer.Typer(help="Registered style models.", no_args_is_help=True)
+
+
+def describe_reference(reference: dict[str, object]) -> str:
+    """How the preference run got its reference model (D-650, D-651), in a line."""
+    if reference.get("fallback"):
+        return f"the BASE (adapter switched off), a fall-back: {reference.get('fallback_reason')}"
+    bits = reference.get("reference_quantization_bit")
+    return "the SFT model" + (f", held explicitly at {bits} bit" if bits else " (merged in memory)")
 
 
 def _console() -> Console:
@@ -117,8 +128,21 @@ def model_show_command(
         ("state", _flags(model)),
         ("registered", model.created_at),
     ]
+    stack = model.adapter_stack
+    if stack is not None:
+        rows.append(("adapter stack", stack.describe()))
+    reference = model.eval.get(EVAL_DPO_REFERENCE)
+    if isinstance(reference, dict):
+        rows.append(("dpo reference model", describe_reference(reference)))
+    choice = model.eval.get(EVAL_STACK_CHOICE)
+    if isinstance(choice, dict):
+        rows.append(
+            ("stack kept by the evaluation", f"{choice.get('keep')}: {choice.get('reason')}")
+        )
+    shown_above = {EVAL_ADAPTER_STACK, EVAL_DPO_REFERENCE, EVAL_STACK_CHOICE}
     for key, value in model.eval.items():
-        rows.append((f"eval: {key}", "-" if value is None else str(value)))
+        if key not in shown_above:
+            rows.append((f"eval: {key}", "-" if value is None else str(value)))
     for key, value in rows:
         table.add_row(key, value)
     _console().print(table)

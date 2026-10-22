@@ -3,15 +3,22 @@
 #
 #   export.sh <profile> [sft|dpo|auto] [--dry-run] [--redo]
 #
+# The model is an adapter STACK (lib.sh, D-650): "sft" is the SFT adapter, "dpo" is the stack with
+# the preference run - sft,dpo for a bf16 profile (merged one after the other, in this order: the
+# DPO adapter was trained on the SFT model merged into the base), the one continued adapter for the
+# 4-bit profile.  "auto" (the default) is the stack the evaluation kept (state/stack_choice, written
+# by `twin train remote eval`, D-655); with a DPO adapter on the disk and no such verdict it stops.
+#
 # Order (print it with --dry-run; nothing is touched then):
-#   merge the adapter into the bf16 base -> build llama-quantize -> convert to an F16 GGUF
+#   merge the adapter stack into the bf16 base -> build llama-quantize -> convert to an F16 GGUF
 #   -> delete the merged HF weights -> quantise Q4_K_M, Q5_K_M, Q8_0 straight into
-#   artifacts/gguf/ -> delete the F16 GGUF -> copy the adapter and write artifacts/manifest.json.
+#   artifacts/gguf/ -> delete the F16 GGUF -> copy the adapter stack (two layers are also composed
+#   into the one adapter vLLM serves) and write artifacts/manifest.json.
 # A deletion only follows the step that made the file replacing the deleted one, and the free
 # space is checked before every step that writes a large file.  The quantized files are written
 # where they stay (no copy: at the peak the disk holds the base, the F16 file and the three
 # quantizations, 3.2 times the bf16 size, and not a fourth set).  Running the script again skips
-# the steps that are done (state/export.<step>); the adapter itself stays for the remote vLLM.
+# the steps that are done (state/export.<step>); the adapters themselves stay for the remote vLLM.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +48,9 @@ fi
 start_logging export
 use_data_disk
 
+KEPT="$(stack_choice "${ADAPTER_CHOICE}")" ||
+    die "a DPO adapter exists but no evaluation has kept a stack (sft or dpo) yet: run eval.sh through 'twin train remote eval' (it compares the two on the same test contexts), or name the stack: export.sh ${TWIN_PROFILE} sft|dpo"
+
 MERGED="${TWIN_HOME}/output/merged"
 LLAMA_CPP="${TWIN_HOME}/llama.cpp"
 GGUF_DIR="${TWIN_HOME}/gguf"
@@ -62,16 +72,16 @@ quant_file() { echo "${ARTIFACTS}/gguf/${TWIN_PROFILE}-$1.gguf"; }
 
 step_merge_adapter() {
     free_space_gate "merging the adapter" "$((TWIN_BASE_GB_CEIL + 3))"
-    local adapter config="${TWIN_HOME}/config/export.run.yaml"
-    adapter="$(best_adapter "${ADAPTER_CHOICE}")"
-    [ -f "${adapter}/adapter_model.safetensors" ] || die "no adapter in ${adapter}; run train.sh first"
+    local adapters config="${TWIN_HOME}/config/export.run.yaml"
+    adapters="$(stack_adapters "${KEPT}")"
+    require_adapters "${adapters}"
     cp "${TWIN_HOME}/config/export.yaml" "${config}"
-    yaml_set "${config}" adapter_name_or_path "${adapter}"
+    yaml_set "${config}" adapter_name_or_path "${adapters}"
     rm -rf "${MERGED}"
-    log "merging ${adapter##*/} into ${TWIN_BASE_MODEL} (export_device: $(yaml_get "${config}" export_device))"
+    log "merging the ${KEPT} stack (${adapters//${TWIN_HOME}\//}) into ${TWIN_BASE_MODEL} (export_device: $(yaml_get "${config}" export_device))"
     llamafactory-cli export "${config}"
     [ -f "${MERGED}/config.json" ] || die "the merge did not produce a model in ${MERGED}"
-    echo "${adapter}" >"${STATE}/export.adapter"
+    echo "${KEPT}" >"${STATE}/export.adapter"
 }
 
 ensure_build_tools() {
@@ -140,13 +150,19 @@ step_delete_f16() {
 }
 
 step_collect_artifacts() {
-    local adapter
-    adapter="$(cat "${STATE}/export.adapter" 2>/dev/null || best_adapter "${ADAPTER_CHOICE}")"
-    rm -rf "${ARTIFACTS}/adapter"
-    mkdir -p "${ARTIFACTS}/adapter"
-    for file in adapter_config.json adapter_model.safetensors README.md; do
-        if [ -f "${adapter}/${file}" ]; then cp "${adapter}/${file}" "${ARTIFACTS}/adapter/"; fi
-    done
+    # the stack the merge used (a rerun of this step must not pick another one)
+    local kept name
+    local -a layers=()
+    kept="$(cat "${STATE}/export.adapter" 2>/dev/null || echo "${KEPT}")"
+    while read -r name; do
+        require_adapters "${TWIN_HOME}/output/${name}"
+        layers+=(--layer "${name}=${TWIN_HOME}/output/${name}")
+    done < <(stack_layers "${kept}")
+    rm -rf "${ARTIFACTS}/adapter" "${ARTIFACTS}/adapters"
+    # the one adapter vLLM serves (artifacts/adapter: the only layer, or the layers composed by
+    # rank concatenation), the layers themselves when there are two, adapter_stack.json (D-652, D-653)
+    "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/adapter_stack.py" \
+        --artifacts "${ARTIFACTS}" --choice "${kept}" --mode "${TWIN_DPO_MODE}" "${layers[@]}"
     # the quantizations are already in artifacts/gguf (written there by step_quantize); this step
     # must not delete them, so that doing it again only rewrites the adapter copy and the manifest
     for quant in "${QUANTS[@]}"; do
@@ -156,7 +172,7 @@ step_collect_artifacts() {
         --artifacts "${ARTIFACTS}" \
         --bundle-manifest "${TWIN_HOME}/manifest.json" \
         --quants "${TWIN_GGUF_QUANTS}" \
-        --adapter-kind "${adapter##*/}" \
+        --adapter-kind "${kept}" \
         --run-id "${TWIN_RUN_ID:-}"
 }
 

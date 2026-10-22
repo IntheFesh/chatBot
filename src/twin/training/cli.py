@@ -87,6 +87,7 @@ from twin.training.runs import (
     hyperparameters,
     new_run_id,
 )
+from twin.training.stack_choice import StackFiles, StackVerdict, judge_stacks
 from twin.training.tokenizer import TokenizerError
 
 train_app = typer.Typer(help="Train the style model on a rented GPU.", no_args_is_help=True)
@@ -482,6 +483,9 @@ def _latest_or(store: RunStore, run: str | None) -> RunView:
 def _steps_for(
     services: Services, run: RunView, session: RemoteSession, passphrase: Callable[[], str] | None
 ) -> RemoteSteps:
+    def judge(files: StackFiles) -> StackVerdict:
+        return judge_stacks(services, files)
+
     return RemoteSteps(
         session=session,
         layout=RemoteLayout(services.settings.autodl.workdir),
@@ -491,6 +495,7 @@ def _steps_for(
         models_dir=services.paths.models_dir,
         echo=typer.echo,
         passphrase=passphrase,
+        stack_judge=judge,
         poll_seconds=POLL_SECONDS,
     )
 
@@ -625,9 +630,18 @@ _step_command(
     needs_passphrase=True,
 )
 _step_command("train", "train", "Fine-tune the style model (continues from the last checkpoint).")
-_step_command("dpo", "dpo", "Preference training on the SFT adapter (only with enough pairs).")
-_step_command("eval", "evaluate", "Validation loss and one generated reply per test context.")
-_step_command("export", "export", "Merge the adapter, convert to GGUF and quantise.")
+_step_command(
+    "dpo",
+    "dpo",
+    "Preference training whose reference is the SFT model (only with enough pairs).",
+)
+_step_command(
+    "eval",
+    "evaluate",
+    "Validation loss and one generated reply per test context; with a DPO adapter, the SFT "
+    "stack and the SFT+DPO stack are compared on the same contexts and the better is kept.",
+)
+_step_command("export", "export", "Merge the kept adapter stack, convert to GGUF and quantise.")
 
 
 @remote_app.command("download")
@@ -676,6 +690,31 @@ def _status_table(runs: list[RunView]) -> Table:
     return table
 
 
+def run_notes(item: RunView) -> list[str]:
+    """What the preference run and the stack comparison of a run decided (D-651, D-655).
+
+    A fall-back of the 4-bit profile to the base as the reference model is said here too, so it
+    cannot be missed in the table above; numbers and closed words only.
+    """
+    notes = []
+    dpo = item.steps.get("dpo", {})
+    if dpo.get("reference"):
+        if dpo.get("fallback"):
+            notes.append(
+                f"run {item.id} dpo: FALLBACK, the reference model is the BASE, not the SFT model "
+                f"({dpo.get('fallback_reason')})"
+            )
+        else:
+            notes.append(f"run {item.id} dpo: the reference model is the SFT model")
+    evaluation = item.steps.get("eval", {})
+    if evaluation.get("stack_kept"):
+        notes.append(
+            f"run {item.id} eval: stack kept: {evaluation['stack_kept']} "
+            f"({evaluation.get('stack_reason')})"
+        )
+    return notes
+
+
 @remote_app.command("status")
 @command(CommandKind.READ)
 def remote_status_command(
@@ -692,6 +731,9 @@ def remote_status_command(
         typer.echo("no training runs yet")
         return
     _console().print(_status_table(runs))
+    for item in runs:
+        for note in run_notes(item):
+            typer.echo(note)
     for item in store.uncleaned():
         typer.echo(
             f"run {item.id} has data on the instance and was not cleaned up: "

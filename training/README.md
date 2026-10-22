@@ -69,8 +69,40 @@ the same source:
   `setup.sh verify` therefore trains on `trial_data/sft_trial.jsonl`, the 64 longest training samples
   (`tools/make_trial_dataset.py`), because memory is decided by length (R17, D-633).
 * `stage: dpo` defaults: `pref_beta: 0.1`, `pref_loss: sigmoid`; the official example uses a
-  learning rate of 5e-6.  With a LoRA adapter the reference model is the same model with the adapter
-  switched off.  `adapter_name_or_path` + `do_train` continues that adapter.
+  learning rate of 5e-6.  **The reference model of this project's DPO runs is the SFT model, not
+  the base** (round 17, D-650).  What 0.9.5 does (`model/adapter.py`, `train/dpo/trainer.py`,
+  `train/trainer_utils.py`, `hparams/parser.py`):
+  * without `ref_model` the reference pass runs with the adapter switched off (`disable_adapter()`);
+  * `adapter_name_or_path` + `do_train` *continues* the last adapter of the list - so the reference
+    would be the bare base (the earlier setup of this project);
+  * `adapter_name_or_path` + `do_train` + `create_new_adapter: true` **merges every listed adapter
+    into the model in memory** and trains a new LoRA on it - with no `ref_model` the reference is
+    then the merged SFT model, at no extra VRAM and no disk;
+  * a quantised model refuses `create_new_adapter` (`Cannot create new adapter upon a quantized
+    model.`) and takes only one adapter;
+  * `ref_model`, `ref_model_adapters` and `ref_model_quantization_bit` (4 or 8) load an explicit
+    reference (`create_ref_model`): a second model next to the policy.
+
+  So the bf16 profiles (`5090-8b`, `pro6000-14b`, `pro6000-32b`; `TWIN_DPO_MODE=layered`) use
+  `create_new_adapter` and no `ref_model`; the model is the **stack** `sft,dpo` (`W + dSFT + dDPO`).
+  `5090-14b` (4-bit; `continued`) continues the SFT adapter, sets `ref_model` (the base),
+  `ref_model_adapters` (the SFT adapter) and `ref_model_quantization_bit: 4`, and its stack is
+  `dpo` alone.  `dpo.sh` tries one step on the 64 longest pairs first, halves the batch on an
+  out-of-memory failure and, if even a batch of 1 does not fit, drops the three `ref_model*` keys
+  for this profile only: the reference is then the base (adapter off) and
+  `artifacts/dpo/dpo_reference.json` says so (D-651).
+* **Adapter stacks** (D-652..D-655).  `eval.sh` evaluates `sft` and, when there is a DPO adapter,
+  `dpo` (`sft,dpo` or the continued one) on the same test contexts and validation set; `twin train
+  remote eval` compares them with the style metrics (+-30 %, the M5 gate's own measure) and the
+  validation loss, keeps the better one (a tie keeps SFT) and writes it to `state/stack_choice`;
+  `export.sh` merges that stack (`adapter_name_or_path: output/sft,output/dpo`).  For the remote
+  vLLM the two layers are composed into **one** adapter by concatenating them along the rank, the
+  scales (`alpha / r`) folded into `B` (`tools/adapter_stack.py`): `B·A = s1·B1·A1 + s2·B2·A2`, so
+  the served adapter adds exactly `dSFT + dDPO`; `--max-lora-rank` is read from its config (64, or
+  32 for the 32B profile).  `artifacts/manifest.json` carries `adapter_stack` (every layer with its
+  sha256, in order), `dpo` and `stack_choice`; `twin model register` checks each layer.
+  `tests/unit/test_dpo_reference_peft.py` proves the two claims on a tiny random Qwen3 with PEFT
+  (reference with the new adapter off == the SFT model; composed adapter == merged stack).
 * Early stopping is `early_stopping_steps` (a patience counted in evaluations; needs
   `load_best_model_at_end`).  Training resumes by itself from the last checkpoint of `output_dir`
   unless `overwrite_output_dir` is set.  `do_predict` + `predict_with_generate` writes
@@ -125,6 +157,11 @@ selects the adapter with its `model` field; `/v1/completions` and `/tokenize` ex
   versions they ended up with.
 * The request fields of vLLM's `/tokenize` (`prompt`, `add_special_tokens`; the reply has `tokens`, `count`, `max_model_len`) are what round 14's tokenizer comparison sends (`twin.serving.tokencheck`); the comparison against a real vLLM server could not be run in the sandbox.
 * AutoDL's image list for the two GPUs and the size of the system disk (their pages did not state it).
+* (Round 17, D-657) Whether the explicit 4-bit SFT reference of `5090-14b` fits next to the policy
+  (`dpo.sh` finds out with its trial step and records a fall-back), and that vLLM accepts the
+  composed adapter of rank 64 (rank 32 for the 32B profile; the ranks vLLM allows - 1, 8, 16, 32,
+  64, 128, 256, 320, 512 - are from memory).  The algebra of the composition and PEFT's loading of
+  it are tested on a tiny model; vLLM and a GPU were not available.
 
 ## Contracts used by round 13b and later rounds
 

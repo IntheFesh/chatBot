@@ -11,12 +11,13 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from tests.support.autodl_scripts import AUTODL, ROOT, installed_pythons
+from tests.support.autodl_scripts import AUTODL, ROOT, installed_pythons, write_tiny_adapter
 from tests.support.waiting import wait_until_sync as wait_until
 from twin.training import bundle
 from twin.training.profiles import PROFILES
@@ -50,6 +51,7 @@ summarize_train = load_tool("summarize_train")
 make_eval = load_tool("make_eval_generations")
 make_trial = load_tool("make_trial_dataset")
 artifact_manifest = load_tool("artifact_manifest")
+adapter_stack = load_tool("adapter_stack")
 verify_manifest = load_tool("verify_manifest")
 
 
@@ -741,3 +743,335 @@ def test_the_unpacked_package_is_checked_against_its_manifest_and_the_uploaded_s
     (root / "manifest.json").unlink()
     assert verify_manifest.check(root, None) == ["manifest.json is missing"]
     assert verify_manifest.main(["--root", str(root)]) == 1
+
+
+# ------------------------------------------------ the DPO reference and the adapter stack (R17-49d)
+
+
+def preference_row(name: str, prompt: str, chosen: str, rejected: str) -> dict[str, object]:
+    return {
+        "id": name,
+        "system": "sys",
+        "conversations": [{"from": "human", "value": prompt}],
+        "chosen": {"from": "gpt", "value": chosen},
+        "rejected": {"from": "gpt", "value": rejected},
+    }
+
+
+def test_the_trial_of_a_preference_set_takes_the_longest_pairs_by_the_longer_reply(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651): both replies go through the model; the longer one decides the memory."""
+    rows = [
+        preference_row("short", "q" * 5, "a" * 2, "b" * 3),  # 3 + 5 + 3 = 11
+        preference_row("long-rejected", "q" * 5, "a" * 2, "b" * 40),  # 48
+        preference_row("long-chosen", "q" * 5, "a" * 30, "b" * 3),  # 38
+        preference_row("long-prompt", "q" * 60, "a" * 2, "b" * 2),  # 65
+    ]
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "dpo_train.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    entry = {"file_name": "dpo_train.jsonl", "formatting": "sharegpt", "ranking": True}
+    (data / "dataset_info.json").write_text(json.dumps({"twin_dpo_train": entry}), "utf-8")
+    code = make_trial.main(
+        [
+            "--data-dir",
+            str(data),
+            "--dataset",
+            "twin_dpo_train",
+            "--out-dir",
+            str(tmp_path / "trial"),
+            "--count",
+            "3",
+            "--trial-name",
+            "twin_dpo_trial",
+            "--trial-file",
+            "dpo_trial.jsonl",
+        ]
+    )
+    assert code == 0
+    written = (tmp_path / "trial" / "dpo_trial.jsonl").read_text("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in written] == [
+        "long-prompt",
+        "long-rejected",
+        "long-chosen",
+    ]
+    info = json.loads((tmp_path / "trial" / "dataset_info.json").read_text("utf-8"))
+    assert info == {"twin_dpo_trial": {**entry, "file_name": "dpo_trial.jsonl"}}  # ranking stays
+    broken = {**rows[0], "chosen": {"from": "gpt"}}
+    assert make_trial.sample_length(rows[1]) == 48
+    with pytest.raises(make_trial.TrialDataError, match="reply without text"):
+        make_trial.sample_length(broken)
+
+
+def test_the_training_summary_carries_how_the_reference_model_was_chosen(tmp_path: Path) -> None:
+    """R17-49d (D-651): the record of ``dpo.sh`` is part of the report of the DPO run."""
+    output = tmp_path / "out"
+    write_state(output)
+    record = {"mode": "continued", "reference": "base", "fallback": True}
+    reference = tmp_path / "dpo_reference.json"
+    reference.write_text(json.dumps(record), encoding="utf-8")
+    args = ["--output-dir", str(output), "--out-dir", str(tmp_path / "art")]
+    assert summarize_train.main([*args, "--dpo-reference", str(reference)]) == 0
+    assert json.loads((tmp_path / "art" / "metrics.json").read_text("utf-8"))["dpo"] == record
+    assert summarize_train.main([*args, "--dpo-reference", str(tmp_path / "missing.json")]) == 0
+    assert "dpo" not in json.loads((tmp_path / "art" / "metrics.json").read_text("utf-8"))
+
+
+def delta(tensors: dict[str, Any], prefix: str, scale: float) -> Any:
+    import numpy as np
+
+    a = np.asarray(tensors[f"{prefix}.lora_A.weight"], dtype="float64")
+    b = np.asarray(tensors[f"{prefix}.lora_B.weight"], dtype="float64")
+    return scale * (b @ a)
+
+
+def test_composing_two_adapters_adds_their_scaled_deltas(tmp_path: Path) -> None:
+    """R17-49d (D-652): ``[s1*B1 | s2*B2] @ [A1; A2] = s1*B1@A1 + s2*B2@A2``, alpha = r1 + r2."""
+    import numpy as np
+    from safetensors.numpy import load_file
+
+    write_tiny_adapter(tmp_path / "sft", rank=3, alpha=6, seed=1)  # scale 2.0
+    write_tiny_adapter(tmp_path / "dpo", rank=5, alpha=5, seed=2)  # scale 1.0
+    config = adapter_stack.compose_files(
+        [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+    )
+    assert config["r"] == 8 and config["lora_alpha"] == 8
+    assert config["use_rslora"] is False and config["target_modules"] == ["q_proj", "v_proj"]
+    sft = load_file(str(tmp_path / "sft" / "adapter_model.safetensors"))
+    dpo = load_file(str(tmp_path / "dpo" / "adapter_model.safetensors"))
+    served = load_file(str(tmp_path / "served" / "adapter_model.safetensors"))
+    assert sorted(served) == sorted(sft)
+    prefixes = {key.rsplit(".lora_", 1)[0] for key in served}
+    assert len(prefixes) == 4
+    for prefix in prefixes:
+        assert served[f"{prefix}.lora_A.weight"].shape == (8, 6)
+        assert served[f"{prefix}.lora_B.weight"].shape == (6, 8)
+        assert served[f"{prefix}.lora_A.weight"].dtype == np.float32
+        expected = delta(sft, prefix, 2.0) + delta(dpo, prefix, 1.0)
+        assert np.allclose(delta(served, prefix, 1.0), expected, rtol=1e-5, atol=1e-5), prefix
+    # the sources are not touched
+    assert json.loads((tmp_path / "sft" / "adapter_config.json").read_text("utf-8"))["r"] == 3
+
+
+@given(
+    ranks=st.tuples(st.integers(1, 6), st.integers(1, 6)),
+    alphas=st.tuples(st.integers(1, 64), st.integers(1, 64)),
+    sizes=st.tuples(st.integers(1, 7), st.integers(1, 7)),
+    rslora=st.tuples(st.booleans(), st.booleans()),
+    seed=st.integers(0, 10_000),
+)
+def test_the_composition_is_the_sum_of_the_scaled_deltas_for_any_ranks_alphas_and_shapes(
+    ranks: tuple[int, int],
+    alphas: tuple[int, int],
+    sizes: tuple[int, int],
+    rslora: tuple[bool, bool],
+    seed: int,
+) -> None:
+    """R17-49d (D-652): the algebra, for plain and rank-stabilised LoRA alike (no files)."""
+    import numpy as np
+    import torch
+
+    generator = np.random.default_rng(seed)
+    key = "base_model.model.model.layers.0.self_attn.q_proj"
+    layers = []
+    for rank, alpha, stabilised in zip(ranks, alphas, rslora, strict=True):
+        config = {"r": rank, "lora_alpha": alpha, "use_rslora": stabilised}
+        tensors = {
+            f"{key}.lora_A.weight": torch.tensor(generator.standard_normal((rank, sizes[0]))),
+            f"{key}.lora_B.weight": torch.tensor(generator.standard_normal((sizes[1], rank))),
+        }
+        layers.append((f"l{rank}", config, {n: t.float() for n, t in tensors.items()}))
+    composed = adapter_stack.compose_tensors(layers)
+    expected = sum(
+        adapter_stack.scale_of(config)
+        * (tensors[f"{key}.lora_B.weight"].double() @ tensors[f"{key}.lora_A.weight"].double())
+        for _, config, tensors in layers
+    )
+    actual = composed[f"{key}.lora_B.weight"].double() @ composed[f"{key}.lora_A.weight"].double()
+    assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-3)
+    assert composed[f"{key}.lora_A.weight"].shape[0] == sum(ranks)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"use_dora": True}, "use_dora"),
+        ({"modules_to_save": ["lm_head"]}, "modules_to_save"),
+        ({"rank_pattern": {"q_proj": 2}}, "rank_pattern"),
+        ({"alpha_pattern": {"q_proj": 2}}, "alpha_pattern"),
+        ({"bias": "all"}, "bias all"),
+        ({"peft_type": "OFT"}, "peft_type OFT"),
+        ({"lora_bias": True}, "lora_bias"),
+    ],
+)
+def test_forms_of_lora_the_composition_does_not_describe_are_refused(
+    tmp_path: Path, change: dict[str, Any], message: str
+) -> None:
+    """R17-49d (D-652): refused, never guessed at - a wrong adapter would serve a wrong model."""
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4, seed=1)
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4, seed=2)
+    path = tmp_path / "dpo" / "adapter_config.json"
+    path.write_text(json.dumps({**json.loads(path.read_text("utf-8")), **change}), "utf-8")
+    with pytest.raises(adapter_stack.StackError, match=message):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+        )
+    assert not (tmp_path / "served").exists()
+
+
+def test_adapters_that_do_not_cover_the_same_weights_are_not_composed(tmp_path: Path) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4, seed=1, modules=("q_proj", "v_proj"))
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4, seed=2, modules=("q_proj",))
+    with pytest.raises(adapter_stack.StackError, match="do not cover the same weights"):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+        )
+    from safetensors.numpy import load_file, save_file
+
+    for name in ("odd", "odd2"):  # the same weights, plus one that is not a LoRA matrix
+        write_tiny_adapter(tmp_path / name, rank=2, alpha=4, seed=3)
+        file = tmp_path / name / "adapter_model.safetensors"
+        tensors = load_file(str(file))
+        tensors["base_model.model.lm_head.weight"] = tensors[next(iter(tensors))]
+        save_file(tensors, str(file))
+    with pytest.raises(adapter_stack.StackError, match="not a LoRA matrix"):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "odd"), ("dpo", tmp_path / "odd2")], tmp_path / "served"
+        )
+
+
+@pytest.mark.parametrize(
+    ("choice", "mode", "kind", "names"),
+    [
+        ("sft", "layered", "sft", ["sft"]),
+        ("sft", "continued", "sft", ["sft"]),
+        ("dpo", "layered", "sft+dpo", ["sft", "dpo"]),
+        ("dpo", "continued", "dpo", ["dpo"]),
+    ],
+)
+def test_collect_puts_the_stack_that_was_kept_into_the_artifacts(
+    tmp_path: Path, choice: str, mode: str, kind: str, names: list[str]
+) -> None:
+    """R17-49d (D-650, D-652, D-653): one layer is copied as it is, two are kept and composed."""
+    sources = {}
+    for seed, name in enumerate(("sft", "dpo")):
+        write_tiny_adapter(tmp_path / "out" / name, rank=4, alpha=8, seed=seed)
+        sources[name] = tmp_path / "out" / name
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "adapter").mkdir(parents=True)
+    (artifacts / "adapter" / "stale.txt").write_text("from an earlier export", "utf-8")
+    stack = adapter_stack.collect(artifacts, choice, mode, [(n, sources[n]) for n in names])
+    assert (stack["kind"], stack["mode"], stack["choice"]) == (kind, mode, choice)
+    assert [layer["name"] for layer in stack["layers"]] == names
+    assert stack["served"]["composed"] is (len(names) > 1)
+    assert stack["served"]["rank"] == 4 * len(names)
+    assert stack["served"]["sha256"] == adapter_stack.sha256_of(artifacts / stack["served"]["path"])
+    for layer in stack["layers"]:
+        assert layer["sha256"] == adapter_stack.sha256_of(artifacts / layer["path"])
+        assert layer["size"] == (artifacts / layer["path"]).stat().st_size
+    if len(names) == 1:
+        assert stack["layers"][0]["path"] == stack["served"]["path"]
+        assert stack["served"]["path"] == "adapter/adapter_model.safetensors"
+        assert not (artifacts / "adapters").exists()
+        assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == (
+            sources[names[0]] / "adapter_model.safetensors"
+        ).read_bytes()
+        assert not (artifacts / "adapter" / "stale.txt").exists()
+    else:
+        assert [layer["path"] for layer in stack["layers"]] == [
+            "adapters/sft/adapter_model.safetensors",
+            "adapters/dpo/adapter_model.safetensors",
+        ]
+    written = json.loads((artifacts / "adapter_stack.json").read_text("utf-8"))
+    assert written == stack and written["schema"] == 1
+
+
+def test_collect_refuses_a_stack_that_is_not_the_one_the_choice_names(tmp_path: Path) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4)
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4)
+    artifacts = tmp_path / "artifacts"
+    sft, dpo = tmp_path / "sft", tmp_path / "dpo"
+    with pytest.raises(adapter_stack.StackError, match="has the layers sft, dpo"):
+        adapter_stack.collect(artifacts, "dpo", "layered", [("dpo", dpo)])
+    with pytest.raises(adapter_stack.StackError, match="has the layers dpo"):
+        adapter_stack.collect(artifacts, "dpo", "continued", [("sft", sft), ("dpo", dpo)])
+    with pytest.raises(adapter_stack.StackError, match="is missing"):
+        adapter_stack.collect(artifacts, "sft", "layered", [("sft", tmp_path / "nowhere")])
+    with pytest.raises(adapter_stack.StackError, match="unknown"):
+        adapter_stack.collect(artifacts, "both", "layered", [("sft", sft)])
+
+
+def test_the_stack_tool_reports_in_words_and_exits_non_zero_on_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=4, alpha=8, seed=1)
+    write_tiny_adapter(tmp_path / "dpo", rank=4, alpha=8, seed=2)
+    arguments = ["--artifacts", str(tmp_path / "art"), "--choice", "dpo", "--mode", "layered"]
+    layers = ["--layer", f"sft={tmp_path / 'sft'}", "--layer", f"dpo={tmp_path / 'dpo'}"]
+    assert adapter_stack.main([*arguments, *layers]) == 0
+    assert "adapter stack sft+dpo: 2 layer(s), served adapter of rank 8 (composed)" in (
+        capsys.readouterr().out
+    )
+    assert adapter_stack.main([*arguments, "--layer", f"sft={tmp_path / 'sft'}"]) == 1
+    assert "has the layers sft, dpo" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        adapter_stack.main([*arguments, "--layer", "no-equals-sign"])
+
+
+def test_the_manifest_carries_the_stack_the_reference_record_and_the_verdict(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651, D-653, D-655): what the registry learns about how the model was made."""
+    artifacts = make_artifacts(tmp_path / "art")
+    for name in ("sft", "dpo"):
+        write_tiny_adapter(tmp_path / "out" / name, rank=2, alpha=4, seed=len(name))
+    shutil.rmtree(artifacts / "adapter")
+    adapter_stack.collect(
+        artifacts,
+        "dpo",
+        "layered",
+        [("sft", tmp_path / "out" / "sft"), ("dpo", tmp_path / "out" / "dpo")],
+    )
+    for stack, loss in (("sft", 1.2), ("dpo", 1.3)):
+        (artifacts / "eval" / stack).mkdir(parents=True)
+        (artifacts / "eval" / stack / "eval_metrics.json").write_text(
+            json.dumps({"val_loss": loss, "generated": 7}), encoding="utf-8"
+        )
+    (artifacts / "dpo").mkdir()
+    (artifacts / "dpo" / "dpo_reference.json").write_text(
+        json.dumps({"mode": "layered", "reference": "sft", "fallback": False}), encoding="utf-8"
+    )
+    (artifacts / "eval" / "stack_choice.json").write_text(
+        json.dumps({"keep": "dpo", "reason": "x"}), encoding="utf-8"
+    )
+    bundle_manifest = tmp_path / "manifest.json"
+    bundle_manifest.write_text(json.dumps(BUNDLE_MANIFEST), encoding="utf-8")
+    arguments = [
+        "--artifacts",
+        str(artifacts),
+        "--bundle-manifest",
+        str(bundle_manifest),
+        "--quants",
+        "Q4_K_M,Q5_K_M,Q8_0",
+        "--adapter-kind",
+        "dpo",
+    ]
+    assert artifact_manifest.main(arguments) == 0
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    assert manifest["adapter_stack"]["kind"] == "sft+dpo"
+    assert manifest["dpo"] == {"mode": "layered", "reference": "sft", "fallback": False}
+    assert manifest["stack_choice"] == {"keep": "dpo", "reason": "x"}
+    assert manifest["metrics"]["eval_val_loss"] == 1.3  # the stack that was kept
+    listed = {entry["path"] for entry in manifest["files"]}
+    assert {"adapters/sft/adapter_model.safetensors", "adapter_stack.json"} <= listed
+    # a layer that changed after the stack was recorded stops the export
+    layer = artifacts / "adapters" / "sft" / "adapter_model.safetensors"
+    layer.write_bytes(layer.read_bytes() + b"0")
+    assert artifact_manifest.main(arguments) == 1
+    # an artifacts directory without a stack (an older export) is as it was
+    (artifacts / "adapter_stack.json").unlink()
+    assert artifact_manifest.main(arguments) == 0
+    assert json.loads((artifacts / "manifest.json").read_text("utf-8"))["adapter_stack"] is None

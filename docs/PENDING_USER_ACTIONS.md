@@ -400,6 +400,7 @@
    - `setup.sh <档位> verify` 会运行 `twin.training.parity_check`（13b 已提供，随训练包进入实例）；它不通过或找不到时**明确报错并停下**（这是设计：模板一致性检查不能跳过）。
    - `export.sh`：llama.cpp（标签 b11177）能否在实例上编译 `llama-quantize`、转换 Qwen3 是否成功、三个量化文件的大小，以及每一步前的剩余空间。
    - `serve_vllm.sh`（第 14 轮才用到）：vLLM 0.26.0 的 cu128 轮子在 5090 / PRO 6000 上能否启动；沙箱没法下载 GitHub 发布页，所以脚本有 PyPI 回退，两条路径都没在真卡上试过（DECISIONS D-243）。
+   - （第 17 轮项 49d，D-650 至 D-657）DPO 的参考模型现在是 SFT 模型：`dpo.sh` 在 `5090-14b` 上先用 64 条最长的偏好对试跑 1 步——请看日志里是“`DPO trial step succeeded … the reference sft`”还是“`WARNING: out of memory with the explicit 4-bit SFT reference …`”（后者表示这一档退回了基座作参考，`artifacts/dpo/dpo_reference.json` 和 `twin train remote status` 会说）；bf16 三档没有试跑。`twin train remote eval` 会打印 SFT 与 SFT+DPO 两个栈的比较（“stack kept: …”），请贴给我；平局保留 SFT。vLLM 能否接受合成后的适配器（秩 64，32B 为 32）同样是第一次真实运行才知道（D-652、D-657）。
 
 6. **费用与安全**
    - 按小时计费：训练、评估、导出连起来可能是几小时；做完立刻 `twin train remote cleanup` 并释放实例。

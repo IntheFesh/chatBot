@@ -33,6 +33,7 @@ from tests.support.autodl_scripts import (
     run_script,
     script_env,
     write_distribution,
+    write_tiny_adapter,
     yaml_value,
 )
 from tests.support.training_data import write_synthetic_dataset
@@ -303,16 +304,56 @@ def test_yaml_keys_are_read_replaced_appended_and_dropped(env_for, tmp_path: Pat
 
 
 @posix_only
-def test_the_best_adapter_is_the_dpo_adapter_when_there_is_one(env_for, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+@pytest.mark.parametrize(
+    ("profile", "dpo_stack", "layers"),
+    [
+        ("5090-8b", "{w}/output/sft,{w}/output/dpo", ["sft", "dpo"]),
+        ("pro6000-14b", "{w}/output/sft,{w}/output/dpo", ["sft", "dpo"]),
+        ("pro6000-32b", "{w}/output/sft,{w}/output/dpo", ["sft", "dpo"]),
+        ("5090-14b", "{w}/output/dpo", ["dpo"]),
+    ],
+)
+def test_the_adapter_stack_of_dpo_is_both_adapters_or_the_continued_one(  # type: ignore[no-untyped-def]
+    env_for, profile: str, dpo_stack: str, layers: list[str]
+) -> None:
+    """R17-49d (D-650, D-652): ``sft,dpo`` where DPO is a delta over the merged SFT model.
+
+    A bf16 profile trains a new adapter on the SFT model, so the model is both adapters, in this
+    order (LLaMA-Factory merges ``adapter_name_or_path`` front to back); the 4-bit profile
+    continues the SFT adapter, so ``dpo`` alone is the stack - listing ``sft`` first would count
+    the SFT weights twice, and a quantised model only takes one adapter anyway.
+    """
+    autodl, env = env_for(profile)
+    work = Path(env["TWIN_HOME"])
+    assert call_function(autodl, env, "stack_adapters sft").stdout.strip() == f"{work}/output/sft"
+    assert call_function(autodl, env, "stack_adapters dpo").stdout.strip() == dpo_stack.format(
+        w=work
+    )
+    assert call_function(autodl, env, "stack_layers dpo").stdout.split() == layers
+    assert call_function(autodl, env, "stack_layers sft").stdout.split() == ["sft"]
+    assert call_function(autodl, env, "stack_adapters bogus").returncode == 1
+
+
+@posix_only
+def test_the_stack_that_was_kept_needs_a_verdict_once_there_is_a_dpo_adapter(  # type: ignore[no-untyped-def]
+    env_for,
+) -> None:
+    """R17-49d (D-655): no DPO adapter - nothing to choose; with one, the evaluation decides."""
     autodl, env = env_for("5090-8b")
     work = Path(env["TWIN_HOME"])
-    auto = call_function(autodl, env, "best_adapter auto").stdout.strip()
-    assert auto == f"{work}/output/sft"
+    assert call_function(autodl, env, "stack_choice auto").stdout.strip() == "sft"
     (work / "output" / "dpo").mkdir(parents=True)
     (work / "output" / "dpo" / "adapter_model.safetensors").write_bytes(b"x")
-    assert call_function(autodl, env, "best_adapter").stdout.strip() == f"{work}/output/dpo"
-    assert call_function(autodl, env, "best_adapter sft").stdout.strip() == f"{work}/output/sft"
-    assert call_function(autodl, env, "best_adapter bogus").returncode == 1
+    assert call_function(autodl, env, "stack_choice auto").returncode == 1  # no verdict yet
+    (work / "state").mkdir()
+    (work / "state" / "stack_choice").write_text("maybe\n", encoding="utf-8")
+    assert call_function(autodl, env, "stack_choice auto").returncode == 1  # not a verdict
+    for word in ("sft", "dpo"):
+        (work / "state" / "stack_choice").write_text(f"{word}\n", encoding="utf-8")
+        assert call_function(autodl, env, "stack_choice auto").stdout.strip() == word
+    assert call_function(autodl, env, "stack_choice dpo").stdout.strip() == "dpo"
+    assert call_function(autodl, env, "stack_choice sft").stdout.strip() == "sft"
+    assert call_function(autodl, env, "stack_choice bogus").returncode == 1
 
 
 @posix_only
@@ -439,6 +480,22 @@ def test_the_vllm_command_listens_locally_and_serves_the_adapter(tmp_path: Path,
     assert command[command.index("--lora-modules") + 1].startswith("twin-style=")
     assert command[command.index("--max-lora-rank") + 1] == str(profile.lora_rank)
     assert ("--quantization" in command) is (profile.quantization_bit is not None)
+
+
+@posix_only
+@pytest.mark.parametrize(("name", "layers", "rank"), [("5090-8b", 2, 64), ("pro6000-32b", 2, 32)])
+def test_the_vllm_rank_limit_is_the_rank_of_the_adapter_that_is_served(
+    tmp_path: Path, name: str, layers: int, rank: int
+) -> None:
+    """R17-49d (D-652): the composed adapter has the sum of the ranks (the profile's: a layer's)."""
+    profile = PROFILES[name]
+    workdir = tmp_path / "twin"
+    install_scripts(workdir, name)
+    write_tiny_adapter(workdir / "artifacts" / "adapter", rank=profile.lora_rank * layers, alpha=1)
+    done = run_script(workdir, script_env(workdir, tmp_path), "serve_vllm.sh", name, "--dry-run")
+    assert done.returncode == 0, done.stderr
+    command = done.stdout.split()
+    assert command[command.index("--max-lora-rank") + 1] == str(rank) == str(profile.lora_rank * 2)
 
 
 # ------------------------------------------------------------------------ setup verify
@@ -619,7 +676,7 @@ def test_eval_fails_without_the_generation_dependencies_and_passes_with_them(
     assert (workdir / "state" / "python.version").is_file()
     fixed = run_script(workdir, env, "eval.sh", "5090-8b")
     assert fixed.returncode == 0, fixed.stderr
-    assert (workdir / "artifacts" / "eval" / "eval_generations.jsonl").is_file()
+    assert (workdir / "artifacts" / "eval" / "sft" / "eval_generations.jsonl").is_file()
 
 
 @posix_only
@@ -940,8 +997,28 @@ def test_train_needs_the_config_and_a_finished_setup(tmp_path: Path) -> None:
     assert "run decrypt.sh first" in run_script(workdir, env, "train.sh", "5090-8b").stderr
 
 
+def check_generations(workdir: Path, stack: str) -> None:
+    """The generations of a stack are the test ids in order, with the texts, and nothing else."""
+    rows = [
+        json.loads(line)
+        for line in (workdir / "artifacts" / "eval" / stack / "eval_generations.jsonl")
+        .read_text("utf-8")
+        .splitlines()
+    ]
+    test_ids = [
+        json.loads(line)["id"]
+        for line in (workdir / "data" / "sft_test.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert [row["id"] for row in rows] == test_ids
+    assert all(set(row) == {"id", "text"} and row["text"].startswith("generated") for row in rows)
+    metrics = json.loads(
+        (workdir / "artifacts" / "eval" / stack / "eval_metrics.json").read_text("utf-8")
+    )
+    assert metrics == {"val_loss": 1.2, "adapter": stack, "generated": len(rows)}
+
+
 @posix_only
-def test_eval_uses_the_best_adapter_and_leaves_only_ids_and_texts(tmp_path: Path) -> None:
+def test_eval_without_a_dpo_adapter_evaluates_the_sft_stack(tmp_path: Path) -> None:
     workdir = prepared_workdir(tmp_path)
     log = install_fake_cli(tmp_path)
     env = script_env(workdir, tmp_path)
@@ -952,29 +1029,59 @@ def test_eval_uses_the_best_adapter_and_leaves_only_ids_and_texts(tmp_path: Path
     calls = cli_calls(log)[1:]
     assert [c["config"] for c in calls] == ["eval_loss.run.yaml", "eval_generate.run.yaml"]
     assert all(str(c["adapter"]).endswith("/output/sft") for c in calls)
-    rows = [
-        json.loads(line)
-        for line in (workdir / "artifacts" / "eval" / "eval_generations.jsonl")
-        .read_text("utf-8")
-        .splitlines()
-    ]
-    test_ids = [
-        json.loads(line)["id"]
-        for line in (workdir / "data" / "sft_test.jsonl").read_text("utf-8").splitlines()
-    ]
-    assert [row["id"] for row in rows] == test_ids
-    assert all(set(row) == {"id", "text"} and row["text"].startswith("generated") for row in rows)
-    metrics = json.loads((workdir / "artifacts" / "eval" / "eval_metrics.json").read_text("utf-8"))
-    assert metrics == {"val_loss": 1.2, "adapter": "sft", "generated": len(rows)}
-    # a DPO adapter is evaluated by default once it exists, the SFT one on request
-    dpo = workdir / "output" / "dpo"
-    dpo.mkdir(parents=True)
-    (dpo / "adapter_model.safetensors").write_bytes(b"x")
-    run_script(workdir, env, "eval.sh", "5090-8b")
-    assert str(cli_calls(log)[-1]["adapter"]).endswith("/output/dpo")
-    run_script(workdir, env, "eval.sh", "5090-8b", "sft")
-    assert str(cli_calls(log)[-1]["adapter"]).endswith("/output/sft")
+    check_generations(workdir, "sft")
+    assert not (workdir / "artifacts" / "eval" / "dpo").exists()
     assert run_script(workdir, env, "eval.sh", "5090-8b", "nope").returncode == 1
+    missing = run_script(workdir, env, "eval.sh", "5090-8b", "dpo")
+    assert (
+        missing.returncode == 1 and "no adapter in" in missing.stderr and "dpo.sh" in missing.stderr
+    )
+
+
+def trained_with_dpo(
+    tmp_path: Path, profile: str, **fake: int
+) -> tuple[Path, dict[str, str], Path]:
+    """A work directory with the SFT and the DPO adapter, as ``train.sh`` and ``dpo.sh`` leave."""
+    workdir = prepared_workdir(tmp_path, profile, pairs=3, dpo_min_pairs=2)
+    log = install_fake_cli(tmp_path, **fake)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", profile).returncode == 0
+    done = run_script(workdir, env, "dpo.sh", profile)
+    assert done.returncode == 0, done.stderr + done.stdout
+    return workdir, env, log
+
+
+@posix_only
+@pytest.mark.parametrize(("profile", "layered"), [("5090-8b", True), ("5090-14b", False)])
+def test_eval_compares_the_sft_stack_with_the_stack_that_has_dpo_on_the_same_samples(
+    tmp_path: Path, profile: str, layered: bool
+) -> None:
+    """R17-49d (D-650, D-655): both stacks, the same test contexts and validation set.
+
+    The bf16 profile evaluates ``sft,dpo`` (LLaMA-Factory merges both); the 4-bit profile
+    evaluates the one continued adapter (a quantised model refuses a second one, the fake command
+    knows the rule).  A verdict of an earlier evaluation is deleted: it described other texts.
+    """
+    workdir, env, log = trained_with_dpo(tmp_path, profile)
+    (workdir / "state").mkdir(exist_ok=True)
+    (workdir / "state" / "stack_choice").write_text("dpo\n", encoding="utf-8")
+    (workdir / "artifacts" / "eval").mkdir(parents=True, exist_ok=True)
+    (workdir / "artifacts" / "eval" / "stack_choice.json").write_text("{}", encoding="utf-8")
+    before = len(cli_calls(log))
+    done = run_script(workdir, env, "eval.sh", profile)
+    assert done.returncode == 0, done.stderr + done.stdout
+    calls = cli_calls(log)[before:]
+    assert [c["config"] for c in calls] == ["eval_loss.run.yaml", "eval_generate.run.yaml"] * 2
+    sft_dir = f"{workdir}/output/sft"
+    dpo_stack = f"{workdir}/output/dpo" if not layered else f"{sft_dir},{workdir}/output/dpo"
+    assert [str(c["adapter"]) for c in calls] == [sft_dir, sft_dir, dpo_stack, dpo_stack]
+    for stack in ("sft", "dpo"):
+        check_generations(workdir, stack)
+    assert not (workdir / "state" / "stack_choice").exists()
+    assert not (workdir / "artifacts" / "eval" / "stack_choice.json").exists()
+    # the evaluation of one stack alone, on request
+    run_script(workdir, env, "eval.sh", profile, "sft")
+    assert str(cli_calls(log)[-1]["adapter"]) == sft_dir
 
 
 @posix_only
@@ -995,6 +1102,163 @@ def test_dpo_is_skipped_below_the_minimum_and_runs_above_it(tmp_path: Path) -> N
     assert done.returncode == 0, done.stderr
     assert cli_calls(log)[-1]["config"] == "dpo.yaml"
     assert (workdir / "artifacts" / "dpo" / "metrics.json").exists()
+
+
+def dpo_record(workdir: Path) -> dict[str, Any]:
+    value = json.loads((workdir / "artifacts" / "dpo" / "dpo_reference.json").read_text("utf-8"))
+    assert isinstance(value, dict)
+    return value
+
+
+@posix_only
+@pytest.mark.parametrize("profile", ["5090-8b", "pro6000-14b", "pro6000-32b"])
+def test_dpo_of_a_bf16_profile_trains_a_new_adapter_on_sft_without_a_trial(
+    tmp_path: Path, profile: str
+) -> None:
+    """R17-49d (D-650): layered - ``create_new_adapter``, no ``ref_model``, nothing to try first.
+
+    The reference is the merged SFT model (the new adapter switched off), which needs no memory
+    beyond the policy's own, so there is no trial step; the record says so.
+    """
+    workdir, _, log = trained_with_dpo(tmp_path, profile)
+    calls = [c for c in cli_calls(log) if c["stage"] == "dpo"]
+    assert [c["config"] for c in calls] == ["dpo.yaml"]
+    call = calls[0]
+    assert call["adapter"] == f"{workdir}/output/sft" and call["create_new_adapter"] is True
+    assert call["ref_model"] is None and call["max_steps"] is None
+    assert dpo_record(workdir) == {
+        "mode": "layered",
+        "reference": "sft",
+        "reference_quantization_bit": None,
+        "fallback": False,
+        "fallback_reason": None,
+        "per_device_batch": 1,
+        "accumulation": 16,
+        "pairs": 3,
+    }
+    metrics = json.loads((workdir / "artifacts" / "dpo" / "metrics.json").read_text("utf-8"))
+    assert metrics["dpo"]["reference"] == "sft"
+    assert (workdir / "output" / "dpo" / "adapter_model.safetensors").is_file()
+    assert (workdir / "output" / "sft" / "adapter_model.safetensors").is_file()  # untouched
+
+
+@posix_only
+def test_dpo_of_the_4bit_profile_tries_one_step_with_the_explicit_reference_first(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651): the trial is the real config, one step, on the longest pairs."""
+    workdir, _, log = trained_with_dpo(tmp_path, "5090-14b")
+    calls = [c for c in cli_calls(log) if c["stage"] == "dpo"]
+    assert [c["config"] for c in calls] == ["dpo_trial.yaml", "dpo.yaml"]
+    trial, real = calls
+    assert trial["max_steps"] == 1 and trial["dataset"] == "twin_dpo_trial"
+    assert trial["dataset_dir"] == f"{workdir}/trial_data_dpo"
+    assert trial["ref_model"] == real["ref_model"] == str(PROFILES["5090-14b"].model_dir)
+    assert real["ref_model_adapters"] == f"{workdir}/output/sft"
+    assert real["ref_model_quantization_bit"] == 4 and real["create_new_adapter"] is None
+    assert real["max_steps"] is None and real["dataset"] == "twin_dpo_train"
+    assert not (workdir / "trial_data_dpo").exists()  # copies of the pairs do not stay
+    assert not (workdir / "output" / "dpo_trial").exists()
+    assert dpo_record(workdir) == {
+        "mode": "continued",
+        "reference": "sft",
+        "reference_quantization_bit": 4,
+        "fallback": False,
+        "fallback_reason": None,
+        "per_device_batch": 1,
+        "accumulation": 16,
+        "pairs": 3,
+    }
+
+
+@posix_only
+def test_the_dpo_trial_halves_the_batch_before_it_gives_up_the_reference(tmp_path: Path) -> None:
+    """R17-49d (D-651): out of memory with the reference - a smaller batch first (same product)."""
+    workdir = prepared_workdir(tmp_path, "5090-14b", pairs=3, dpo_min_pairs=2)
+    log = install_fake_cli(tmp_path, max_batch_with_ref=2)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", "5090-14b").returncode == 0
+    config = workdir / "config" / "dpo.yaml"
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("per_device_train_batch_size: 1", "per_device_train_batch_size: 8")
+    config.write_text(
+        text.replace("gradient_accumulation_steps: 16", "gradient_accumulation_steps: 2"), "utf-8"
+    )
+    done = run_script(workdir, env, "dpo.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    calls = [c for c in cli_calls(log) if c["stage"] == "dpo"]
+    assert [(c["batch"], c["accumulation"]) for c in calls] == [(8, 2), (4, 4), (2, 8), (2, 8)]
+    assert [c["config"] for c in calls] == ["dpo_trial.yaml"] * 3 + ["dpo.yaml"]
+    assert all(c["ref_model"] for c in calls)  # the reference was never given up
+    assert yaml_value(config, "per_device_train_batch_size") == 2
+    assert yaml_value(config, "gradient_accumulation_steps") == 8
+    record = dpo_record(workdir)
+    assert record["reference"] == "sft" and record["fallback"] is False
+    assert (record["per_device_batch"], record["accumulation"]) == (2, 8)
+
+
+@posix_only
+def test_the_4bit_profile_falls_back_to_the_base_as_the_reference_when_nothing_else_fits(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651): a batch of 1 with the explicit reference runs out of memory - only this
+    profile drops ``ref_model`` (the base with the adapter switched off is the reference), the
+    fact is in the record, in ``metrics.json`` and in the log, and a rerun keeps it."""
+    workdir = prepared_workdir(tmp_path, "5090-14b", pairs=3, dpo_min_pairs=2)
+    log = install_fake_cli(tmp_path, max_batch_with_ref=0)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", "5090-14b").returncode == 0
+    done = run_script(workdir, env, "dpo.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "WARNING: out of memory with the explicit 4-bit SFT reference" in done.stdout
+    calls = [c for c in cli_calls(log) if c["stage"] == "dpo"]
+    assert [c["config"] for c in calls] == ["dpo_trial.yaml", "dpo_trial.yaml", "dpo.yaml"]
+    assert [bool(c["ref_model"]) for c in calls] == [True, False, False]
+    assert (
+        calls[-1]["ref_model_adapters"] is None and calls[-1]["ref_model_quantization_bit"] is None
+    )
+    config = workdir / "config" / "dpo.yaml"
+    assert not any(line.startswith("ref_model") for line in config.read_text("utf-8").splitlines())
+    assert yaml_value(config, "quantization_bit") == 4  # the policy is untouched
+    assert "create_new_adapter" not in config.read_text("utf-8")  # a quantised base cannot
+    record = dpo_record(workdir)
+    assert record["reference"] == "base" and record["fallback"] is True
+    assert (
+        record["reference_quantization_bit"] is None
+        and "out of memory" in record["fallback_reason"]
+    )
+    metrics = json.loads((workdir / "artifacts" / "dpo" / "metrics.json").read_text("utf-8"))
+    assert metrics["dpo"] == record
+    # a second run of the script does not forget it happened
+    again = run_script(workdir, env, "dpo.sh", "5090-14b")
+    assert again.returncode == 0, again.stderr
+    assert dpo_record(workdir)["fallback"] is True and dpo_record(workdir)["reference"] == "base"
+
+
+@posix_only
+def test_the_dpo_trial_stops_for_another_reason_than_memory_and_when_the_base_does_not_fit_either(
+    tmp_path: Path,
+) -> None:
+    workdir = prepared_workdir(tmp_path, "5090-14b", pairs=3, dpo_min_pairs=2)
+    log = install_fake_cli(tmp_path)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", "5090-14b").returncode == 0
+    # nothing fits now, with or without the reference
+    (tmp_path / "stubs" / "max_batch").write_text("0", encoding="utf-8")
+    done = run_script(workdir, env, "dpo.sh", "5090-14b")
+    assert (
+        done.returncode == 1
+        and "even with a batch of 1 and the base as the reference" in done.stderr
+    )
+    assert not (workdir / "trial_data_dpo").exists()
+    assert not (workdir / "artifacts" / "dpo" / "metrics.json").exists()  # no training happened
+    assert [c["config"] for c in cli_calls(log) if c["stage"] == "dpo"] == ["dpo_trial.yaml"] * 2
+    # an error that is not memory is not answered by a smaller batch or a different reference
+    (tmp_path / "stubs" / "max_batch").unlink()
+    (tmp_path / "stubs" / "fail_trial").write_text("1", encoding="utf-8")
+    other = run_script(workdir, env, "dpo.sh", "5090-14b")
+    assert other.returncode == 1 and "for a reason other than memory" in other.stderr
+    assert not (workdir / "trial_data_dpo").exists()
 
 
 # ---------------------------------------------------------------------------- export
@@ -1036,10 +1300,12 @@ def prepare_export(
         TWIN_PROBE_OVERRIDES=write_overrides(tmp_path, probe_free_gb=free_gb),
         TWIN_RUN_ID="r-test-1",
     )
-    sft = workdir / "output" / "sft"
-    sft.mkdir(parents=True)
-    (sft / "adapter_model.safetensors").write_bytes(b"adapter-weights")
-    (sft / "adapter_config.json").write_text("{}", encoding="utf-8")
+    write_tiny_adapter(
+        workdir / "output" / "sft",
+        rank=PROFILES[profile].lora_rank,
+        alpha=PROFILES[profile].lora_alpha,
+        seed=3,
+    )
     # llama.cpp is cloned and built by the prepare step; here its products are in place already
     llama = workdir / "llama.cpp"
     for name, text in EXPORT_STUBS.items():
@@ -1102,7 +1368,10 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
         f"{profile}-Q5_K_M.gguf",
         f"{profile}-Q8_0.gguf",
     ]
-    assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == b"adapter-weights"
+    # one adapter, the SFT one: copied as it is (the layers of a stack are in test_..._stack_...)
+    assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == (
+        workdir / "output" / "sft" / "adapter_model.safetensors"
+    ).read_bytes()
     manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
     assert manifest["run_id"] == "r-test-1" and manifest["profile"] == profile
     assert manifest["template_version"] == "qwen3_nothink@llamafactory-0.9.5"
@@ -1133,6 +1402,193 @@ def test_a_merge_into_a_quantised_base_is_refused_like_llamafactory_does(tmp_pat
     done = run_script(workdir, env, "export.sh", "5090-14b")
     assert done.returncode != 0
     assert "Cannot merge adapters to a quantized model" in done.stderr + done.stdout
+
+
+def add_dpo_adapter(workdir: Path, profile: str, verdict: str | None) -> None:
+    """The DPO adapter of a preference run, and the verdict `twin train remote eval` wrote."""
+    write_tiny_adapter(
+        workdir / "output" / "dpo",
+        rank=PROFILES[profile].lora_rank,
+        alpha=PROFILES[profile].lora_alpha,
+        seed=7,
+    )
+    if verdict is not None:
+        (workdir / "state").mkdir(exist_ok=True)
+        (workdir / "state" / "stack_choice").write_text(f"{verdict}\n", encoding="utf-8")
+
+
+def export_call(tmp_path: Path) -> dict[str, Any]:
+    return next(c for c in cli_calls(tmp_path / "stubs" / "cli_calls.log") if c["mode"] == "export")
+
+
+@posix_only
+def test_the_export_waits_for_the_verdict_when_there_is_a_dpo_adapter(tmp_path: Path) -> None:
+    """R17-49d (D-655): ``auto`` is the stack the evaluation kept; none yet: stop, touch nothing."""
+    workdir, env, _ = prepare_export(tmp_path, "pro6000-14b")
+    add_dpo_adapter(workdir, "pro6000-14b", None)
+    done = run_script(workdir, env, "export.sh", "pro6000-14b")
+    assert done.returncode == 1 and "no evaluation has kept a stack" in done.stderr
+    assert cli_calls(tmp_path / "stubs" / "cli_calls.log") == []
+    assert not (workdir / "output" / "merged").exists()
+    # naming the stack is allowed (the operator decides), and so is the verdict
+    named = run_script(workdir, env, "export.sh", "pro6000-14b", "sft")
+    assert named.returncode == 0, named.stderr
+    assert export_call(tmp_path)["adapter"] == f"{workdir}/output/sft"
+
+
+def lora_delta(directory: Path, module: str) -> Any:
+    """``scale * B @ A`` of one module of the adapter in ``directory`` (float64)."""
+    from safetensors.numpy import load_file
+
+    config = json.loads((directory / "adapter_config.json").read_text("utf-8"))
+    tensors = load_file(str(directory / "adapter_model.safetensors"))
+    a = tensors[f"base_model.model.model.layers.0.self_attn.{module}.lora_A.weight"].astype(
+        "float64"
+    )
+    b = tensors[f"base_model.model.model.layers.0.self_attn.{module}.lora_B.weight"].astype(
+        "float64"
+    )
+    return (config["lora_alpha"] / config["r"]) * (b @ a)
+
+
+@posix_only
+def test_the_export_merges_both_layers_and_composes_them_into_the_adapter_vllm_serves(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-650, D-652, D-653): ``sft,dpo`` into the base; one served adapter of rank 64.
+
+    The served adapter is the rank concatenation of the two layers, the scales folded into B: its
+    delta is the SFT delta plus the DPO delta, whatever alpha and rank each of them has.  The raw
+    layers are kept next to it with their own hashes, in the manifest in order.
+    """
+    import hashlib
+
+    import numpy as np
+
+    workdir, env, _ = prepare_export(tmp_path, "pro6000-14b")
+    add_dpo_adapter(workdir, "pro6000-14b", "dpo")
+    done = run_script(workdir, env, "export.sh", "pro6000-14b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert export_call(tmp_path)["adapter"] == f"{workdir}/output/sft,{workdir}/output/dpo"
+    assert export_call(tmp_path)["quantization_bit"] is None
+    artifacts = workdir / "artifacts"
+    served = artifacts / "adapter"
+    config = json.loads((served / "adapter_config.json").read_text("utf-8"))
+    assert config["r"] == 64 and config["lora_alpha"] == 64  # scale 1: the scales are in B
+    for module in ("q_proj", "v_proj"):
+        expected = lora_delta(artifacts / "adapters" / "sft", module) + lora_delta(
+            artifacts / "adapters" / "dpo", module
+        )
+        assert np.allclose(lora_delta(served, module), expected, rtol=1e-4, atol=1e-5), module
+    for name in ("sft", "dpo"):  # the layers are the adapters the training left, byte for byte
+        left = (workdir / "output" / name / "adapter_model.safetensors").read_bytes()
+        assert (artifacts / "adapters" / name / "adapter_model.safetensors").read_bytes() == left
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    stack = manifest["adapter_stack"]
+    assert manifest["adapter_kind"] == "dpo"
+    assert (stack["kind"], stack["mode"], stack["choice"]) == ("sft+dpo", "layered", "dpo")
+    assert [layer["name"] for layer in stack["layers"]] == ["sft", "dpo"]
+    for layer in stack["layers"]:
+        content = (artifacts / layer["path"]).read_bytes()
+        assert layer["sha256"] == hashlib.sha256(content).hexdigest() and layer["rank"] == 32
+    assert stack["served"]["composed"] is True and stack["served"]["rank"] == 64
+    assert stack["served"]["path"] == "adapter/adapter_model.safetensors"
+    listed = {entry["path"] for entry in manifest["files"]}
+    assert {
+        "adapters/sft/adapter_model.safetensors",
+        "adapters/dpo/adapter_model.safetensors",
+    } <= listed
+    assert [m["path"] for m in manifest["models"] if m["kind"] == "adapter"] == [
+        stack["served"]["path"]
+    ]
+    assert manifest["metrics"]["eval_val_loss"] is None  # no evaluation ran in this test
+
+
+@posix_only
+def test_the_export_keeps_the_sft_stack_when_the_evaluation_did(tmp_path: Path) -> None:
+    """R17-49d (D-655): the DPO adapter exists but lost: SFT alone is merged and served."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-8b")
+    add_dpo_adapter(workdir, "5090-8b", "sft")
+    done = run_script(workdir, env, "export.sh", "5090-8b")
+    assert done.returncode == 0, done.stderr
+    assert export_call(tmp_path)["adapter"] == f"{workdir}/output/sft"
+    artifacts = workdir / "artifacts"
+    assert not (artifacts / "adapters").exists()
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    assert manifest["adapter_kind"] == "sft" and manifest["adapter_stack"]["kind"] == "sft"
+    assert manifest["adapter_stack"]["served"]["composed"] is False
+    assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == (
+        workdir / "output" / "sft" / "adapter_model.safetensors"
+    ).read_bytes()
+
+
+@posix_only
+def test_the_export_of_the_4bit_profile_uses_the_one_continued_adapter(tmp_path: Path) -> None:
+    """R17-49d (D-650): the DPO adapter of the 4-bit profile already holds SFT: it is the stack."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-14b")
+    add_dpo_adapter(workdir, "5090-14b", "dpo")
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr
+    call = export_call(tmp_path)
+    assert call["adapter"] == f"{workdir}/output/dpo"  # never sft,dpo: SFT would count twice
+    assert call["export_device"] == "cpu" and call["quantization_bit"] is None
+    artifacts = workdir / "artifacts"
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    stack = manifest["adapter_stack"]
+    assert (stack["kind"], stack["mode"]) == ("dpo", "continued")
+    assert [layer["name"] for layer in stack["layers"]] == ["dpo"]
+    assert (
+        stack["layers"][0]["path"] == stack["served"]["path"] == "adapter/adapter_model.safetensors"
+    )
+    assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == (
+        workdir / "output" / "dpo" / "adapter_model.safetensors"
+    ).read_bytes()
+    assert not (artifacts / "adapters").exists()
+
+
+@posix_only
+def test_a_rerun_of_collect_uses_the_stack_the_merge_used(tmp_path: Path) -> None:
+    """R17-49d: the step that collects the adapters must not pick another stack than the merge."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-8b")
+    add_dpo_adapter(workdir, "5090-8b", "dpo")
+    assert run_script(workdir, env, "export.sh", "5090-8b").returncode == 0
+    (workdir / "state" / "stack_choice").write_text("sft\n", encoding="utf-8")
+    (workdir / "state" / "export.collect_artifacts").unlink()
+    done = run_script(workdir, env, "export.sh", "5090-8b")
+    assert done.returncode == 0, done.stderr
+    manifest = json.loads((workdir / "artifacts" / "manifest.json").read_text("utf-8"))
+    assert manifest["adapter_stack"]["kind"] == "sft+dpo"  # what was merged, not the new verdict
+
+
+@posix_only
+def test_the_manifest_refuses_a_layer_that_changed_after_the_stack_was_recorded(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-653): every layer is hashed again when the manifest is written."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-8b")
+    add_dpo_adapter(workdir, "5090-8b", "dpo")
+    assert run_script(workdir, env, "export.sh", "5090-8b").returncode == 0
+    layer = workdir / "artifacts" / "adapters" / "dpo" / "adapter_model.safetensors"
+    layer.write_bytes(layer.read_bytes() + b"x")
+    (workdir / "artifacts" / "manifest.json").unlink()
+    manifest_tool = workdir / "autodl" / "tools" / "artifact_manifest.py"
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(manifest_tool),
+            "--artifacts",
+            str(workdir / "artifacts"),
+            "--bundle-manifest",
+            str(workdir / "manifest.json"),
+            "--quants",
+            "Q4_K_M,Q5_K_M,Q8_0",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 1 and "changed after adapter_stack.json was written" in done.stderr
+    assert not (workdir / "artifacts" / "manifest.json").exists()
 
 
 @posix_only
