@@ -35,11 +35,14 @@ ALL_LOCKS = (LOCK_RUN, LOCK_SUPERVISOR)
 class InstanceAlreadyRunningError(RuntimeError):
     """Another instance holds the lock."""
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, message: str | None = None) -> None:
         self.lock_name = name
         super().__init__(
-            f"another '{name}' instance is already running (lock '{name}' is held). "
-            "Stop it first, or use the running application."
+            message
+            or (
+                f"another '{name}' instance is already running (lock '{name}' is held). "
+                "Stop it first, or use the running application."
+            )
         )
 
 

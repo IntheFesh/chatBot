@@ -35,7 +35,7 @@ from twin.channel.ilink.login import LoginError, LoginResult
 from twin.channel.ilink.qr import open_in_viewer, remove_old_pngs, save_png
 from twin.channel.ilink.store import IlinkStore
 from twin.channel.state import ChannelStateStore
-from twin.ops.logging import get_logger
+from twin.ops.logging import exception_summary, get_logger
 from twin.services import Services
 
 log = get_logger("twin.login_recovery")
@@ -248,7 +248,7 @@ class LoginRecovery:
         try:
             await self._runner(ui)
         except LoginError as exc:
-            log.warning("login_recovery_failed", reason=str(exc)[:80])
+            log.warning("login_recovery_failed", reason=exception_summary(exc))
             self._next_try = self._clock.monotonic() + self._retry_s
             return False
         finally:

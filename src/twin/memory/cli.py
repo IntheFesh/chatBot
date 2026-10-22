@@ -3,8 +3,10 @@
 ``replay estimate``, ``replay status``, ``list`` and ``block`` (the memory block a reply would
 get, to judge the recall) only read.  ``replay start`` is HEAVY: it
 queues the replay of the days that need it as one-time batches and prints the estimate; nothing
-runs before ``twin jobs approve <batch>`` (R-LLM-014).  ``remember``, ``forget`` and ``reindex``
-are short changes (LIGHT).  ``summarize`` queues the summary of one day (HEAVY).
+runs before ``twin jobs approve <batch>`` (R-LLM-014).  ``remember`` and ``forget`` are short
+changes (LIGHT).  ``summarize`` queues the summary of one day and ``reindex`` queues the
+re-encoding of every vector (HEAVY; ``reindex --foreground`` runs it here when the application is
+stopped, round 17 item 29, D-713).
 The commands print counts, dates and money; ``list``, ``remember`` and ``forget`` show memory
 text to the person who asked, on their own terminal, and nothing of it reaches a log.
 """
@@ -22,7 +24,13 @@ from rich.table import Table
 from twin.llm.runtime import build_llm_runtime, closing_llm_runtime
 from twin.memory.assemble import MemoryAssembler
 from twin.memory.blocks import MemoryQuery
-from twin.memory.jobs import queue_daily_summary
+from twin.memory.jobs import (
+    REINDEX_JOB,
+    handle_memory_reindex,
+    queue_daily_summary,
+    queue_memory_reindex,
+    read_reindex_state,
+)
 from twin.memory.manage import MemoryManager
 from twin.memory.memory import Memory
 from twin.memory.replay import (
@@ -31,7 +39,9 @@ from twin.memory.replay import (
     plan_replay,
     replay_status,
 )
-from twin.ops.process_model import CliError, CommandKind, ExitCode, command
+from twin.ops.foreground import run_jobs_until_idle
+from twin.ops.jobs import HandlerRegistry
+from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
 from twin.services import Services, get_cli_context
 
 memory_app = typer.Typer(
@@ -301,9 +311,27 @@ def memory_summarize(
 
 
 @memory_app.command("reindex")
-@command(CommandKind.LIGHT)
-def memory_reindex() -> None:
-    """Encode every fact and summary again (after the embedding model changed)."""
+@command(CommandKind.HEAVY)
+def memory_reindex(
+    foreground: Annotated[
+        bool, typer.Option("--foreground", help="Run here when the application is stopped")
+    ] = False,
+) -> None:
+    """Encode every fact and summary again (queued as a job; after the embedding model changed)."""
     services = get_cli_context().services()
-    result = Memory(services).reindex()
-    typer.echo(f"encoded {result.encoded:,} record(s)")
+    queued = queue_memory_reindex(services)
+    verb = "a re-encoding is already waiting" if queued.already_queued else "queued"
+    typer.echo(f"{verb} (job {queued.job_id})")
+    if not foreground:
+        typer.echo("the running application executes it; see `twin jobs list`")
+        return
+    if app_is_running(services):
+        typer.echo("the application is running and will execute the job")
+        return
+    registry = HandlerRegistry()
+    registry.register(REINDEX_JOB, handle_memory_reindex)
+    summary = asyncio.run(run_jobs_until_idle(services, registry))
+    state = read_reindex_state(services)
+    if summary.failed or summary.retried or state is None or state.get("state") != "done":
+        raise CliError("the re-encoding did not finish; see `twin jobs list`", ExitCode.FAILURE)
+    typer.echo(f"encoded {int(state.get('encoded', 0)):,} record(s)")

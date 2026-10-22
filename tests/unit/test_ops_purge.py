@@ -18,10 +18,11 @@ from tests.support.embedding import HashingBackend
 from tests.support.training_history import MOMENT, record_training
 from twin.cli import app
 from twin.config.secrets import SecretStore
+from twin.ops import purge_cli
 from twin.ops.backup.archive import read_manifest
 from twin.ops.backup.layout import POOL_DIRNAME
 from twin.ops.backup.sealed import BackupDecryptionError
-from twin.ops.instance_lock import LOCK_RUN, InstanceLock
+from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, InstanceLock
 from twin.ops.process_model import ExitCode
 from twin.ops.purge import (
     CONFIRM_ALL,
@@ -409,6 +410,49 @@ def test_the_running_application_blocks_the_purge(cli: Installation) -> None:
         lock.release()
     assert code == ExitCode.BUSY and "twin service stop" in out
     assert cli.paths.db_path.is_file() and cli.services.keystore.exists()
+
+
+@pytest.mark.parametrize("scope", ["--all", "--training-only"])
+def test_the_locks_are_held_while_the_phrase_is_asked_for_and_while_it_deletes(
+    cli: Installation, monkeypatch: pytest.MonkeyPatch, scope: str
+) -> None:
+    """R17-28 (D-710): the application cannot start between the question and the deletion.
+
+    The command used to look at the locks twice (before the question and before deleting); the
+    wrapper now takes them for the whole command, so the second look is gone (it would see the
+    command's own hold) and both scopes still run to the end.
+    """
+    free: dict[str, list[bool]] = {}
+
+    def which_are_free() -> list[bool]:
+        taken = []
+        for name in ALL_LOCKS:
+            lock = InstanceLock(name, locks_dir=cli.paths.locks_dir)
+            taken.append(lock.acquire())
+            lock.release()
+        return taken
+
+    asked, deleted = (
+        purge_cli._confirm,
+        purge_cli.purge_training if scope == "--training-only" else purge_cli.purge_all,
+    )
+
+    def question(plan: object, phrase: str) -> None:
+        free["question"] = which_are_free()
+        asked(plan, phrase)  # type: ignore[arg-type]
+
+    def deleting(*args: object, **kwargs: object) -> object:
+        free["delete"] = which_are_free()
+        return deleted(*args, **kwargs)  # type: ignore[operator]
+
+    monkeypatch.setattr(purge_cli, "_confirm", question)
+    name = "purge_training" if scope == "--training-only" else "purge_all"
+    monkeypatch.setattr(purge_cli, name, deleting)
+    phrase = CONFIRM_TRAINING if scope == "--training-only" else CONFIRM_ALL
+    code, out = run_purge(cli, scope, phrase=phrase)
+    assert code == 0, out
+    assert free == {"question": [False, False], "delete": [False, False]}
+    assert which_are_free() == [True, True]
 
 
 def upload_to_the_rented_machine(services: Services) -> None:

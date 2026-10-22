@@ -28,6 +28,7 @@ class FakeWin32:
         self.jobs: dict[int, list[int]] = {}
         self.open_processes: list[int] = []
         self.assign_fails = False
+        self.processes: dict[int, float | None] = {}  # pid -> creation time (None: unreadable)
 
     def create_mutex(self, name: str) -> tuple[int | None, int]:
         if self.mutex_fails:
@@ -105,6 +106,14 @@ class FakeWin32:
             return False
         self.jobs[job].append(process)
         return True
+
+    # -- other processes ----------------------------------------------------------
+
+    def process_alive(self, pid: int) -> bool:
+        return pid in self.processes
+
+    def process_started_at(self, pid: int) -> float | None:
+        return self.processes.get(pid)
 
     def wait_for_window(self, timeout: float = 5.0) -> bool:
         return self._window_ready.wait(timeout)

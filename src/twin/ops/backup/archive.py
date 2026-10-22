@@ -174,13 +174,21 @@ def _tables_of(connection: sqlite3.Connection) -> set[str]:
 
 
 def _key_ids_in(connection: sqlite3.Connection, present: set[str]) -> set[int]:
-    """The key ids that the encrypted values of the database carry (a SQL scan, no decryption)."""
+    """The key ids that the encrypted values of the database carry (a SQL scan, no decryption).
+
+    The database may be of an older schema than the models (a backup made before a migration):
+    a column that does not exist yet is skipped - SQLite would otherwise read the double-quoted
+    name as a string and the scan would "find" it (round 17 item 44, ``jobs.last_error_detail``).
+    """
     key_ids: set[int] = set()
     for spec in encrypted_tables():
         name = str(spec.table.name)
         if name not in present:
             continue
+        existing = {str(row[1]) for row in connection.execute(f'PRAGMA table_info("{name}")')}
         for column in spec.columns:
+            if column.name not in existing:
+                continue
             found = connection.execute(
                 f'SELECT DISTINCT substr("{column.name}", 2, 4) FROM "{name}" '
                 f'WHERE "{column.name}" IS NOT NULL'
