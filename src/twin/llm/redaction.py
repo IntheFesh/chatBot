@@ -118,8 +118,12 @@ _WXID_LABELLED = re.compile(
 _ID_CARD = re.compile(r"(?<![0-9A-Za-z])[1-9]\d{16}[\dXx](?![0-9A-Za-z])")
 _BANK_CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){15,18}(?!\d)")
 _CN_PHONE = re.compile(r"(?<![\d])(?:(?:\+|00)?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?![\d])")
+# A dot next to the number is only a decimal point when a digit is on its other side
+# (``3.14159``, ``192.168.100.1234``, ``312-555-0123.5``); a dot that ends a sentence
+# (``call me at 312-555-0123.``) is not (R17-9, D-640).
 _US_PHONE = re.compile(
-    r"(?<![\d.])(?:\+?1[-.\s]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[-.\s]?[2-9]\d{2}[-.\s]?\d{4}(?![\d.])"
+    r"(?<!\d)(?<!\d\.)(?:\+?1[-.\s]?)?(?:\([2-9]\d{2}\)|[2-9]\d{2})[-.\s]?[2-9]\d{2}[-.\s]?\d{4}"
+    r"(?!\d)(?!\.\d)"
 )
 
 _PROVINCE = (

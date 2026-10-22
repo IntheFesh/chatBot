@@ -486,6 +486,30 @@ def test_the_scan_names_the_kind_of_personal_data_and_the_sample_never_its_text(
         scan_sample(export_module.SftSample("w3", "系统", clean.turns, "好\n[语音 5 秒，未转写]"))
 
 
+@pytest.mark.parametrize(
+    "where",
+    ["system", "turn", "reply"],
+)
+@pytest.mark.parametrize(
+    "text",
+    ["call me at 312-555-0123.", "+1 312.555.0123.", "(312) 555-0123.", "Tel. 312-555-0123。"],
+)
+def test_r17_9_the_residual_scan_sees_a_number_at_the_end_of_a_sentence(
+    where: str, text: str
+) -> None:
+    """R17-9: the scan uses the detector, so the dot guard had hidden these from both."""
+    system = text if where == "system" else "系统"
+    turn = text if where == "turn" else "你好"
+    reply = text if where == "reply" else "在呢"
+    sample = export_module.SftSample("w9", system, (lf_template.Turn("user", turn),), reply)
+    with pytest.raises(ExportError, match=r"personal data \(phone\)"):
+        scan_sample(sample)
+    clean = export_module.SftSample(
+        "w10", "系统", (lf_template.Turn("user", "版本 3.12.13，pi=3.14159，10.234.567.8901"),), "好"
+    )
+    scan_sample(clean)
+
+
 # ----------------------------------------------------------------------- long samples
 
 
