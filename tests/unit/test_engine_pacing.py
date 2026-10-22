@@ -9,6 +9,8 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tests.support.engine_extras import Routine
 from tests.support.engine_harness import START
@@ -26,7 +28,9 @@ from twin.engine.pacing import (
     Fixed,
     LogNormal,
     PacingModel,
+    first_bubble_lead,
     reading_time,
+    silence_before_typing,
 )
 from twin.profile.api import load_profile
 from twin.profile.builder import rebuild
@@ -132,6 +136,45 @@ def test_the_pause_between_bubbles_is_her_pause_plus_typing_and_never_below_a_se
     assert (
         slow.bubble_interval(random.Random(1), 10, first=True) == 5.0
     )  # no pause before the first
+
+
+# ------------------------------------------------------------ the first bubble in time
+
+
+def test_the_first_bubble_is_awaited_silently_until_its_typing_fits_before_it_is_due() -> None:
+    """R17-34 (D-723): the typing is the last part of the delay, not an addition to it."""
+    assert silence_before_typing(20.0, 3.0) == 17.0  # silent for 17 s, "typing" for the last 3
+    assert silence_before_typing(2.0, 3.0) == MIN_INTERVAL_S  # no room left: the least wait
+    assert silence_before_typing(0.0, 3.0) == MIN_INTERVAL_S  # due now
+    assert silence_before_typing(-40.0, 3.0) == MIN_INTERVAL_S  # late (a slow generation)
+    assert silence_before_typing(4.0, 3.0) == MIN_INTERVAL_S  # exactly the least wait
+
+
+def test_the_lead_of_a_reply_is_its_generation_the_silent_second_and_the_typing() -> None:
+    assert first_bubble_lead(8.0, 1.0) == 8.0 + MIN_INTERVAL_S + 1.0
+    assert first_bubble_lead(0.0, 5.0) == MIN_INTERVAL_S + 5.0
+
+
+@given(
+    due_in=st.floats(min_value=-600.0, max_value=3600.0, allow_nan=False),
+    typing=st.floats(min_value=MIN_INTERVAL_S, max_value=TYPING_MAX_S, allow_nan=False),
+    generation=st.floats(min_value=0.0, max_value=30.0, allow_nan=False),
+)
+def test_the_first_bubble_never_appears_before_it_is_due_unless_it_is_late(
+    due_in: float, typing: float, generation: float
+) -> None:
+    """R17-34: silence + typing ends at the due moment whenever there is room for both, and a reply
+    begun its lead before the moment is shown exactly at it."""
+    silence = silence_before_typing(due_in, typing)
+    assert silence >= MIN_INTERVAL_S
+    if due_in >= MIN_INTERVAL_S + typing:
+        assert silence + typing == pytest.approx(due_in)
+    else:
+        assert silence + typing > due_in - 1e-9  # late: after the moment, never before
+    lead = first_bubble_lead(generation, typing)
+    assert silence_before_typing(lead - generation, typing) + typing == pytest.approx(
+        lead - generation
+    )
 
 
 # ------------------------------------------------------------------------ quiet window

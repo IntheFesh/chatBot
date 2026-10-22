@@ -19,9 +19,10 @@ import random
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from tests.support.clock import DEFAULT_START, ManualClock
 from tests.support.reply_view import StaticDataView, make_profile
@@ -270,15 +271,28 @@ def make_draft(
 
 
 class ScriptedWriter:
-    """The reply pipeline of a test: answers from a script, optionally held back by a gate."""
+    """The reply pipeline of a test: answers from a script, optionally held back by a gate.
 
-    def __init__(self, *answers: ReplyDraft | BaseException) -> None:
+    ``takes_s`` (with ``clock``): the generation lasts that many seconds *of the manual clock* -
+    the test moves the clock (``clock.advance``) while the writer sleeps on it.
+    """
+
+    def __init__(
+        self,
+        *answers: ReplyDraft | BaseException,
+        clock: ManualClock | None = None,
+        takes_s: float = 0.0,
+    ) -> None:
         self.answers: deque[ReplyDraft | BaseException] = deque(answers)
         self.contexts: list[ReplyContext] = []
         self.started = asyncio.Event()
         self.gate: asyncio.Event | None = None
         self.cancelled = 0
         self.calls = 0
+        self.clock = clock
+        self.takes_s = takes_s
+        self.began: list[datetime] = []  # when each generation began (the manual clock)
+        self.sleeping = False  # the generation is lasting (``takes_s``) on the manual clock
 
     def add(self, *answers: ReplyDraft | BaseException) -> None:
         self.answers.extend(answers)
@@ -286,13 +300,20 @@ class ScriptedWriter:
     async def run(self, context: ReplyContext, data: Any) -> ReplyDraft:
         self.calls += 1
         self.contexts.append(context)
+        if self.clock is not None:
+            self.began.append(self.clock.now_utc())
         self.started.set()
-        if self.gate is not None:
-            try:
+        try:
+            if self.gate is not None:
                 await self.gate.wait()
-            except asyncio.CancelledError:
-                self.cancelled += 1
-                raise
+            if self.clock is not None and self.takes_s > 0:
+                self.sleeping = True
+                await self.clock.sleep(self.takes_s)
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        finally:
+            self.sleeping = False
         answer = self.answers.popleft() if self.answers else make_draft("好的")
         if isinstance(answer, BaseException):
             raise answer
@@ -326,6 +347,36 @@ class FixedDay:
 
     def state_at(self, moment: datetime) -> HerState:
         """The :class:`~twin.schedule.time_service.StateSource` form of :meth:`her_state`."""
+        return self.her_state(moment)
+
+
+class ZonedDay:
+    """Her day by the clock of a time zone: deep sleep from 00:00 to ``wake_at``, free otherwise.
+
+    The zone is what ``/时区`` switches: ``day.zone = "Asia/Shanghai"`` moves her whole day at
+    once, as the real plan does after a switch (the engine hears of it as of any changed setting,
+    ``engine.on_state_change``).  At 16:00 UTC it is 11:00 in Chicago and midnight in Shanghai.
+    """
+
+    def __init__(self, zone: str, *, wake_at: time = time(7, 0)) -> None:
+        self.zone = zone
+        self.wake_at = wake_at
+        self.busy = None
+        self.unavailable = False
+
+    def her_state(self, at: datetime | None = None) -> HerState:
+        if self.unavailable or at is None:
+            raise PlanUnavailableError("no plan")
+        zone = ZoneInfo(self.zone)
+        local = at.astimezone(zone)
+        midnight = datetime.combine(local.date(), time(0, 0), tzinfo=zone)
+        up = datetime.combine(local.date(), self.wake_at, tzinfo=zone)
+        if local < up:
+            return HerState("deep_sleep", midnight.astimezone(UTC), up.astimezone(UTC), "plan1")
+        tomorrow = datetime.combine(local.date() + timedelta(days=1), time(0, 0), tzinfo=zone)
+        return HerState("free", up.astimezone(UTC), tomorrow.astimezone(UTC), "plan1")
+
+    def state_at(self, moment: datetime) -> HerState:
         return self.her_state(moment)
 
 
@@ -413,7 +464,7 @@ class Harness:
     engine: ConversationEngine
     channel: ScriptedChannel
     writer: ScriptedWriter
-    day: FixedDay
+    day: FixedDay | ZonedDay
     clock: ManualClock
     services: Services
     crisis: ScriptedCrisis
@@ -437,7 +488,7 @@ def build_harness(
     *,
     writer: ScriptedWriter | None = None,
     channel: ScriptedChannel | None = None,
-    day: FixedDay | None = None,
+    day: FixedDay | ZonedDay | None = None,
     pacing: PacingModel | None = None,
     crisis: ScriptedCrisis | None = None,
     commands: Any = None,
@@ -447,8 +498,14 @@ def build_harness(
     short_answers: ShortAnswers | None = None,
     renderer: InboundRenderer | None = None,
     probe_active: Callable[[], bool] | None = None,
+    stop_grace_s: float | None = None,
 ) -> Harness:
-    """Wire an engine the way ``build_engine`` does, with the doubles of this module."""
+    """Wire an engine the way ``build_engine`` does, with the doubles of this module.
+
+    ``stop_grace_s``: how many real seconds ``engine.stop()`` waits for a bubble that is being
+    handed to the channel (the engine's own default when not given); a test whose channel never
+    answers passes a very small one.
+    """
     chosen_channel = channel or ScriptedChannel(clock)
     chosen_writer = writer or ScriptedWriter()
     chosen_day = day or FixedDay((START - timedelta(days=1), "free"))
@@ -495,6 +552,7 @@ def build_harness(
         pacing=lambda view: chosen_pacing,
         queue_extraction=queue,
         probe_active=probe_active,
+        **({} if stop_grace_s is None else {"stop_grace_s": stop_grace_s}),
     )
     return Harness(
         engine,
@@ -538,11 +596,13 @@ async def run_to_idle(
     *,
     limit_s: float = 20.0,
     until: Callable[[], bool] | None = None,
+    writer: ScriptedWriter | None = None,
 ) -> int:
     """Let the engine finish the round: advance to every wait until idle (or ``until`` holds).
 
     Returns how many waits were skipped.  Only real time is bounded (``limit_s``): the engine's
-    own waiting is skipped by moving the manual clock, so a night's sleep costs nothing.
+    own waiting is skipped by moving the manual clock, so a night's sleep costs nothing.  With a
+    ``writer`` that takes time (``takes_s``) the clock also runs through the generation.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + limit_s
@@ -556,6 +616,11 @@ async def run_to_idle(
         waiting = engine.waiting_until
         if waiting is not None and not engine.pending_wake:  # not a wait that is about to end
             await clock.advance(seconds_until(clock, waiting))
+            steps += 1
+        elif (
+            writer is not None and writer.sleeping
+        ):  # the reply is being made: let it take its time
+            await clock.advance(writer.takes_s)
             steps += 1
         else:
             await asyncio.sleep(0.003)

@@ -27,6 +27,7 @@ from tests.support.engine_harness import (
 )
 from tests.support.waiting import wait_until
 from twin.channel.base import OutboundKind, OutboundResult
+from twin.engine import machine
 from twin.engine.roundstate import RoundData
 from twin.schedule.events import Resumed
 from twin.services import Services
@@ -260,7 +261,8 @@ async def test_a_stop_inside_a_send_does_not_say_the_bubble_twice(
     and goes on after it.
     """
     channel = SilentAfterDelivery(clock, hang_on="二")
-    first = build_harness(services, clock, channel=channel)
+    # the channel never answers, so the stop's grace for a send under way runs out: a tiny one
+    first = build_harness(services, clock, channel=channel, stop_grace_s=0.05)
     await first.engine.start()
     first.writer.add(make_draft("一", "二", "三"))
     await first.message("数数")
@@ -289,6 +291,163 @@ async def test_a_stop_inside_a_send_does_not_say_the_bubble_twice(
         assert left is None and second.engine.snapshot().state == "IDLE"
     finally:
         await second.engine.stop()
+
+
+class GatedChannel(ScriptedChannel):
+    """A channel that has delivered a bubble but answers only when the test lets it."""
+
+    def __init__(self, clock: ManualClock, gate_on: str) -> None:
+        super().__init__(clock)
+        self.gate_on = gate_on
+        self.reached = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def send_text(self, text: str, *args: Any, **kwargs: Any) -> Any:
+        result = await super().send_text(text, *args, **kwargs)
+        if text == self.gate_on:
+            self.reached.set()
+            await self.gate.wait()
+        return result
+
+
+def reply_steps(harness: Harness) -> list[str]:
+    with harness.services.db.session() as session:
+        rows = session.scalars(select(BotTurn).where(BotTurn.direction == "out"))
+        return [a["step"] for row in rows for a in row.actions or []]
+
+
+async def test_a_stop_waits_for_the_bubble_that_is_being_sent_and_writes_it_down(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-25 (D-721): the stop waits for the send under way instead of cutting it.
+
+    The channel has the bubble and has not answered yet.  Before: the stop cancelled the driver
+    at once, the bubble stayed "in doubt" and the next start wrote it down as ambiguous.  Now
+    ``stop()`` does not return until the answer is in and the bubble is written down; the sender
+    starts nothing more (no typing wait, no "send_interrupted"); the next start sends only what
+    was left, with no ``bubble_in_doubt`` and nothing twice.
+    """
+    channel = GatedChannel(clock, gate_on="二")
+    first = build_harness(services, clock, channel=channel)
+    await first.engine.start()
+    driver = first.engine._driver  # type: ignore[attr-defined]
+    first.writer.add(make_draft("一", "二", "三"))
+    await first.message("数数")
+    await run_to_idle(first.engine, clock, until=channel.reached.is_set)
+    stored = RoundData.of(first.engine.snapshot()).outgoing
+    assert stored is not None and stored.in_flight is not None and stored.in_flight.text == "二"
+
+    stopping = asyncio.create_task(first.engine.stop())
+    await wait_until(lambda: first.engine._driver is None)  # type: ignore[attr-defined]
+    for _ in range(25):
+        await asyncio.sleep(0)
+    assert not stopping.done()  # it waits for the bubble that is on its way
+    channel.gate.set()
+    await asyncio.wait_for(stopping, 10)
+
+    assert driver is not None and driver.done()
+    assert channel.texts == ["一", "二"]  # "三" was not started
+    snap = first.engine.snapshot()
+    left = RoundData.of(snap).outgoing
+    assert left is not None and left.in_flight is None  # the note of the send is cleared ...
+    assert [b.text for b in left.unsent] == ["三"]
+    assert [item["text"] for item in snap.sent] == ["一", "二"]  # ... and "二" is written down
+    assert out_texts(first) == ["一", "二"]
+    assert "send_interrupted" not in reply_steps(first)  # a stop is not the user writing
+
+    second = await restart(first, clock_jump_s=60, channel=ScriptedChannel(clock))
+    try:
+        await run_to_idle(second.engine, second.clock)
+        assert second.channel.texts == ["三"] and second.writer.calls == 0
+        assert out_texts(second) == ["一", "二", "三"]
+        steps = reply_steps(second)
+        assert "bubble_in_doubt" not in steps and "send_interrupted" not in steps
+        assert second.engine.snapshot().state == "IDLE"
+    finally:
+        await second.engine.stop()
+
+
+async def test_a_send_that_could_not_even_be_noted_does_not_hold_the_stop(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-25: nothing was handed to the channel, so the stop has nothing to wait for."""
+    first = build_harness(services, clock, stop_grace_s=60.0)
+    await first.engine.start()
+
+    def broken(*args: Any) -> Any:
+        raise RuntimeError("the note of the send could not be made")
+
+    monkeypatch.setattr(machine, "_with_in_flight", broken)
+    await first.message("在吗")
+    await run_to_idle(first.engine, clock, until=lambda: "engine_error" in first.alerts.categories)
+    assert first.engine._safe_to_cancel.is_set()  # type: ignore[attr-defined]
+    await asyncio.wait_for(first.engine.stop(), 10)  # not the sixty seconds of the grace
+    assert first.channel.texts == []
+
+
+async def test_a_stop_gives_up_on_a_send_that_never_answers_after_the_grace(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-25: the wait for a send under way is bounded (real seconds, ``stop_grace_s``)."""
+    channel = SilentAfterDelivery(clock, hang_on="二")
+    first = build_harness(services, clock, channel=channel, stop_grace_s=0.2)
+    await first.engine.start()
+    first.writer.add(make_draft("一", "二", "三"))
+    await first.message("数数")
+    await run_to_idle(first.engine, clock, until=channel.reached.is_set)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await asyncio.wait_for(first.engine.stop(), 10)
+    waited = loop.time() - began
+    assert 0.15 <= waited < 9  # the grace was given, and then the driver was cancelled
+    stored = RoundData.of(first.engine.snapshot()).outgoing
+    assert stored is not None and stored.in_flight is not None  # in doubt, as before
+
+
+async def test_a_stop_between_two_bubbles_does_not_wait_for_the_grace(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-25: only a bubble that is being handed over holds the stop, not a pause between two."""
+    first = build_harness(services, clock, stop_grace_s=60.0)
+    await first.engine.start()
+    first.writer.add(make_draft("一", "二", "三"))
+    await first.message("数数")
+    await run_to_idle(first.engine, clock, until=bubbles_written(first.engine, 1))
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    await asyncio.wait_for(first.engine.stop(), 10)
+    assert loop.time() - began < 9  # not the sixty seconds of the grace
+    second = await restart(first, clock_jump_s=60)
+    try:
+        await run_to_idle(second.engine, second.clock)
+        assert out_texts(second) == ["一", "二", "三"]  # each once
+        assert "bubble_in_doubt" not in reply_steps(second)
+    finally:
+        await second.engine.stop()
+
+
+async def test_a_stop_lets_the_crisis_answer_go_out_whole(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-25: a stop does not cut the out-of-role answer to a crisis (three bubbles, then idle)."""
+    from tests.support.engine_harness import ScriptedCrisis
+
+    channel = GatedChannel(clock, gate_on="我想先停一下。")
+    first = build_harness(services, clock, channel=channel, crisis=ScriptedCrisis("不想活"))
+    await first.engine.start()
+    await first.message("我不想活了")
+    await run_to_idle(first.engine, clock, until=channel.reached.is_set)
+    stopping = asyncio.create_task(first.engine.stop())
+    await wait_until(lambda: first.engine._driver is None)  # type: ignore[attr-defined]
+    for _ in range(25):
+        await asyncio.sleep(0)
+    assert not stopping.done()
+    channel.gate.set()
+    await asyncio.wait_for(stopping, 10)
+    assert channel.texts == ["我想先停一下。", "你现在还好吗？", "也可以联系 988。"]
+    snap = first.engine.snapshot()
+    assert snap.state == "IDLE" and snap.pending == ()  # the round ended with the answer
+    assert out_texts(first) == ["我想先停一下。", "你现在还好吗？", "也可以联系 988。"]
 
 
 async def test_a_send_that_ended_without_a_bubble_clears_the_note(rig: Harness) -> None:

@@ -8,6 +8,7 @@ import inspect
 import io
 import random
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -99,6 +100,65 @@ async def test_the_first_bubble_waits_for_its_typing_and_later_ones_for_a_pause_
     assert report.stop is None and [s.bubble.text for s in report.sent] == ["你好呀", "在做什么呢"]
     # typing three characters at 0.5 s; then her pause of 4 s and typing five characters
     assert rig.waits == [1.5, 4.0 + 2.5]
+
+
+async def test_a_first_bubble_that_is_due_later_is_awaited_silently_and_typed_at_the_end(
+    rig: Rig, clock: ManualClock
+) -> None:
+    """R17-34 (D-723): the bubble appears at the moment its delay ends; "typing" shows only for
+    the last of it (three characters at half a second: a second and a half)."""
+    shown_before: list[int] = []
+
+    async def wait(seconds: float) -> bool:
+        rig.waits.append(seconds)
+        shown_before.append(len(rig.channel.out))  # what the user has seen when the pause begins
+        return False
+
+    due = clock.now_utc() + timedelta(seconds=30)
+    report = await rig.sender.send(
+        [text("你好呀"), text("在做什么呢")],
+        pacing=reference_pacing(),
+        wait=wait,
+        on_sent=rig.keep,
+        first_due_at=due,
+    )
+    assert report.stop is None and len(report.sent) == 2
+    # 28.5 s of silence, then the typing of the first bubble; the second one as always
+    assert rig.waits == [28.5, 1.5, 4.0 + 2.5]
+    assert shown_before == [0, 1, 3]  # nothing at all during the silence; the typing after it
+
+
+async def test_a_first_bubble_that_is_late_waits_the_least_before_it_types(
+    rig: Rig, clock: ManualClock
+) -> None:
+    """R17-34: the generation took longer than the lead: a second of silence, then the typing."""
+    await rig.send(text("你好呀"), first_due_at=clock.now_utc() - timedelta(seconds=30))
+    assert rig.waits == [MIN_INTERVAL_S, 1.5]
+    await rig.send(text("你好呀"), first_due_at=clock.now_utc() + timedelta(seconds=2))
+    assert rig.waits[2:] == [MIN_INTERVAL_S, 1.5]  # two seconds left, the typing needs 1.5
+
+
+async def test_the_due_moment_belongs_to_the_first_bubble_of_a_new_reply_only(
+    rig: Rig, clock: ManualClock
+) -> None:
+    due = clock.now_utc() + timedelta(seconds=30)
+    await rig.send(text("接着说"), first_of_reply=False, first_due_at=due)
+    assert rig.waits == [4.0 + 1.5]  # a continuing reply has no delay of its own to wait for
+    await rig.send(text("好"), paced=False, first_due_at=due)
+    assert rig.waits == [4.0 + 1.5]  # and an unpaced one waits for nothing
+
+
+async def test_a_user_who_writes_during_the_silence_stops_the_reply_before_any_typing(
+    rig: Rig, clock: ManualClock
+) -> None:
+    rig.interrupt_at = 1  # the very first wait is the silent one
+    report = await rig.send(
+        text("你好呀"), text("在吗"), first_due_at=clock.now_utc() + timedelta(seconds=30)
+    )
+    assert report.stop is StopReason.INTERRUPTED and report.sent == []
+    assert [b.text for b in report.rest] == ["你好呀", "在吗"]
+    assert rig.waits == [28.5]
+    assert rig.channel.out == []  # no typing was ever shown, nothing was sent
 
 
 async def test_no_bubble_follows_another_faster_than_a_second(

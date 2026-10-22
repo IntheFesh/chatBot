@@ -102,3 +102,81 @@ async def test_the_zone_switch_at_noon_neither_greets_twice_nor_wakes_her(
     assert_screen_matches_records(world)
     assert_bot_text_not_in_her_data(world)
     assert world.deepseek.unexpected == []
+
+
+async def test_a_reply_that_waits_when_the_zone_is_switched_is_not_sent_in_the_new_night(
+    make_world: WorldFactory,
+) -> None:
+    """R17-32 (D-722): a reply queued for 15:20 Chicago time, then the bot moves to Shanghai.
+
+    At 13:20 he pauses her for two hours and writes; her reply is queued for the end of the pause
+    (a few seconds after it, 15:20).  At half past one he switches the bot to Shanghai, where it
+    is half past two in the night and she sleeps until the morning: 15:20 in Chicago is 04:20
+    there.  The reply waits for her waking (plus the jitter) instead of going out at 15:20 Chicago
+    time into the new deep sleep - which is what it did before the engine looked at her state
+    again.
+    """
+    world = await make_world(
+        datetime(2026, 10, 9, 18, 20, tzinfo=UTC),  # 13:20 in Chicago
+        model=proactive_model(opening_curve(base=0.02)),
+    )
+    await world.say("/暂停 2小时")
+    await world.say("在吗")
+    await world.run_for(seconds=30)
+    waiting = world.decision()
+    assert waiting is not None and waiting.mode == "paused" and not waiting.woke_up
+    assert waiting.send_at >= world.local(15, 20) and waiting.send_at - world.local(15, 20) < (
+        timedelta(minutes=2)
+    )
+    await world.run_for(minutes=10)
+
+    # ---- the switch: it is 02:30 of the next night in Shanghai ---------------------------------
+    switch_at = world.now
+    await world.say("/时区 Asia/Shanghai")
+    plan = world.plan(date(2026, 10, 10))
+    assert plan.timezone == SHANGHAI and plan.effective_from == switch_at
+    assert plan.morning is not None and plan.morning.clipped
+    wake = plan.morning.wake
+    assert world.kit.time.her_state(waiting.send_at).kind == "deep_sleep"  # 15:20 is in her night
+    await world.run_for(seconds=60)
+    moved = world.decision()
+    assert moved is not None and moved.woke_up and moved.send_at >= wake + timedelta(minutes=5)
+    assert moved.wake_at == wake and moved.paused_until == waiting.paused_until
+    assert world.persona_said == []
+
+    # ---- the time she was going to answer passes: she sleeps -----------------------------------
+    await world.run_until(waiting.send_at + timedelta(minutes=30))
+    assert world.persona_said == []
+    await world.run_until(wake + timedelta(hours=1))
+    said = [s for s in world.persona_said if s.at > switch_at]
+    assert said, "she never answered"
+    assert said[0].at >= moved.send_at >= wake + timedelta(minutes=5)
+
+    # ---- what holds for any story --------------------------------------------------------------
+    assert_clean_screen(world)
+    assert_never_in_deep_sleep(world)
+    assert_screen_matches_records(world)
+    assert_bot_text_not_in_her_data(world)
+    assert world.deepseek.unexpected == []
+
+
+async def test_without_the_switch_the_same_reply_goes_out_at_its_time(
+    make_world: WorldFactory,
+) -> None:
+    """R17-32 (the control): the same story without the switch: the reply comes at 15:20."""
+    world = await make_world(
+        datetime(2026, 10, 9, 18, 20, tzinfo=UTC),
+        model=proactive_model(opening_curve(base=0.02)),
+    )
+    await world.say("/暂停 2小时")
+    await world.say("在吗")
+    await world.run_for(seconds=30)
+    waiting = world.decision()
+    assert waiting is not None and waiting.mode == "paused"
+    await world.run_for(minutes=10)
+    await world.run_until(waiting.send_at + timedelta(minutes=2))
+    said = world.persona_said
+    assert said and abs((said[0].at - waiting.send_at).total_seconds()) < 60
+    assert said[0].at.astimezone(world.zone).hour == 15
+    assert_never_in_deep_sleep(world)
+    assert world.deepseek.unexpected == []

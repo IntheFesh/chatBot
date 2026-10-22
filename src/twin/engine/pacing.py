@@ -10,7 +10,10 @@ of the engine's own: :class:`PacingModel` is read once from a data view and then
   (:meth:`PacingModel.short_pause`);
 * **the pause between bubbles** - her pause between two messages of one burst plus the time it
   takes to type the next bubble (her typing speed is the slope fitted by the profile, seconds
-  per character), never less than one second (R-ENG-009);
+  per character), never less than one second (R-ENG-009).  The first bubble of a reply appears at
+  the moment the first delay ended (her measured latency contains her own typing): the typing
+  time is the last part of that delay, not an addition to it (:func:`silence_before_typing`,
+  D-723);
 * **the quiet window** - what the profile suggests for "he has finished writing": the 75th
   percentile of the pauses inside the *user's* bursts, between the configured window and its
   ceiling (R-ENG-002; used only when ``engine.quiet_window_adaptive`` is on, shown by ``/状态``
@@ -93,6 +96,27 @@ class Fixed:
 REFERENCE_LATENCY: Sampler = LogNormal(17.0, 240.0)
 REFERENCE_BURST_GAP: Sampler = Fixed(6.0)
 REFERENCE_USER_GAP_P75 = 33.0
+
+
+def silence_before_typing(seconds_to_due: float, typing_s: float) -> float:
+    """How long the first bubble of a reply is awaited *silently* before "typing" shows.
+
+    The bubble is due in ``seconds_to_due`` seconds (the end of the first delay the engine drew)
+    and takes ``typing_s`` to type, so the typing starts that long before it is due - but never
+    less than :data:`MIN_INTERVAL_S` from now: a reply that is late (its generation took longer
+    than the engine's lead) still waits that second before she starts to type (R-ENG-009).
+    """
+    return max(MIN_INTERVAL_S, seconds_to_due - typing_s)
+
+
+def first_bubble_lead(generation_s: float, typing_s: float) -> float:
+    """How long before the first bubble is due its reply has to be begun to be there in time.
+
+    The generation, then the silent second (:func:`silence_before_typing` with nothing left to
+    wait for), then the typing of the bubble: begun that long before the end of her first delay,
+    the bubble appears at the moment the delay ends.
+    """
+    return generation_s + silence_before_typing(0.0, typing_s) + typing_s
 
 
 def reading_time(chars: int) -> float:
@@ -204,9 +228,10 @@ class PacingModel:
     def bubble_interval(self, rng: random.Random, chars: int, *, first: bool) -> float:
         """Seconds before a bubble of ``chars`` characters appears (R-ENG-009).
 
-        The first bubble of a reply comes after its typing time alone (the first delay already
-        happened); the later ones after one of her pauses between messages plus the typing time.
-        At least :data:`MIN_INTERVAL_S`.
+        This is the time she types it: the first bubble of a reply comes after its typing time
+        alone (the first delay already happened, or is being waited for silently before it,
+        :func:`silence_before_typing`); the later ones after one of her pauses between messages
+        plus the typing time.  At least :data:`MIN_INTERVAL_S`.
         """
         pause = 0.0 if first else self._gap().sample(rng)
         return max(MIN_INTERVAL_S, pause + self.typing_time(chars))

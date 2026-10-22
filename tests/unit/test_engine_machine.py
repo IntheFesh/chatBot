@@ -26,7 +26,9 @@ from tests.support.engine_harness import (
 from tests.support.persona import sticker_png
 from tests.support.waiting import wait_until
 from twin.channel.base import InboundMessage, MediaRef, MessageKind
+from twin.engine.fallback import ShortAnswers
 from twin.engine.inbound import InboundRenderer
+from twin.engine.pacing import MIN_INTERVAL_S
 from twin.engine.roundstate import RoundData
 from twin.engine.state_store import ConversationSnapshot
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
@@ -119,9 +121,12 @@ async def test_the_first_bubble_waits_for_her_delay_and_the_next_for_her_pause(
     await rig.message("周末去看电影吧")
     await run_to_idle(rig.engine, rig.clock)
     first, second = (o.at for o in rig.channel.out if o.kind == "text")
-    # her latency (20 s) + reading seven characters (0.7 s), counted from the message; then she
-    # types "好呀" (2 characters at 0.5 s) before it appears
-    assert first - START == timedelta(seconds=20.7 + 1.0)
+    # her latency (20 s) + reading seven characters (0.7 s), counted from the message.  A new
+    # process knows nothing yet of how long a reply takes, so it is made when the delay is over
+    # (D-723) - late by its generation (none here): she waits the least (a second), then types
+    # "好呀" (2 characters at 0.5 s) before it appears.  The warm case, where the bubble appears
+    # at the moment the delay ends, is in ``test_engine_early_generation.py``.
+    assert first - START == timedelta(seconds=20.7 + MIN_INTERVAL_S + 1.0)
     # the second bubble: her pause between messages (4 s) + typing four characters (2 s)
     assert second - first == timedelta(seconds=6)
     typing = [o.active for o in rig.channel.out if o.kind == "typing"]
@@ -469,17 +474,155 @@ async def test_a_step_that_fails_is_alerted_and_tried_again(
     assert "engine_error" in rig.alerts.categories
 
 
-async def test_a_step_that_keeps_failing_gives_up_the_round_with_a_critical_alert(
-    rig: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def broken(ids: object) -> object:
-        raise RuntimeError("always")
+GAVE_UP = "The reply engine gave up on a round after repeated failures"
 
-    monkeypatch.setattr(rig.engine._rounds, "inbound_items", broken)
-    await rig.message("在吗")
-    await run_to_idle(rig.engine, rig.clock)
-    assert rig.engine.snapshot().state == "IDLE" and rig.channel.texts == []
-    assert rig.alerts.categories.count("engine_error") >= 5
+
+def gave_up_alerts(harness: Harness) -> list[tuple[str, str, dict[str, object] | None]]:
+    return [a for a in harness.alerts.raised if a[1] == GAVE_UP]
+
+
+def step_failed_replies(harness: Harness) -> list[tuple[str, str, dict[str, object] | None]]:
+    return [a for a in harness.alerts.raised if a[0] == "reply_failed"]
+
+
+async def test_a_step_that_keeps_failing_gives_up_with_a_short_answer_and_a_critical_alert(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-26 (D-550): five failed steps no longer leave him without a word.
+
+    The step that is broken is the crisis screen of COLLECTING, which SENDING never uses (SENDING
+    also reads the inbound items: breaking those would fail the answer as well, the second case
+    below).  After the fifth failure she says exactly one of her short answers, through the
+    normal sender, as a ``fallback`` bubble (it never becomes a style sample); the critical alert
+    and ``reply_failed`` are raised; the conversation is idle; the next message is answered.
+    """
+    rig = build_harness(services, clock, answers=("嗯嗯嗯",))
+    await rig.engine.start()
+    try:
+        original = rig.crisis.screen
+
+        def broken(texts: object) -> int:
+            raise RuntimeError("always")
+
+        monkeypatch.setattr(rig.crisis, "screen", broken)
+        await rig.message("在吗")
+        await run_to_idle(rig.engine, rig.clock)
+        assert rig.engine.snapshot().state == "IDLE" and rig.engine.snapshot().pending == ()
+        assert rig.channel.texts == ["嗯嗯嗯"]  # exactly one, and it is hers
+        assert rig.writer.calls == 0  # the model was never asked: the round did not get that far
+        assert rig.alerts.categories.count("engine_error") == 6  # five warnings, one critical
+        assert len(gave_up_alerts(rig)) == 1
+        replied = step_failed_replies(rig)
+        assert len(replied) == 1 and replied[0][2] == {
+            "reason": "step_failed",
+            "retries": 0,
+            "answered": True,
+        }
+        out = [row for row in rows(rig) if row.direction == "out"]
+        assert [(row.text, row.backend) for row in out] == [("嗯嗯嗯", "fallback")]
+        assert {"step": "fallback_answer", "detail": "step_failed"} in (out[0].actions or [])
+        assert RoundData.of(rig.engine.snapshot()).outgoing is None  # nothing is left to send
+
+        # ---- the fault is gone: the next message is answered as always --------------------------
+        monkeypatch.setattr(rig.crisis, "screen", original)
+        rig.writer.add(make_draft("好的呀"))
+        await rig.message("还在吗")
+        await run_to_idle(rig.engine, rig.clock)
+        assert rig.channel.texts == ["嗯嗯嗯", "好的呀"] and rig.writer.calls == 1
+    finally:
+        await rig.engine.stop()
+
+
+async def test_a_step_that_keeps_failing_with_no_known_short_answer_is_silent_and_alerted(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-26: a profile without short answers means silence - and an alert that says so."""
+    rig = build_harness(services, clock, short_answers=ShortAnswers(()))
+    await rig.engine.start()
+    try:
+
+        def broken(texts: object) -> int:
+            raise RuntimeError("always")
+
+        monkeypatch.setattr(rig.crisis, "screen", broken)
+        await rig.message("在吗")
+        await run_to_idle(rig.engine, rig.clock)
+        snap = rig.engine.snapshot()
+        assert snap.state == "IDLE" and snap.pending == ()  # the round is over
+        assert rig.channel.texts == [] and [r for r in rows(rig) if r.direction == "out"] == []
+        assert len(gave_up_alerts(rig)) == 1
+        replied = step_failed_replies(rig)
+        assert len(replied) == 1 and replied[0][2] is not None
+        assert replied[0][2]["answered"] is False and "no short answer" in replied[0][1]
+    finally:
+        await rig.engine.stop()
+
+
+async def test_a_sender_that_always_raises_gets_one_attempt_and_the_loop_lives_on(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-26: the short answer is tried once per round; when sending it fails too, the state is
+    reset silently (the second critical alert) instead of trying again for ever."""
+    rig = build_harness(services, clock, answers=("嗯嗯嗯",))
+    await rig.engine.start()
+    try:
+        original = rig.channel.session_state
+
+        def broken() -> object:
+            raise RuntimeError("the channel's state cannot be read")
+
+        monkeypatch.setattr(rig.channel, "session_state", broken)  # GENERATING and SENDING both ask
+        await rig.message("在吗")
+        await run_to_idle(rig.engine, rig.clock)
+        snap = rig.engine.snapshot()
+        assert snap.state == "IDLE" and snap.pending == ()
+        assert RoundData.of(snap).outgoing is None
+        assert rig.channel.texts == []  # nothing could be said
+        assert len(step_failed_replies(rig)) == 1  # one attempt, not a second one
+        assert len(gave_up_alerts(rig)) == 2  # the round was given up twice: the second is final
+        assert rig.alerts.categories.count("engine_error") == 12  # 2 x (five warnings + critical)
+        assert [r for r in rows(rig) if r.direction == "out"] == []  # no bubble that never left
+
+        # ---- the loop lives on: with the channel readable again the next message is answered ----
+        monkeypatch.setattr(rig.channel, "session_state", original)
+        rig.writer.add(make_draft("好的呀"))
+        await rig.message("还在吗")
+        await run_to_idle(rig.engine, rig.clock)
+        assert rig.channel.texts == ["好的呀"] and len(step_failed_replies(rig)) == 1
+    finally:
+        await rig.engine.stop()
+
+
+async def test_a_reset_that_fails_does_not_end_the_loop(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-26: the way out of a failing engine may not end the driver (R-ARCH-004)."""
+    rig = build_harness(services, clock, short_answers=ShortAnswers(()))
+    await rig.engine.start()
+    try:
+        raised = {"n": 0}
+
+        def broken(texts: object) -> int:
+            raised["n"] += 1
+            raise RuntimeError("always")
+
+        def no_reset() -> ConversationSnapshot:
+            raise OSError("the disk is full")
+
+        monkeypatch.setattr(rig.crisis, "screen", broken)
+        monkeypatch.setattr(rig.engine._state, "reset", no_reset)
+        monkeypatch.setattr(rig.engine, "_answer_step_failure", _raises)
+        await rig.message("在吗")
+        await run_to_idle(rig.engine, rig.clock, until=lambda: raised["n"] >= 6)
+        driver = rig.engine._driver  # type: ignore[attr-defined]
+        assert driver is not None and not driver.done()  # the loop failed on, it did not end
+        assert len(gave_up_alerts(rig)) == 1  # the fifth failure gave up; the sixth is a new count
+    finally:
+        await rig.engine.stop()
+
+
+async def _raises() -> bool:
+    raise RuntimeError("the attempt itself fails")
 
 
 async def test_a_picture_reaches_the_prompt_as_its_description(
