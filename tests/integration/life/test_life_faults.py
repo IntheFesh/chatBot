@@ -13,7 +13,8 @@ meet the faults a long run meets, and the conversation goes on after each:
   raises the alert ``engine_error`` (with the class of the error, not its message), waits a few
   seconds and does the step again - the reply comes as if nothing had happened;
 * **a step raises again and again**: after five failures in a row the round is given up with a
-  critical alert, the conversation is idle again - and the next message is answered normally;
+  critical alert, one short answer of hers goes out (D-550), the conversation is idle again - and
+  the next message is answered normally;
 * **the proactive planner's model is down**: she writes nothing on her own, the schedule goes on,
   and the next candidate is tried when the model is back.
 
@@ -223,14 +224,22 @@ async def test_a_step_that_always_raises_gives_the_round_up_and_the_loop_lives_o
     assert len(raised) == 5  # five failures in a row, then the round is given up
     critical = [a for a in alerts_of(world, "engine_error") if a.severity == "critical"]
     assert len(critical) == 1 and critical[0].detail == {"error": "RuntimeError"}
-    assert world.persona_said == []  # nothing was said - and nothing about the trouble either
+    # R17-26 (D-550): not left without a word - one short answer of hers, as a fallback bubble
+    # (never a style sample), the alert ``reply_failed``; nothing about the trouble itself
+    said = world.persona_said
+    assert len(said) == 1 and said[0].text in HER_ANSWERS
+    assert world.out_rows()[0].backend == "fallback"
+    assert ("reply_failed", "warning") in world.alerts()
+    assert world.deepseek.calls["reply"] == 0  # the model was never asked: no cost for the word
     assert world.idle() and world.assembly.engine.health().status.name == "OK"
 
     # ---- the fault is gone: the next message is answered -----------------------------------------
     failing = False
     await world.say("在吗")
     await world.run_until_idle()
-    assert [s.text for s in world.persona_said] == ["在呀"]
+    texts = [s.text for s in world.persona_said]
+    assert len(texts) == 2 and texts[0] in HER_ANSWERS and texts[1] == "在呀"
+    assert world.out_rows()[-1].backend == "deepseek"
     nothing_of_the_trouble_is_shown(world)
     assert_screen_matches_records(world)
     assert_never_in_deep_sleep(world)

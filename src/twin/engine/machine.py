@@ -46,6 +46,10 @@ new one when it has passed - never a reply the moment the machine wakes; ``GENER
 ``DECIDING`` for a fresh draw; ``SENDING`` goes on with the bubbles that were not out, or, if the
 user wrote meanwhile, continues like an interruption.
 
+A step of the driver that fails is tried again after a few seconds (alert ``engine_error``); after
+five failures in a row the round is given up: one short answer of hers goes out first, once per
+round (D-720), then the state is reset.
+
 Commands (:class:`~twin.engine.command_port.CommandPort`) are answered the moment they arrive,
 without a delay, outside the round, and are marked ``is_command`` (never memory or training data).
 ``/重来`` (``redo``) writes the reply to the thrown-away round again: from IDLE at once (no quiet
@@ -284,6 +288,7 @@ class ConversationEngine:
             None  # the reply whose bubbles are being sent, once it has a row
         )
         self._failures = 0
+        self._gave_up_round: str | None = None  # the round that got the word of ``_give_up_round``
         self._waiting_until: datetime | None = None
         self._driver: asyncio.Task[None] | None = None
         self._extractor: asyncio.Task[None] | None = None
@@ -665,9 +670,44 @@ class ConversationEngine:
                 detail={"error": type(exc).__name__},
                 dedup_key="engine_reset",
             )
-            await asyncio.to_thread(self._state.reset)
+            await self._give_up_round()
             return
         await self._wait_wake(STEP_FAILURE_PAUSE_S)
+
+    async def _give_up_round(self) -> None:
+        """Five steps in a row failed: one short word of hers, once, and then the round is dropped.
+
+        The user must not be left without a word (D-550, revised in round 17): the round goes to
+        SENDING with one of her short answers (:meth:`_short_answer`, reason ``step_failed``; the
+        alert ``reply_failed``, the bubble marked ``fallback`` so that it never becomes a style
+        sample) and the normal sender says it.  The attempt is made once per round
+        (``_gave_up_round``): when the sender is what keeps failing, the next fifth failure resets
+        the state silently, as before.  Any error of the attempt itself is the same as no
+        attempt: the state is reset and the loop lives on.
+        """
+        try:
+            if await self._answer_step_failure():
+                return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # the way out of a failing engine may not fail it again
+            log.warning("step_failure_answer_failed", error=type(exc).__name__)
+        try:
+            await asyncio.to_thread(self._state.reset)
+        except Exception as exc:  # ... and neither may the reset end the loop
+            log.warning("engine_reset_failed", error=type(exc).__name__)
+
+    async def _answer_step_failure(self) -> bool:
+        """Hand the round's messages the short answer; ``False`` if the round gets none."""
+        snap = await self._load()
+        if not snap.pending or snap.round_id is None or snap.round_id == self._gave_up_round:
+            return False  # nothing waits, or the answer was tried for this round and failed
+        data = RoundData.of(snap)
+        if data.outgoing is not None and data.outgoing.reply_id is not None:
+            return False  # a part of her reply is out: no second word on top of it
+        self._gave_up_round = snap.round_id
+        await self._short_answer("step_failed", None, data)
+        return True
 
     # ---------------------------------------------------------------------- recovery
 
