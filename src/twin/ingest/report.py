@@ -16,14 +16,17 @@ from sqlalchemy import func, select
 
 from twin.ingest.events import KINDS
 from twin.ingest.runs import RunView
+from twin.ingest.stats import RunStats
 from twin.ingest.times import SourceTime
 from twin.profile.report_section import style_change_lines
+from twin.stickers.download_summary import load_download_summary
 from twin.storage.chat_models import MediaAsset, Message, Sticker, StickerUse
 
 if TYPE_CHECKING:
     from twin.services import Services
 
 REPORT_PREFIX = "import-"
+STICKER_HEADING = "## 表情包"
 KIND_LABELS = {
     "text": "文字",
     "sticker": "表情包",
@@ -90,20 +93,6 @@ def build_report(
                 MediaAsset.conversation_id == conversation_id, MediaAsset.caption_ct.is_not(None)
             )
         )
-        sticker_status = session.execute(
-            select(Sticker.status, func.count()).group_by(Sticker.status)
-        ).all()
-        usage = session.execute(
-            select(
-                func.count().filter(Sticker.her_uses > 0),
-                func.count().filter(Sticker.user_uses > 0),
-                func.count().filter((Sticker.her_uses > 0) & (Sticker.user_uses > 0)),
-                func.count(),
-            )
-        ).one()
-        uses = session.execute(
-            select(StickerUse.by_her, func.count()).group_by(StickerUse.by_her)
-        ).all()
 
     lines += [
         f"- 生成时间（UTC）：{now.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -159,23 +148,8 @@ def build_report(
         lines.append("没有媒体记录。")
     lines += ["", f"已有图片描述：{_count(captioned or 0)}"]
 
-    lines += ["", "## 表情包", ""]
-    if sticker_status:
-        lines += _table(["状态", "种类数"], [[s, _count(n)] for s, n in sticker_status])
-        her_n, user_n, both_n, kinds_n = (int(x or 0) for x in usage)
-        use_by = {bool(by_her): n for by_her, n in uses}
-        lines += [
-            "",
-            f"- 共 {_count(kinds_n)} 种；她用过 {_count(her_n)} 种，用户用过 {_count(user_n)} 种，"
-            f"两者都用过 {_count(both_n)} 种",
-            f"- 使用记录：她 {_count(use_by.get(True, 0))} 次，"
-            f"用户 {_count(use_by.get(False, 0))} 次",
-            "- 直接取自本地 media/emojis 的文件："
-            f"{_count(run.stats.stickers.get('local_files', 0))}",
-            "- 其余等待下载（`twin stickers download`），下载统计见该命令的输出",
-        ]
-    else:
-        lines.append("没有表情包。")
+    lines += ["", STICKER_HEADING, ""]
+    lines += report_sticker_section(services, run.stats)
 
     lines += ["", "## 数据质量提示", ""]
     notes = _quality_notes(run)
@@ -202,6 +176,53 @@ def build_report(
         lines.append("没有已注册的钩子。")
     lines.append("")
     return "\n".join(lines)
+
+
+def report_sticker_section(services: Services, stats: RunStats) -> list[str]:
+    """The lines under "## 表情包": the library by status, who used what, the last download.
+
+    Written with the report and again - from the same function - when the download job has
+    finished, so the numbers of the download are in the report and not only in the output of the
+    command (R-IMP-010, R17-39).  ``stats`` are the counters of the import the report belongs to.
+    """
+    with services.db.session() as session:
+        sticker_status = session.execute(
+            select(Sticker.status, func.count()).group_by(Sticker.status)
+        ).all()
+        usage = session.execute(
+            select(
+                func.count().filter(Sticker.her_uses > 0),
+                func.count().filter(Sticker.user_uses > 0),
+                func.count().filter((Sticker.her_uses > 0) & (Sticker.user_uses > 0)),
+                func.count(),
+            )
+        ).one()
+        uses = session.execute(
+            select(StickerUse.by_her, func.count()).group_by(StickerUse.by_her)
+        ).all()
+    if not sticker_status:
+        return ["没有表情包。"]
+    lines = _table(["状态", "种类数"], [[s, _count(n)] for s, n in sticker_status])
+    her_n, user_n, both_n, kinds_n = (int(x or 0) for x in usage)
+    use_by = {bool(by_her): n for by_her, n in uses}
+    lines += [
+        "",
+        f"- 共 {_count(kinds_n)} 种；她用过 {_count(her_n)} 种，用户用过 {_count(user_n)} 种，"
+        f"两者都用过 {_count(both_n)} 种",
+        f"- 使用记录：她 {_count(use_by.get(True, 0))} 次，用户 {_count(use_by.get(False, 0))} 次",
+        f"- 直接取自本地 media/emojis 的文件：{_count(stats.stickers.get('local_files', 0))}",
+    ]
+    waiting = dict(sticker_status).get("pending", 0)
+    if waiting:
+        lines.append(f"- 等待下载：{_count(waiting)} 种（`twin stickers download`）")
+    summary = load_download_summary(services)
+    if summary is not None:
+        lines.append(f"- {summary.describe()}")
+    else:
+        lines.append(
+            "- 还没有下载过：下载作业完成时，这里会补上尝试、可用、MD5 不符、不可用的数目与原因"
+        )
+    return lines
 
 
 def _quality_notes(run: RunView) -> list[str]:

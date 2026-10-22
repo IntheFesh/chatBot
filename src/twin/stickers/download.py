@@ -14,6 +14,10 @@ Every ``stickers`` row that is ``pending`` and has an URL is fetched with ``http
 
 The state of every sticker is saved as soon as its download ends, so an interrupted job
 continues with the stickers that are still ``pending``.
+
+When the job has run, its numbers (tried, arrived, other MD5, not fetched and why) are kept
+(:mod:`twin.stickers.download_summary`) and written into the sticker section of the newest import
+report (R17-39, D-694), which used to say that the statistics were "in the output of the command".
 """
 
 from __future__ import annotations
@@ -29,9 +33,13 @@ from sqlalchemy import select, update
 
 from twin.clock import Clock
 from twin.config.settings import StickerDownloadConfig
+from twin.ingest.report import STICKER_HEADING, report_sticker_section
+from twin.ingest.stats import RunStats
 from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
+from twin.profile.report_section import refresh_latest_import_report
 from twin.services import Services
+from twin.stickers.download_summary import DownloadSummary, save_download_summary
 from twin.stickers.library import MAX_STICKER_BYTES, store_sticker_file
 from twin.storage.chat_models import Sticker
 
@@ -305,6 +313,30 @@ def queue_tagging_of_new_files(services: Services) -> None:
     log.info("sticker_tagging_planned", mode=plan.mode, stickers=plan.stickers)
 
 
+def record_download(services: Services, stats: DownloadStats) -> None:
+    """Keep the numbers of a finished download and bring them into the newest import report."""
+    save_download_summary(
+        services,
+        DownloadSummary(
+            at=services.clock.now_utc(),
+            attempted=stats.attempted,
+            available=stats.available,
+            md5_mismatch=stats.md5_mismatch,
+            unavailable=stats.unavailable,
+            reasons=dict(stats.reasons),
+            stopped=stats.stopped,
+        ),
+    )
+    try:
+        refresh_latest_import_report(
+            services,
+            heading=STICKER_HEADING,
+            lines=lambda raw: report_sticker_section(services, RunStats.from_json(raw)),
+        )
+    except OSError as exc:  # the report is a courtesy; the download itself is done
+        log.warning("import_report_not_updated", reason=type(exc).__name__)
+
+
 @job_handler(STICKER_JOB)
 async def handle_sticker_download(ctx: JobContext) -> None:
     services = ctx.services
@@ -312,5 +344,6 @@ async def handle_sticker_download(ctx: JobContext) -> None:
         raise RuntimeError("sticker_download needs the services container")
     downloader = StickerDownloader(services)
     stats = await downloader.run(retry_failed=bool(ctx.job.payload.get("retry_failed", False)))
+    await asyncio.to_thread(record_download, services, stats)
     if stats.available:
         await asyncio.to_thread(queue_tagging_of_new_files, services)

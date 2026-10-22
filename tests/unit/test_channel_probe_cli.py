@@ -628,3 +628,85 @@ def test_probe_commands_are_listed_in_the_help() -> None:
     assert result.exit_code == 0
     for name in ("start", "status", "answer", "stop", "report"):
         assert name in result.output
+
+
+# ------------------------------------------- R17-38: the GIF mode among the suggested values
+
+
+def media_shows(store: ProbeStore, *, gif: str, png: str) -> None:
+    def change(plan: ProbePlan) -> None:
+        media = plan.step(StepId.MEDIA)
+        media.data = {
+            "gif_animated": {"moving": True, "still": False}.get(gif),
+            "typing": {"visible": "yes"},
+            "images": {
+                "png": {"api_ok": True, "phone": png},
+                "gif": {"api_ok": True, "phone": gif},
+            },
+        }
+
+    store.update(change)
+
+
+def test_a_gif_that_stays_still_makes_the_report_suggest_the_first_frame_and_asks_first(
+    svc: Services, tmp_path: Path
+) -> None:
+    store = probe_store(svc)
+    store.create()
+    measured(store)
+    media_shows(store, gif="still", png="arrived")
+    store.finish(PlanStatus.COMPLETED, None)
+    config = tmp_path / "c.yaml"
+    config.write_text(
+        "# mine\nchannel: { kind: ilink }\nstickers: { no_repeat_window: 7 }\n", "utf-8"
+    )
+    report = tmp_path / "r.md"
+    base = ["--config", str(config), "channel", "probe", "report", "--output", str(report)]
+    refused = runner.invoke(app, base, input="n\n")
+    assert refused.exit_code == 0, refused.output
+    assert "stickers.gif_send_mode: as_is -> first_frame" in refused.output
+    assert load_settings(config).stickers.gif_send_mode == "as_is"  # nothing was written
+    assert "| `stickers.gif_send_mode` | first_frame |" in report.read_text(encoding="utf-8")
+    written = runner.invoke(app, base, input="y\n")
+    assert written.exit_code == 0 and f"updated {config}" in written.output
+    settings = load_settings(config)
+    assert settings.stickers.gif_send_mode == "first_frame"
+    assert settings.stickers.no_repeat_window == 7  # the rest of the section is kept
+    assert settings.channel.outbound_quota_safe == 7  # and the channel values were written too
+    assert config.read_text(encoding="utf-8").startswith("# mine\n")
+
+
+def test_a_moving_gif_changes_nothing_in_the_configuration(svc: Services, tmp_path: Path) -> None:
+    store = probe_store(svc)
+    store.create()
+    measured(store)
+    media_shows(store, gif="moving", png="arrived")
+    store.finish(PlanStatus.COMPLETED, None)
+    config = tmp_path / "c.yaml"
+    config.write_text("channel: { kind: ilink }\n", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["--config", str(config), "channel", "probe", "report", "--output", str(tmp_path / "r.md")],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "gif_send_mode" not in result.output  # as_is is what it is already
+    assert "gif_send_mode" not in config.read_text(encoding="utf-8")
+
+
+def test_a_gif_that_stays_still_with_the_first_frame_already_chosen_is_not_asked_again(
+    svc: Services, tmp_path: Path
+) -> None:
+    store = probe_store(svc)
+    store.create()
+    measured(store)
+    media_shows(store, gif="still", png="arrived")
+    store.finish(PlanStatus.COMPLETED, None)
+    config = tmp_path / "c.yaml"
+    config.write_text("stickers: { gif_send_mode: first_frame }\n", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["--config", str(config), "channel", "probe", "report", "--output", str(tmp_path / "r.md")],
+        input="n\n",
+    )
+    assert result.exit_code == 0 and "gif_send_mode" not in result.output

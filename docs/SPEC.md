@@ -124,7 +124,8 @@ persona: { sample_segments: 60, batch_segments: 10, segment_max_messages: 40, re
 stickers: { tags_file: "config/lists/sticker_tags.txt", neighbors_file: "config/lists/sticker_tag_neighbors.yaml",
             tag_job_size: 20, context_min_uses: 3, context_max_samples: 5, no_repeat_window: 10,
             repeat_rate_threshold: 0.30, recency_half_life_days: 90, rate_window: 200,
-            rate_tolerance: 0.20, describe_timeout_s: 15 }
+            rate_tolerance: 0.20, describe_timeout_s: 15,
+            gif_send_mode: "as_is" }   # 第 17 轮新增：as_is|first_frame，见 R-STK-007
 memory: { daily_summary: true, fact_extraction: true, block_tokens: 800, recall_facts: 12,
           recent_summary_days: 3, recall_summaries: 2, followup_lookahead_h: 36,
           recall_min_similarity: 0.35, conflict_candidates: 6, conflict_min_similarity: 0.45,
@@ -219,14 +220,14 @@ safety:
 
 - **R-IMP-001** 输入为一个导出根目录：`report.json`、`conversations/<序号_昵称_wxid_hash>/{meta.json,messages.json}`、`media/{images,emojis,avatars,...}`、`_integrity/`（若存在则读取并校验其中的完整性信息）。目录名含中文与特殊符号，必须正确处理。
 - **R-IMP-002** 按 `schemaVersion=1` 定义 pydantic 模型：`report.json{schemaVersion, exportId, account, createdAt, missingMedia[{kind,id,conversation,messageId}], errors[]}`；`meta.json{schemaVersion, username, displayName, avatarPath, isGroup, exportedAt, messageCount}`；`messages.json{schemaVersion, exportedAt, account, conversation{username,displayName,avatarPath,isGroup}, filters{startTime,endTime,messageTypes[]}, messages[]}`。消息字段：`id, localId, serverId, createTime, createTimeText, sortSeq, type, renderType, isSent, senderUsername, conversationUsername, isGroup, content, title, url, from, fromUsername, linkType, linkStyle, objectId, objectNonceId, recordItem, thumbUrl, imageMd5, imageFileId, imageMd5Candidates, imageFileIdCandidates, imageUrl, emojiMd5, emojiUrl, videoMd5, videoThumbMd5, videoFileId, videoThumbFileId, videoUrl, videoThumbUrl, voiceLength, voiceTranscript, voiceTranscriptStatus, voiceTranscriptError, voiceTranscriptLanguage, voiceTranscriptModel, quoteUsername, quoteServerId, quoteType, quoteThumbUrl, quoteVoiceLength, quoteTitle, quoteContent, amount, coverUrl, fileSize, fileMd5, paySubType, transferStatus, transferId, voipType, locationLat, locationLng, locationPoiname, locationLabel, senderDisplayName, senderAvatarPath, offlineMedia[{kind,path,md5,fileId}]`（可选）。未知 `schemaVersion` 直接报错退出；未知字段保留在原始 JSON 中并记录。
-- **R-IMP-003** 只导入目标会话（`target.username`）；未配置时列出非群聊会话让用户在 CLI 中确认一次并写入设置。其他会话不读取消息内容（隐私最小化）。群聊一律跳过。
+- **R-IMP-003** 只导入目标会话（`target.username`）；未配置时列出非群聊会话让用户在 CLI 中确认一次并写入设置。其他会话不读取消息内容（隐私最小化）。群聊一律跳过。库里恰好一个目标会话：已有另一个会话时拒绝导入（她的数据不带会话 id 读取，第二个会话会混进去）。
 - **R-IMP-004** `messages.json` 用 `ijson` 流式解析（`messages.item`），每 2,000 条批量写入；内存占用与文件大小无关（10GB 文件峰值内存 < 500MB）。
 - **R-IMP-005** 以消息 `id` 幂等 upsert；同 id 内容不同时以 `exportedAt` 较新的为准并记录差异计数。
 - **R-IMP-006** 可续传：`import_runs` 记录状态、文件、已处理条数、最后 `id`/`sortSeq`；中断后 `twin import --resume` 从断点继续。
 - **R-IMP-007** 归一化：`renderType` → `kind ∈ {text, sticker, image, quote, voice, video, file, link, call, transfer, redpacket, system, location, chathistory, unknown}`；每类生成用于上下文的"事件文字"，例如 `[通话 37 分钟]`、`[未接通话]`、`[她撤回了一条消息]`、`[转账]`、`[红包]`、`[位置：xxx]`、`[聊天记录]`、`[图片：<描述>]`、`[语音 5 秒：<转写>]`。`voip` 内容解析"通话时长 mm:ss / 对方已取消 / 已拒绝 / 未应答 / 已在其它设备接听"。
 - **R-IMP-008** 媒体：`offlineMedia` 指向的文件复制进加密媒体库；`report.missingMedia` 记录缺失；表情包按 `emojiUrl` 下载（并发 4、每秒不超过 4 个请求、重试 3 次），按文件头识别 GIF/PNG/JPEG/WebP，校验 `emojiMd5`（不一致标记 `md5_mismatch` 仍保留）；下载可续传，失败标记不可用，不阻塞导入。
 - **R-IMP-009** 语音无转写时记为 `[语音 N 秒，未转写]`；不在本地做语音识别（v1）。
-- **R-IMP-010** 导入报告（不含任何消息正文）：按类型与发送方计数、日期范围、新增/重复/冲突、缺失媒体、表情包下载统计、风格指标变化（R-PROF 重算后）；输出到终端与 `data/reports/import-<UTC时间>.md`。
+- **R-IMP-010** 导入报告（不含任何消息正文）：按类型与发送方计数、日期范围、新增/重复/冲突、缺失媒体、表情包下载统计（下载作业结束时写入最新一份报告）、风格指标变化（R-PROF 重算后）；输出到终端与 `data/reports/import-<UTC时间>.md`。
 - **R-IMP-011** 导入完成后自动排队：画像重算（R-PROF）、作息模型（R-ACT）、人设卡（立即生成新版本以刷新 `[自动-统计规则]`；她的新消息自上次 `[自动-描述]` 生成以来增加 ≥ 10% 时，排队非高峰的 `[自动-描述]` 重生成；live 与 pre_holdout 两个范围同理，R-TRN-013）、新表情包打标签（R-STK）、检索库增量更新（R-RET）、新日期范围的记忆回放（R-MEM-010）、重训提醒检查（R-TRN-012）、新图片描述（R-IMP-012）。每个导入后钩子都有可单独执行的回填命令（如 `twin profile rebuild`、`twin persona regenerate`、`twin stickers tag-all`、`twin retrieval rebuild`、`twin memory replay`、`twin images caption-backfill`）；注册钩子的轮次在验收中对已导入的数据执行一次回填。
 - **R-IMP-012** 图片描述：默认只为最近 90 天的图片与被检索命中的图片生成一句描述（DeepSeek 视觉，非高峰），其余在首次被用到时按需生成并缓存；描述文本先经 R-LLM-009 脱敏再存储与使用（照片里可能有电话、地址）；在线回复路径从不等待描述生成：检索例子里的图片尚无描述时以 `[图片]` 呈现并排队描述任务（R-RET-005）；用户发来的图片按 R-ENG-013 同步描述（带超时）。
 - **R-IMP-013** 性能：100 万条消息的结构化导入（不含下载与 LLM 任务）在普通 PC 上 < 30 分钟；有基准测试脚本（合成数据生成器 + 计时）。
@@ -265,7 +266,7 @@ safety:
 - **R-STK-004** 发送选择：模型输出独立一行 `[表情包:<标签>]`；候选 = 标签匹配的她的表情包；得分 = 她的使用频率（平滑）× 与当前上下文的语义相似度（描述向量 vs 上下文向量）× 新近度；最近 10 个气泡内不重复同一张（除非她的重复率高于阈值）；无匹配时退化为同情绪相近标签，仍无则删除该行。
 - **R-STK-005** 频率控制：滚动窗口（最近 200 个机器人气泡）表情包占比保持在她占比的 ±20% 区间（给 R-EVAL-002 的 ±30% 留余量），超出时后处理删除表情包行，不足时不强行插入。
 - **R-STK-006** 识别用户发来的表情包：md5 命中库直接得到描述与标签；未命中用视觉模型描述，结果缓存。
-- **R-STK-007** 发送通过通道图片接口；GIF 动图效果以 R-CH-009 实测为准，若不动则改用静态首帧还是原样发送由用户决定（报告中给出对比）。
+- **R-STK-007** 发送通过通道图片接口；GIF 动图效果以 R-CH-009 实测为准，若不动则改用静态首帧还是原样发送由用户决定（报告中给出对比）。决定写在配置 `stickers.gif_send_mode`：`as_is`（默认，原样发送）或 `first_frame`（发送静态首帧 PNG）；`twin channel probe report` 给出 GIF 动/PNG 静的对照与建议值。
 
 ## 12. 检索库（R-RET）
 

@@ -11,6 +11,7 @@ import pytest
 from tests.support.embedding import H, HashingBackend, Msg, U, day, write_dialogue
 from tests.support.persona import attach_files, sticker_files, sticker_scenario, sync_counters
 from twin.ingest.corpus import her_bubble_skeleton
+from twin.profile.holdout import holdout_cutoff
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
 from twin.stickers.selector import (
@@ -24,6 +25,7 @@ from twin.stickers.selector import (
     her_repeat_rate,
 )
 from twin.stickers.vectors import StickerVectors
+from twin.storage.state import bump_state_version
 
 NOW = datetime(2026, 5, 1, 12, tzinfo=UTC)
 MD5S = list(sticker_files(6))  # the pictures of the scenarios, in a fixed order
@@ -339,8 +341,6 @@ def test_the_view_can_be_changed_without_loading_the_data_again(
 def test_the_past_view_measures_her_repeat_rate_in_the_data_before_the_cutoff(
     library: StickerCatalog, services: Services
 ) -> None:
-    from twin.profile.holdout import holdout_cutoff
-
     cutoff = holdout_cutoff(services)
     expected = her_repeat_rate(services, 10, before=cutoff)
     past = selector(services, view=StickerView("pre_holdout"))
@@ -350,3 +350,124 @@ def test_the_past_view_measures_her_repeat_rate_in_the_data_before_the_cutoff(
     with services.db.session() as session:
         times = [row.create_time_utc for row in session.scalars(her_bubble_skeleton(cutoff))]
     assert times and all(moment < cutoff for moment in times)
+
+
+# ------------------------------------------- R17-51: what is read once is shared and kept
+
+
+def count_reads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count how often the whole sticker history and the library table are read."""
+    reads = {"usage": 0, "records": 0, "repeat": 0}
+    load = UsageTable.load.__func__  # type: ignore[attr-defined]
+    records = StickerCatalog.records
+
+    def counted_load(cls: type[UsageTable], services: Services) -> UsageTable:
+        reads["usage"] += 1
+        return load(cls, services)  # type: ignore[no-any-return]
+
+    def counted_records(self: StickerCatalog, **kwargs: object) -> list:  # type: ignore[type-arg]
+        reads["records"] += 1
+        return records(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(UsageTable, "load", classmethod(counted_load))
+    monkeypatch.setattr(StickerCatalog, "records", counted_records)
+    return reads
+
+
+def test_selectors_made_from_one_another_read_the_library_once(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-51: a reply made a selector per sticker, and each read all her stickers again."""
+    reads = count_reads(monkeypatch)
+    base = selector(services)
+    for number in range(6):
+        picker = base.with_rng(random.Random(number))
+        assert picker.choose("开心", "") is not None
+    past = base.with_view(as_of_view(day(31, 12))).with_rng(random.Random(9))
+    assert past.choose("晚安", "") is not None
+    assert reads["usage"] == 1 and reads["records"] == 1  # seven draws, one read of each
+
+
+def test_the_next_choice_after_a_change_of_the_state_version_reads_again(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = count_reads(monkeypatch)
+    base = selector(services)
+    picker = base.with_rng(random.Random(1))
+    picker.choose("开心", "")
+    picker.choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (1, 1)
+    with services.db.transaction(bump_state=False) as session:
+        bump_state_version(session, services.clock)
+    picker.choose("开心", "")
+    picker.choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (2, 2)
+    base.with_rng(random.Random(2)).rank("开心", "")  # another selector of the family: no more
+    assert (reads["usage"], reads["records"]) == (2, 2)
+
+
+def test_a_sticker_tagged_after_the_state_version_moved_can_be_chosen(
+    library: StickerCatalog, services: Services
+) -> None:
+    base = selector(services)
+    assert {c.record.md5 for c in base.with_rng(random.Random(1)).rank("晚安", "")} == {D, E}
+    library.set_manual(D, ["开心"])  # a command of the user: the state version moves
+    after = base.with_rng(random.Random(1))
+    assert {c.record.md5 for c in after.rank("开心", "")} == {A, B, C, D}
+    assert {c.record.md5 for c in after.rank("晚安", "")} == {E}
+
+
+def test_the_repeat_rate_is_measured_once_per_scope_for_the_whole_family(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+    original = her_repeat_rate
+
+    def counted(*args: object, **kwargs: object) -> float:
+        calls.append(kwargs.get("before"))
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("twin.stickers.selector.her_repeat_rate", counted)
+    holdout_cutoff(services)  # the first look at the hold-out writes it (and moves the version)
+    base = selector(services)
+    for number in range(4):
+        base.with_rng(random.Random(number)).choose("开心", "")
+    assert len(calls) == 1  # the live scope, once
+    base.with_view(StickerView("pre_holdout")).choose("晚安", "")
+    base.with_view(StickerView("pre_holdout")).choose("晚安", "")
+    assert len(calls) == 2  # and the pre-holdout scope, once
+
+
+def test_reload_of_one_selector_makes_the_whole_family_read_again(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reads = count_reads(monkeypatch)
+    base = selector(services)
+    child = base.with_rng(random.Random(1))
+    child.choose("开心", "")
+    base.reload()
+    child.choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (2, 2)
+
+
+def test_a_derived_selector_draws_with_the_generator_it_was_given(
+    library: StickerCatalog, services: Services
+) -> None:
+    base = selector(services)
+    first = [base.with_rng(random.Random(5)).choose("开心", "").md5 for _ in range(1)]  # type: ignore[union-attr]
+    again = [base.with_rng(random.Random(5)).choose("开心", "").md5 for _ in range(1)]  # type: ignore[union-attr]
+    assert first == again  # the same seed, the same sticker, whoever drew before
+    seen = {base.with_rng(random.Random(n)).choose("开心", "").md5 for n in range(40)}  # type: ignore[union-attr]
+    assert len(seen) > 1  # and another generator gives another draw
+    assert base.with_rng(random.Random(1)).view == base.view
+
+
+def test_a_selector_can_be_given_the_uses_it_should_start_from(
+    library: StickerCatalog, services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    given = UsageTable({A: [day(2, 12), day(3, 12)]})  # only A, used twice
+    monkeypatch.setattr(
+        UsageTable, "load", classmethod(lambda cls, services: pytest.fail("read again"))
+    )
+    ranked = StickerSelector(services, usage=given, rng=random.Random(1)).rank("开心", "")
+    assert [(c.record.md5, c.uses) for c in ranked] == [(A, 2)]

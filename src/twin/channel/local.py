@@ -17,7 +17,8 @@ What it keeps from the real channel, on purpose:
 What is terminal-specific: lines you type are your messages; ``/img <path>`` sends a picture of
 yours (stored encrypted in the media store, like a WeChat picture); the bot's text is printed
 with a ``bot:`` label; a sticker is shown as ``[表情包：<label>] <file path>`` (the file is a
-plain copy for the session only, deleted when the channel stops); "typing" shows as
+private copy for the session only - mode 0600 in a directory of its own, overwritten and deleted
+when the channel stops, and swept at the next start if a crash left it); "typing" shows as
 ``对方正在输入…``.  Input and output are injected, so tests drive it with scripted streams.
 """
 
@@ -63,6 +64,7 @@ from twin.channel.state import ChannelStateStore
 from twin.channel.window import SessionWindow
 from twin.clock import Clock
 from twin.ops.logging import get_logger
+from twin.stickers.labels import sticker_labels
 from twin.stickers.library import StickerLibraryAllowList
 from twin.storage.media import MediaKind, MediaStore
 
@@ -100,7 +102,10 @@ class TextOutput(Protocol):
 
 
 class StickerLabels(Protocol):
-    """The label of a sticker (round 06 provides the real one); ``None`` if it has none."""
+    """The label of a sticker by the digest of its file; ``None`` if it has none.
+
+    :class:`~twin.stickers.labels.StickerLabelBook` is the real one; ``from_services`` uses it.
+    """
 
     def label(self, sha256: str) -> str | None: ...
 
@@ -185,7 +190,9 @@ class LocalConsoleChannel(Channel):
         self._lock = asyncio.Lock()
         self._counter = 0
         self._typing = False
-        self._shown: list[Path] = []
+        # the copies shown to the user: the stack holds them, closing it wipes them (R17-31)
+        self._copies = contextlib.ExitStack()
+        self._shown: dict[str, Path] = {}
         self._ended = False
 
     @classmethod
@@ -215,13 +222,15 @@ class LocalConsoleChannel(Channel):
                 [allow, ProbeImageManifest(ChannelStateStore(services.db))]
             ),
             stickers=allow,
-            labels=labels,
+            labels=labels if labels is not None else sticker_labels(services),
         )
 
     # ----------------------------------------------------------- lifecycle
 
     async def start(self) -> None:
         if self._reader is None:
+            # what an earlier session that crashed left in the directory of the copies
+            await asyncio.to_thread(self._media.sweep_dir, self._shown_dir, self._not_swept)
             self._ended = False
             self._reader = asyncio.create_task(self._read_loop(), name="local-console-reader")
 
@@ -231,9 +240,24 @@ class LocalConsoleChannel(Channel):
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
         self._finish_input()
-        for path in self._shown:
-            path.unlink(missing_ok=True)
+        await asyncio.to_thread(self._wipe_copies)
+
+    def _wipe_copies(self) -> None:
+        """Overwrite and delete every copy that was shown (their paths are no good afterwards).
+
+        A copy that cannot be removed (on Windows, one a viewer still holds open) does not stop
+        the shutdown; the next start sweeps it.
+        """
+        copies, self._copies = self._copies, contextlib.ExitStack()
         self._shown.clear()
+        try:
+            copies.close()
+        except OSError as exc:
+            self._not_swept(self._shown_dir, exc)
+
+    @staticmethod
+    def _not_swept(path: Path, exc: OSError) -> None:
+        log.warning("console_copy_not_removed", reason=type(exc).__name__, name=path.name)
 
     def _finish_input(self) -> None:
         if not self._ended:
@@ -401,13 +425,18 @@ class LocalConsoleChannel(Channel):
         return (self._labels.label(sha256) if self._labels else None) or "未标注"
 
     def _write_shown(self, sha256: str, mime: str, data: bytes) -> Path:
-        """A plain copy of the picture so its path can be opened; removed when the channel stops."""
+        """A private copy of the picture so its path can be opened; wiped when the channel stops.
+
+        The same picture is written once: asking again gives the copy that is already there.
+        """
+        found = self._shown.get(sha256)
+        if found is not None and found.exists():
+            return found
         suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif"}.get(mime, ".img")
-        self._shown_dir.mkdir(parents=True, exist_ok=True)
-        path = self._shown_dir / f"{sha256[:16]}{suffix}"
-        if not path.exists():
-            path.write_bytes(data)
-            self._shown.append(path)
+        path = self._copies.enter_context(
+            self._media.temp_copy(data, suffix, directory=self._shown_dir)
+        )
+        self._shown[sha256] = path
         return path
 
     async def send_typing(self, active: bool, *, recipient: str | None = None) -> None:

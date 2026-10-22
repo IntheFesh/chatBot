@@ -117,6 +117,20 @@ def test_the_codes_that_end_the_session_are_configurable_and_never_success_or_th
             load_settings(path)
 
 
+def test_a_gif_is_sent_as_it_is_unless_the_first_frame_is_chosen(tmp_path: Path) -> None:
+    """R17-38 (D-696): ``stickers.gif_send_mode`` is ``as_is`` or ``first_frame``, nothing else."""
+    assert load_settings().stickers.gif_send_mode == "as_is"
+    config = write_yaml(tmp_path / "config.yaml", "stickers: { gif_send_mode: first_frame }\n")
+    assert load_settings(config).stickers.gif_send_mode == "first_frame"
+    assert load_settings(
+        None, {"stickers": {"gif_send_mode": "first_frame"}}
+    ).stickers.gif_send_mode
+    for bad in ("animated", "still", "first-frame", "''"):
+        path = write_yaml(tmp_path / "bad.yaml", f"stickers: {{ gif_send_mode: {bad} }}\n")
+        with pytest.raises(ConfigError, match="gif_send_mode"):
+            load_settings(path)
+
+
 def test_explicit_missing_config_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_settings(tmp_path / "nope.yaml")

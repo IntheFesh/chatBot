@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import bindparam, func, select, text
+from sqlalchemy import bindparam, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from twin.services import Services
@@ -59,6 +59,7 @@ class StickerRecord:
     desc_vector_id: str | None
     desc_encoding: str | None
     sha256: str | None
+    first_frame_sha256: str | None = None  # the still PNG of a GIF (R-STK-007, D-697)
 
     @property
     def available(self) -> bool:
@@ -73,6 +74,12 @@ class StickerRecord:
     def usable(self) -> bool:
         """May the selector choose it: available, tagged by someone, not switched off."""
         return self.available and self.tagged and not self.disabled
+
+
+def label_of(record: StickerRecord) -> str | None:
+    """The word a sticker is shown by - in an example of a prompt, on the terminal, in a training
+    sample: its first (best) tag, or ``None`` if it has none."""
+    return record.tags[0] if record.tags else None
 
 
 def record_of(row: Sticker) -> StickerRecord:
@@ -104,6 +111,7 @@ def record_of(row: Sticker) -> StickerRecord:
         desc_vector_id=row.desc_vector_id,
         desc_encoding=row.desc_encoding,
         sha256=row.sha256,
+        first_frame_sha256=row.first_frame_sha256,
     )
 
 
@@ -144,6 +152,37 @@ class StickerCatalog:
         if found is None:
             raise UnknownStickerError(f"no sticker with MD5 {md5} in the library")
         return found
+
+    def find_by_hash(
+        self, *, md5: str | None = None, sha256: str | None = None
+    ) -> StickerRecord | None:
+        """The sticker whose picture has this hash, or ``None`` (R-STK-006, R17-5).
+
+        ``sha256`` is the SHA-256 of the file's bytes (what the media store names its files by)
+        and is tried first, through ``ix_stickers_sha256`` - and through
+        ``ix_stickers_first_frame_sha256`` for the still first frame of a GIF, which is the same
+        sticker (D-697); ``md5`` is the MD5 of the bytes, which is the primary key, so it also
+        finds a sticker whose file was never stored (its download failed).  Every status and both
+        origins match - her stickers, the ones of the imported history and the ones the user sent
+        since - because the point is to *recognise* a picture, not to decide whether it may be
+        sent.
+        """
+        with self._services.db.session() as session:
+            if sha256:
+                digest = sha256.strip().lower()
+                row = session.scalars(
+                    select(Sticker)
+                    .where(or_(Sticker.sha256 == digest, Sticker.first_frame_sha256 == digest))
+                    .order_by(Sticker.her_uses.desc(), Sticker.md5)
+                    .limit(1)
+                ).first()
+                if row is not None:
+                    return record_of(row)
+            if md5:
+                row = session.get(Sticker, md5.strip().lower())
+                if row is not None:
+                    return record_of(row)
+        return None
 
     def resolve(self, prefix: str) -> StickerRecord:
         """A sticker from its MD5 or a unique prefix of at least 4 characters."""
@@ -211,7 +250,9 @@ class StickerCatalog:
 
     def tag_lookup(self) -> Callable[[str], str | None]:
         """``md5 -> first tag`` for the stickers that have tags (loaded once, then cached)."""
-        table = {record.md5: record.tags[0] for record in self.records(tagged=True) if record.tags}
+        table = {
+            record.md5: label for record in self.records(tagged=True) if (label := label_of(record))
+        }
         return table.get
 
     def counts(self) -> dict[str, int]:
@@ -328,6 +369,16 @@ class StickerCatalog:
                 refresh_effective(row, self.vocabulary)
                 cleared += 1
         return cleared
+
+    def announce_changes(self) -> None:
+        """Tell the running application that the tags changed (moves ``settings.state_version``).
+
+        Tagging writes one sticker at a time without bumping the version (a job would wake the
+        application at every picture); a job calls this once when it is done, so the label book
+        and the selector, which keep what they read until the version moves, read it again.
+        """
+        with self._services.db.transaction(bump_state=True):
+            pass
 
     def set_disabled(self, md5: str, disabled: bool) -> StickerRecord:
         with self._services.db.transaction(bump_state=True) as session:

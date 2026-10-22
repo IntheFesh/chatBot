@@ -80,6 +80,7 @@
    - 做什么：先 `uv run twin channel send-test "你好"`，在手机上确认收到的是 `[测试]你好`。然后（`twin run` 没有在运行时）`uv run twin channel listen`，在 ClawBot 会话里依次发送：文字、图片、语音、视频、文件、引用一条旧消息（对文字和对图片各一次）、微信自带表情包各一条，终端每收到一条就打印一行（只有形态：`kind`、`item_type` 类型号、文字字数、媒体类型与大小、`quote=resolved/unresolved`、`flags`，**不显示内容**）。结束后 Ctrl+C，再 `uv run twin channel status` 看 `recent inbound item types` 与 `parse and handling counters`。`twin run` 运行时它自己也会轮询并记录同样的信息（`listen` 与 `run` 互斥，同一时间只有一个在轮询）。
    - 预期：手机收到测试消息；每条入站消息都出现一行。`send-test` 在窗口或条数用尽时会拒绝并提示"send the bot a message from your phone first"（先给机器人发一条消息）。如果 `send-test` 报 `code -2`，把 `errmsg` 原文发给维护者（协议文档第 13 节第 3 项要确认的 `-2` 含义）。
    - 请把 `listen` 的输出和 `status` 里出现的 `UNKNOWN` 类型号或解析失败计数（例如 `image.decrypt_failed`、`video_no_cover`、`voice_untranscribed`、`quote=unresolved`）原样发给维护者，用来补全协议文档里标"需 M0 实测确认"的入站形态（表情包、视频封面、语音转写覆盖率、只带 id 的引用）。不要贴任何聊天内容。
+   - **第 17 轮（D-690）：表情包是否被认出。**`listen` 对每张图片还会打印 `mime`、像素尺寸、`sha256` 前 8 位和 `library=sha256|md5|none`（只有结构，不含内容）。请发两张：**一张库里有的**（你们聊天记录里出现过的微信表情，最好是你自己发过的那种）和**一张库里没有的照片**，把这两行里的 `library=` 报给维护者。程序靠“图片字节与表情包库精确一致”来认表情包，只有 iLink 把发送者的原始字节原样下发时才命中；如果库里有的那张也是 `library=none`，说明微信转了码，这是铁律 9 的停止点（不会自行加感知哈希，要先改 SPEC）。
 
 4. **运行 M0 通道探针（需要用户在手机上操作，约 26 小时）**
    - 前提：第 1–3 项已做完（已登录、已绑定，`send-test` 能在手机上收到 `[测试]` 消息）。探针由**运行中的应用**执行，所以要有一个窗口一直开着 `uv run twin run`，电脑不要睡眠；应用重启没关系，探针从数据库里存的计划继续。

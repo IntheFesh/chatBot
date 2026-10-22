@@ -310,3 +310,52 @@ def test_the_status_source_is_made_without_an_engine(calm: World) -> None:
     calm.channel.session_state = lambda: (_ for _ in ()).throw(RuntimeError("no channel"))  # type: ignore[method-assign]
     again: Any = proactive_status_for(calm.services, calm.channel.session_state)()
     assert again is not None and again.blocked is None  # a channel that cannot say hides nothing
+
+
+async def test_the_openings_the_scheduler_shows_carry_the_labels_of_the_sticker_library(
+    services: Services,
+    clock: ManualClock,
+    pro_script: Any,
+    pro_api: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R17-13: the examples of how she opened a conversation name her stickers by their tag."""
+    import twin.schedule.proactive.component as component_module
+    from tests.support.proactive_world import build_world
+    from twin.retrieval.openers import OpenerExamples
+    from twin.stickers.catalog import StickerCatalog
+    from twin.stickers.labels import sticker_labels
+    from twin.storage.chat_models import Sticker
+
+    seen: list[Any] = []
+
+    class Recording(OpenerExamples):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen.append(kwargs.get("sticker_label"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(component_module, "OpenerExamples", Recording)
+    built = build_world(services, clock, script=pro_script)
+    try:
+        assert len(seen) == 1 and seen[0] is not None
+        md5, now = "ab" * 16, clock.now_utc()
+        with services.db.transaction(bump_state=False) as session:
+            session.add(
+                Sticker(
+                    md5=md5,
+                    status="available",
+                    attempts=0,
+                    her_uses=1,
+                    user_uses=0,
+                    context_uses=0,
+                    disabled=False,
+                    origin="import",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        StickerCatalog(services).save_vision(md5, ["开心"], "笑猫", "好消息", at=now)
+        assert seen[0](md5) == "开心" and seen[0] == sticker_labels(services).label_md5
+        assert seen[0]("0" * 32) is None
+    finally:
+        await built.aclose()

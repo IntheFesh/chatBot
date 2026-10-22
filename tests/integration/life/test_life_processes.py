@@ -61,7 +61,11 @@ pytestmark = pytest.mark.integration
 FRIDAY = date(2026, 10, 9)
 CHICAGO, SHANGHAI = "America/Chicago", "Asia/Shanghai"
 SOON = 2.0  # the state watcher looks every two seconds (R-ARCH-006)
-WIFE = "synthetic-her"
+# The conversation of the world's own history (tests/support/synth_chat.py).  The export is another
+# export of the same conversation: since R17-41 (D-695) the database holds exactly one target
+# conversation, so an import of a different one is refused - this test used to import a second
+# conversation next to the first, which is what the rule forbids.
+WIFE = "synthetic-target"
 
 
 def state_version(services: Services) -> int:

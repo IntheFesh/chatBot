@@ -17,7 +17,9 @@ Files live in ``<media_dir>/<sha256>.enc`` where the name is the SHA-256 of the
   file size.  The header's length/hash are filled in after the stream ends.
 
 Decrypted bytes are only ever exposed as a stream or, for tools that need a
-path, through :meth:`MediaStore.temp_file`, which wipes and removes the file.
+path, through :meth:`MediaStore.temp_file` (or :meth:`MediaStore.temp_copy` for bytes
+that are not in the store), which makes the file private (0600), wipes it and removes it;
+:meth:`MediaStore.sweep_dir` does the same for what a crash left behind.
 """
 
 from __future__ import annotations
@@ -394,12 +396,25 @@ class MediaStore:
             return False
         return True
 
-    @contextmanager
-    def temp_file(self, sha256: str, suffix: str = "") -> Iterator[Path]:
-        """Decrypt to a controlled temporary file; overwrite and delete it on exit."""
+    def _open_temp(self, suffix: str, directory: Path | None) -> tuple[Path, int]:
+        """A new file, mode 0600, in ``directory`` (default: the store's private tmp directory)."""
         self._ensure_dirs()
-        path = self.tmp_dir / f"{secrets.token_hex(12)}{suffix}"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        target = directory if directory is not None else self.tmp_dir
+        if not target.is_dir():
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = target / f"{secrets.token_hex(12)}{suffix}"
+        return path, os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+
+    @contextmanager
+    def temp_file(
+        self, sha256: str, suffix: str = "", *, directory: Path | None = None
+    ) -> Iterator[Path]:
+        """Decrypt to a controlled temporary file; overwrite and delete it on exit.
+
+        The file is private (0600) and lives in ``directory`` - made if it is not there - or, by
+        default, in the store's own ``tmp_dir``.
+        """
+        path, fd = self._open_temp(suffix, directory)
         written = 0
         try:
             with os.fdopen(fd, "wb") as out, self.open(sha256) as reader:
@@ -409,6 +424,53 @@ class MediaStore:
             yield path
         finally:
             _wipe(path, written)
+
+    @contextmanager
+    def temp_copy(
+        self, data: bytes, suffix: str = "", *, directory: Path | None = None
+    ) -> Iterator[Path]:
+        """A private (0600) temporary file holding ``data``, which is not in the store.
+
+        For bytes that have no stored file - a probe picture, a picture handed over as bytes -
+        that must still be opened by path (a viewer on the terminal).  Like :meth:`temp_file`
+        it is overwritten with zeros and removed on exit.
+        """
+        path, fd = self._open_temp(suffix, directory)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                out.write(data)
+            yield path
+        finally:
+            _wipe(path, len(data))
+
+    def sweep_dir(
+        self, directory: Path, on_error: Callable[[Path, OSError], None] | None = None
+    ) -> int:
+        """Wipe and remove the files a crash left in ``directory``; returns how many.
+
+        Only regular files directly inside it are touched (no subdirectory, no link), and never
+        the directories the store itself uses (``root`` and ``tmp_dir``, which other parts of
+        the program share): the directory must be one of its own, such as the one a viewer's
+        copies are made in.  A directory that is not there has nothing to sweep.  A file that
+        cannot be removed (on Windows, one a viewer still holds open) is reported to ``on_error``
+        and left for the next sweep; it does not stop the others.
+        """
+        if _same_place(directory, self.root) or _same_place(directory, self.tmp_dir):
+            raise ValueError("the shared media directories are not swept")
+        if not directory.is_dir():
+            return 0
+        swept = 0
+        for entry in sorted(directory.iterdir()):
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            try:
+                _wipe(entry, entry.stat().st_size)
+            except OSError as exc:
+                if on_error is not None:
+                    on_error(entry, exc)
+                continue
+            swept += 1
+        return swept
 
     def delete(self, sha256: str) -> bool:
         path = self.path_for(sha256)
@@ -446,6 +508,13 @@ class MediaStore:
             if on_progress:
                 on_progress(position, len(hashes))
         return changed
+
+
+def _same_place(first: Path, second: Path) -> bool:
+    try:
+        return first.resolve() == second.resolve()
+    except OSError:
+        return first.absolute() == second.absolute()
 
 
 def _wipe(path: Path, size: int) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import io
+import sys
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,7 @@ from tests.support.ilink import (
     text_item,
     updates,
 )
+from tests.support.persona import sticker_scenario
 from twin.channel.base import (
     AuthState,
     BypassRefused,
@@ -62,6 +64,7 @@ from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.services import Services, build_services
+from twin.stickers.catalog import StickerCatalog
 from twin.storage.db import Database
 from twin.storage.media import MediaKind, MediaStore
 
@@ -591,6 +594,33 @@ async def test_the_channel_built_from_services_uses_the_configured_limits_and_al
         await channel.stop()
 
 
+async def test_the_channel_built_from_services_shows_the_label_the_library_gives(
+    services: Services,
+) -> None:
+    """R17-12: with no labels of its own the terminal reads them from the sticker library."""
+    scenario = sticker_scenario(services)
+    tagged, untagged = scenario.md5s[0], scenario.md5s[1]
+    catalog = StickerCatalog(services)
+    catalog.save_vision(tagged, ["开心", "大笑"], "笑猫", "好消息", at=services.clock.now_utc())
+    inp, out = ScriptedInput(), RecordingOutput()
+    channel = LocalConsoleChannel.from_services(services, input=inp, output=out)
+    await channel.start()
+    try:
+        inp.feed("hi")
+        async for _message in channel.incoming():
+            break
+        assert (await channel.send_image(scenario.files[tagged], "image/png")).ok
+        assert (await channel.send_image(scenario.files[untagged], "image/png")).ok
+        catalog.set_manual(untagged, ["晚安"])  # a change by hand reaches the running terminal
+        assert (await channel.send_image(scenario.files[untagged], "image/png")).ok
+    finally:
+        await channel.stop()
+    first, second, third = out.lines
+    assert first.startswith("bot: [表情包：开心] ")
+    assert second.startswith("bot: [表情包：未标注] ")
+    assert third.startswith("bot: [表情包：晚安] ")
+
+
 # ----------------------------------------------------------------- twin chat
 
 
@@ -849,3 +879,119 @@ def test_nothing_in_the_repository_answers_with_an_echo() -> None:
         if path.name != "echo.py" and "回显" in path.read_text(encoding="utf-8")
     ]
     assert offenders == []
+
+
+# ------------------------------------------- R17-31: the copies shown on the terminal are private
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="POSIX modes; the wipe and the sweep below hold everywhere"
+)
+async def test_a_copy_shown_to_the_user_is_readable_by_nobody_else(console: Console) -> None:
+    console.input.feed("hi")
+    await console.receive()
+    await console.channel.send_image(STICKER, "image/gif")
+    [copy] = list(console.shown.iterdir())
+    assert (copy.stat().st_mode & 0o777) == 0o600
+    assert (console.shown.stat().st_mode & 0o777) == 0o700
+
+
+async def test_a_copy_is_overwritten_with_zeros_when_the_channel_stops(
+    db: Database, clock: ManualClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.storage import media
+
+    wiped: list[bytes] = []
+    real = media._wipe
+
+    def spy(path: Path, size: int) -> None:
+        wiped.append(path.read_bytes())
+        real(path, size)
+
+    monkeypatch.setattr(media, "_wipe", spy)
+    built = build(db, clock, tmp_path)
+    built.input.feed("hi")
+    await built.channel.start()
+    try:
+        await built.receive()
+        await built.channel.send_image(STICKER, "image/gif")
+        [copy] = list(built.shown.iterdir())
+        assert copy.read_bytes() == STICKER and wiped == []  # the viewer's path is good until then
+    finally:
+        await built.channel.stop()
+    assert wiped == [STICKER] and not copy.exists()  # wiped (not just unlinked) at stop
+
+
+async def test_the_copies_a_crashed_session_left_are_removed_when_the_channel_starts(
+    db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    built = build(db, clock, tmp_path)
+    built.shown.mkdir(parents=True)
+    (built.shown / "0123456789abcdef.gif").write_bytes(STICKER)  # a crash left it
+    built.media.tmp_dir.mkdir(parents=True, exist_ok=True)
+    elsewhere = built.media.tmp_dir / "login-qr.png"  # another user of the shared directory
+    elsewhere.write_bytes(b"qr")
+    await built.channel.start()
+    try:
+        assert list(built.shown.iterdir()) == []  # swept at the start, before any new copy
+        assert elsewhere.read_bytes() == b"qr"
+        built.input.feed("hi")
+        await built.receive()
+        await built.channel.send_image(STICKER, "image/gif")
+        assert len(list(built.shown.iterdir())) == 1
+        await built.channel.start()  # starting again is not a new session: nothing is swept
+        assert len(list(built.shown.iterdir())) == 1
+    finally:
+        await built.channel.stop()
+    assert list(built.shown.iterdir()) == []
+
+
+async def test_a_stopped_channel_can_be_started_and_show_the_same_picture_again(
+    db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    built = build(db, clock, tmp_path)
+    built.input.feed("hi")
+    await built.channel.start()
+    try:
+        await built.receive()
+        assert (await built.channel.send_image(STICKER, "image/gif")).ok
+    finally:
+        await built.channel.stop()
+    assert list(built.shown.iterdir()) == []
+    await built.channel.start()  # the window of his last message is still open
+    try:
+        assert (await built.channel.send_image(STICKER, "image/gif")).ok
+        [copy] = list(built.shown.iterdir())
+        assert copy.read_bytes() == STICKER
+    finally:
+        await built.channel.stop()
+    assert list(built.shown.iterdir()) == []
+
+
+async def test_a_copy_that_cannot_be_removed_does_not_stop_the_channel_and_is_swept_next_time(
+    db: Database, clock: ManualClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.storage import media
+
+    real = media._wipe
+
+    def stuck(path: Path, size: int) -> None:
+        raise PermissionError("a viewer holds it open")
+
+    built = build(db, clock, tmp_path)
+    built.input.feed("hi")
+    await built.channel.start()
+    try:
+        await built.receive()
+        await built.channel.send_image(STICKER, "image/gif")
+        monkeypatch.setattr(media, "_wipe", stuck)
+    finally:
+        await built.channel.stop()  # must come back, whatever the viewer holds
+    leftover = list(built.shown.iterdir())
+    assert len(leftover) == 1  # still there: the wipe failed
+    monkeypatch.setattr(media, "_wipe", real)
+    await built.channel.start()
+    try:
+        assert list(built.shown.iterdir()) == []  # the next start swept it
+    finally:
+        await built.channel.stop()

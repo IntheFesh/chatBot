@@ -47,6 +47,8 @@ uv run twin channel probe report     # 生成本文件
 
 报告会给出 `channel.proactive_window_safe_h` 与 `channel.outbound_quota_safe` 的建议值：
 实测值留 10% 余量（`twin channel probe report` 会先问你，确认后才写入 `config/config.yaml`）。
+还会把会动的 GIF 与静态 PNG 的手机显示并排列出，建议 `stickers.gif_send_mode`
+（`as_is` 原样发送 GIF，`first_frame` 只发静态首帧）；同样只是建议，由你决定。
 在拿到实测数据之前，`config/config.example.yaml` 里的默认值只是保守猜测，不是协议事实。
 
 ## 已知线索（来自协议源码，非实测）

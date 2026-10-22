@@ -6,8 +6,9 @@ made up (``tests/support/life_world.py``).  The user lives one Friday in Chicago
 * the evening before he says good night; she says good night to him, and sleeps;
 * she wakes and greets him by herself, in the window the plan allows;
 * at half past nine he writes three messages in a row: she answers once, after he is done;
-* he sends a photo, and a few minutes later a sticker: she sees the photo through its description,
-  answers the sticker with one of her own, and no photo of anyone ever goes out;
+* he sends a photo, and a few minutes later a sticker (on the wire a plain picture, which the
+  sticker library recognises, R17-5): she sees the photo through its description, answers the
+  sticker with one of her own, and no photo of anyone ever goes out;
 * he is silent through the noon: she writes first (a meal, a piece of her day) but never in her
   sleep and never closer than an hour apart;
 * in the afternoon she is busy: his question waits for the busy window's latency;
@@ -128,8 +129,15 @@ async def test_one_day_of_her_life(make_world: WorldFactory, embedder: HashingBa
     assert len(photo) == 1 and "咖啡" in photo[0].text  # she saw it through its description
     assert world.persona_said[-1].text == "哇 看着好香"
     await world.run_for(minutes=3)
-    await world.say_sticker(make_image_bytes(random.Random(4), "PNG"))
+    tags_before = world.deepseek.calls["sticker_tag"]
+    await world.say_sticker(
+        make_image_bytes(random.Random(4), "PNG")
+    )  # a plain picture on the wire
     await world.run_until_idle()
+    received = [r for r in world.in_rows() if r.kind == "sticker"]
+    assert len(received) == 1 and "一只笑着的小猫" in received[0].text  # the library knew it
+    assert world.deepseek.calls["sticker_tag"] == tags_before  # so nobody had to look at it
+    assert world.deepseek.calls["caption"] == 1  # and it was not taken for a second photo
     sent = world.persona_said[-2:]
     assert [s.kind for s in sent] == ["text", "sticker"] and sent[0].text == "笑死我了"
     sticker_rows = [r for r in world.out_rows() if r.kind == "sticker"]

@@ -292,3 +292,132 @@ def test_rekey_moves_files_to_the_current_key_keeping_name_and_content(
 def test_chunk_size_must_be_reasonable(tmp_path: Path, ring: KeyRing) -> None:
     with pytest.raises(ValueError, match="chunk_size"):
         MediaStore(tmp_path / "m", tmp_path / "t", chunk_size=10)
+
+
+# ------------------------------------------- R17-31: private copies in a directory of the caller
+
+
+def test_a_temp_file_can_live_in_a_directory_of_the_callers(
+    store: MediaStore, tmp_path: Path
+) -> None:
+    data = b"a sticker the user is shown" * 50
+    stored = store.put(data, MediaKind.STICKER)
+    shown = tmp_path / "tmp" / "console-out"  # not yet there
+    with store.temp_file(stored.sha256, ".png", directory=shown) as path:
+        assert path.parent == shown and path.suffix == ".png"
+        assert path.read_bytes() == data
+        if sys.platform != "win32":
+            assert (path.stat().st_mode & 0o777) == 0o600
+            assert (shown.stat().st_mode & 0o777) == 0o700
+        seen = path
+    assert not seen.exists() and list(shown.iterdir()) == []
+    assert list(store.tmp_dir.iterdir()) == [shown]  # nothing else was left in the shared directory
+
+
+def test_a_temp_copy_holds_bytes_that_are_not_in_the_store_and_wipes_them(
+    store: MediaStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.storage import media
+
+    wiped: list[tuple[Path, int, bytes]] = []
+    real = media._wipe
+
+    def spy(path: Path, size: int) -> None:
+        wiped.append((path, size, path.read_bytes()))
+        real(path, size)
+
+    monkeypatch.setattr(media, "_wipe", spy)
+    data = b"\x89PNG a probe picture that was never stored" * 20
+    shown = tmp_path / "shown"
+    with store.temp_copy(data, ".png", directory=shown) as path:
+        assert path.read_bytes() == data and path.parent == shown and path.suffix == ".png"
+        if sys.platform != "win32":
+            assert (path.stat().st_mode & 0o777) == 0o600
+        seen = path
+    assert not seen.exists()
+    assert wiped == [
+        (seen, len(data), data)
+    ]  # it was overwritten after the last look, then removed
+    with store.temp_copy(b"in the shared directory") as shared:
+        assert shared.parent == store.tmp_dir
+    assert list(store.tmp_dir.iterdir()) == []
+
+
+def test_a_temp_copy_is_removed_even_when_the_body_raises(
+    store: MediaStore, tmp_path: Path
+) -> None:
+    with pytest.raises(RuntimeError), store.temp_copy(b"x" * 10, directory=tmp_path / "d") as path:
+        assert path.exists()
+        raise RuntimeError("boom")
+    assert list((tmp_path / "d").iterdir()) == []
+
+
+def test_a_sweep_wipes_what_a_crash_left_in_a_directory_and_nothing_else(
+    store: MediaStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.storage import media
+
+    shown = tmp_path / "tmp" / "console-out"
+    shown.mkdir(parents=True)
+    leftovers = [shown / "a.png", shown / "b.gif"]
+    for path in leftovers:
+        path.write_bytes(b"A picture left behind" * 10)
+    keep_dir = shown / "inner"
+    keep_dir.mkdir()
+    (keep_dir / "kept.txt").write_text("a subdirectory is not touched", encoding="utf-8")
+    other = store.tmp_dir / "qr.png"  # the QR code of the login lives in the shared directory
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_bytes(b"login")
+    wiped: list[bytes] = []
+    real = media._wipe
+
+    def spy(path: Path, size: int) -> None:
+        wiped.append(path.read_bytes())
+        real(path, size)
+
+    monkeypatch.setattr(media, "_wipe", spy)
+    assert store.sweep_dir(shown) == 2
+    assert not any(path.exists() for path in leftovers)
+    assert wiped == [b"A picture left behind" * 10] * 2  # read just before they were overwritten
+    assert (keep_dir / "kept.txt").exists() and other.read_bytes() == b"login"
+    assert store.sweep_dir(shown) == 0  # nothing more
+    assert store.sweep_dir(tmp_path / "never-made") == 0  # no directory is not an error
+
+
+def test_a_sweep_never_goes_into_the_shared_directories(store: MediaStore) -> None:
+    store.tmp_dir.mkdir(parents=True, exist_ok=True)
+    keep = store.tmp_dir / "backup-check.tmp"
+    keep.write_bytes(b"x")
+    for forbidden in (store.tmp_dir, store.root):
+        with pytest.raises(ValueError, match="shared"):
+            store.sweep_dir(forbidden)
+    assert keep.exists()
+
+
+def test_a_sweep_goes_on_past_a_file_it_cannot_remove_and_says_which(
+    store: MediaStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows a viewer may hold a copy open; that must not stop the others being swept."""
+    from twin.storage import media
+
+    shown = tmp_path / "tmp" / "console-out"
+    shown.mkdir(parents=True)
+    names = ["a.png", "b.png", "c.png"]
+    for name in names:
+        (shown / name).write_bytes(b"x" * 30)
+    real = media._wipe
+
+    def stuck(path: Path, size: int) -> None:
+        if path.name == "b.png":
+            raise PermissionError("in use by another process")
+        real(path, size)
+
+    monkeypatch.setattr(media, "_wipe", stuck)
+    problems: list[tuple[str, str]] = []
+    swept = store.sweep_dir(
+        shown, lambda path, exc: problems.append((path.name, type(exc).__name__))
+    )
+    assert swept == 2 and problems == [("b.png", "PermissionError")]
+    assert sorted(p.name for p in shown.iterdir()) == ["b.png"]  # the one left for the next sweep
+    monkeypatch.setattr(media, "_wipe", real)
+    assert store.sweep_dir(shown) == 1 and list(shown.iterdir()) == []

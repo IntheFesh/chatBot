@@ -55,6 +55,7 @@ from twin.retrieval.query import ExampleQuery, ExampleRetriever, QueryTurn
 from twin.schedule.service import time_service_for
 from twin.schedule.time_service import PlanUnavailableError, TimeService
 from twin.stickers.emoji_codes import EmojiCodePolicy
+from twin.stickers.labels import sticker_labels
 from twin.stickers.rate import BubbleHistory, StickerRateController
 from twin.stickers.selector import LIVE_VIEW, StickerSelector, StickerView
 
@@ -130,7 +131,9 @@ class LiveDataSource:
         self.services = services
         self.time = time_service or time_service_for(services)
         self.memory = memory or Memory(services, time_service=self.time)
-        self.retriever = retriever or ExampleRetriever(services)
+        self.retriever = retriever or ExampleRetriever(
+            services, sticker_label=sticker_labels(services).label_md5
+        )
         self.rng = rng or random.Random()  # noqa: S311 - a draw among stickers, not security
         self.selector = selector or StickerSelector(services, view=LIVE_VIEW, rng=self.rng)
         self.assembler = MemoryAssembler(self.memory, estimator=estimator)
@@ -249,7 +252,7 @@ class LiveDataView:
     def sticker_selector(self, rng: random.Random | None = None) -> StickerSelector:
         if rng is None:
             return self._source.selector
-        return StickerSelector(self._services, view=LIVE_VIEW, rng=rng)
+        return self._source.selector.with_rng(rng)  # shares what the source has read (R17-51)
 
     @property
     def emoji_codes(self) -> EmojiCodePolicy | None:

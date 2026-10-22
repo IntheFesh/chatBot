@@ -104,7 +104,7 @@ uv run twin llm probe     # M0 探针：对真实 DeepSeek 做七项检查，写
 uv run twin llm status    # 模型、探针学到的能力、预算级别与今日花费
 ```
 
-- `twin doctor` 里 `keyring` 一行应是 `ok`，详情为 `WinVaultKeyring`；`database` 在首次 `twin db upgrade` 之前是 `warn`；`holiday-calendar` 是 `warn` 表示已安装的 `chinese-calendar` 还没收录下一年（不是故障，新版本发布后 `uv lock --upgrade-package chinese-calendar` 再 `uv sync`）。
+- `twin doctor` 里 `keyring` 一行应是 `ok`，详情为 `WinVaultKeyring`；`database` 在首次 `twin db upgrade` 之前是 `warn`；`holiday-calendar` 是 `warn` 表示已安装的 `chinese-calendar` 还没收录下一年（不是故障，新版本发布后 `uv lock --upgrade-package chinese-calendar` 再 `uv sync`）。`conversations` 是 `warn` 表示库里有不止一个会话（第 17 轮之前的导入可能留下）：她的数据不带会话 id 读取，第二个会话会混进她的画像和训练集；先决定哪个是她，用 `twin purge` 清掉导入的数据再导入对的那份，程序不会自动删除。
 - `twin llm probe` 通过的口径：思考开/关、缓存命中、JSON 输出（思考关闭与开启两种都要能解析）、JPEG 与 PNG 看图必须成功；其余是测量项。如果它输出 `STOP: JSON output with thinking enabled is not reliable`，不要继续往下做（主动消息规划依赖这一项），把 `docs\LLM_REPORT.md` 里第 4 项发给维护者。
 
 ### 1.5 服务管理
@@ -168,6 +168,7 @@ uv run twin channel probe start          # 窗口 B：读完说明后输入 y
 uv run twin channel probe status         # 随时看进度和该做什么
 uv run twin channel probe answer         # 回答“手机上实际收到几条”“GIF 在动吗”“看到正在输入吗”
 uv run twin channel probe report         # 写 docs\CHANNEL_REPORT.md，并问你是否把建议值写入配置
+                                         # 报告里有“GIF 与静态首帧”：GIF 在手机上不动而 PNG 能显示时会建议 stickers.gif_send_mode: first_frame（只发静态首帧；旧库先 uv run twin stickers first-frames）
 uv run twin channel probe stop           # 中途放弃（已测到的保留）
 ```
 
@@ -205,6 +206,7 @@ uv run twin import status --watch
 | 人设卡（统计规则立即刷新；描述增长 ≥ 10% 时排队重生成） | `twin persona regenerate` | `--stats-only` 只刷新统计规则（免费） |
 | 表情包下载（导出里没有文件的） | `twin stickers download` | 并发 4、每秒 ≤ 4、重试 3 次，`--retry-failed` 重试不可用的 |
 | 表情包打标签 | `twin stickers tag-all` | 一次性批任务，先估价 |
+| GIF 表情包的静态首帧（存文件时一起做，不单独排队） | `twin stickers first-frames` | 给升级前已存的 GIF 补做，做过的不重复；只是本地计算，不花钱 |
 | 检索库（她在类似情况下的真实回复） | `twin retrieval rebuild` | 首次会下载向量模型到 `data\models\embeddings\`；可续跑 |
 | 记忆回放（按日期顺序生成摘要与事实） | `twin memory replay estimate` 看估价，`twin memory replay start` 入队 | 一次性批任务，先估价；`twin memory replay status` 看进度 |
 | 图片描述（默认最近 90 天） | `twin images caption-backfill` | 一次性批任务；用户新发来的图片在线同步描述 |
@@ -829,6 +831,7 @@ uv run twin purge --all
 | `twin stickers disable` | 轻量修改 | Never choose this sticker (it stays in the library). |
 | `twin stickers download` | 重任务（入队，由运行中的应用执行） | Download the stickers whose files are not in the export (queued as a job). |
 | `twin stickers enable` | 轻量修改 | Allow a disabled sticker again. |
+| `twin stickers first-frames` | 轻量修改 | Give every GIF sticker its still first frame (for stickers.gif_send_mode: first_frame). |
 | `twin stickers list` | 只读 | List the library, her most used stickers first, with the library statistics. |
 | `twin stickers show` | 只读 | Show everything the library knows about one sticker. |
 | `twin stickers tag` | 轻量修改 | Set the tags of a sticker by hand (they win over the automatic ones). |

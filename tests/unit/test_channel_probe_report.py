@@ -289,3 +289,51 @@ def test_a_report_is_written_as_utf_8_with_unix_line_endings(tmp_path: Path) -> 
     write_report(target, render_report(sample()))
     raw = target.read_bytes()
     assert b"\r\n" not in raw and "达标".encode() in raw
+
+
+# ------------------------------------------- R17-38: the GIF and the still PNG, side by side
+
+
+def still_gif(**changes: Any) -> ChannelProbeSummary:
+    summary = sample(
+        gif_animated=False, png_displayed=True, gif_send_mode_suggestion="first_frame", **changes
+    )
+    summary.steps["media"]["images"]["gif"] = {"api_ok": True, "phone": "still"}
+    summary.steps["media"]["gif_animated"] = False
+    return summary
+
+
+def test_the_report_puts_the_gif_that_stays_still_beside_the_png_that_shows() -> None:
+    text = render_report(still_gif())
+    block = text.split("### GIF 与静态首帧")[1].split("\n### ")[0]
+    assert "| 原样发送 GIF（`as_is`） | 不会动 |" in block
+    assert "| 发送静态首帧 PNG（`first_frame`） | PNG 能显示 |" in block
+    assert "`stickers.gif_send_mode`" in block and "first_frame" in block
+    assert "确认后才写入" in text  # like the other suggestions: a suggestion, not a decision
+
+
+def test_the_report_says_the_gif_moves_and_nothing_needs_to_change() -> None:
+    summary = sample(png_displayed=True, gif_send_mode_suggestion="as_is")
+    block = render_report(summary).split("### GIF 与静态首帧")[1].split("\n### ")[0]
+    assert "| 原样发送 GIF（`as_is`） | 会动 |" in block
+    assert "建议 `stickers.gif_send_mode: as_is`" in block
+
+
+def test_without_a_basis_the_report_gives_no_suggestion_for_the_gif() -> None:
+    summary = sample(gif_animated=None, png_displayed=None)
+    block = render_report(summary).split("### GIF 与静态首帧")[1].split("\n### ")[0]
+    assert "| 原样发送 GIF（`as_is`） | 未确定 |" in block
+    assert "| 发送静态首帧 PNG（`first_frame`） | 未测 |" in block
+    assert "没有足够的实测" in block and "保持 `as_is`" in block
+
+
+def test_the_suggestion_table_lists_the_gif_mode_with_its_basis() -> None:
+    text = render_report(still_gif())
+    assert "| `stickers.gif_send_mode` | first_frame |" in text
+    assert "| `stickers.gif_send_mode` | — |" in render_report(
+        sample(gif_animated=None, png_displayed=None)
+    )
+
+
+def test_the_pending_report_names_the_gif_mode_among_the_values_it_will_suggest() -> None:
+    assert "`stickers.gif_send_mode`" in render_pending_report()

@@ -307,6 +307,7 @@ async def handle_sticker_tag(ctx: JobContext) -> None:
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
     synced = await asyncio.to_thread(StickerVectors(services).sync)
+    await asyncio.to_thread(StickerCatalog(services).announce_changes)  # R17-51: the new tags
     log.info(
         "stickers_tagged",
         tagged=tagged,

@@ -33,12 +33,13 @@ from twin.profile.builder import rebuild
 from twin.profile.persona import compose
 from twin.profile.persona.store import PersonaStore
 from twin.retrieval.embedder import EmbeddingService
+from twin.retrieval.examples import Example
 from twin.retrieval.indexer import run_index
-from twin.retrieval.query import ExampleRetriever
+from twin.retrieval.query import ExampleRetriever, QueryTurn
 from twin.schedule.time_service import BotTimeService
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
-from twin.stickers.selector import LIVE_VIEW
+from twin.stickers.selector import LIVE_VIEW, UsageTable
 from twin.storage.chat_models import StickerUse
 
 PAST = datetime(2026, 8, 25, 18, 0, tzinfo=UTC)
@@ -210,3 +211,115 @@ def test_a_fresh_installation_has_a_view_too(services: Services) -> None:
     assert view.her_state() == "free"  # the day plan has a default routine to start from
     unplanned = BotTimeService(services.clock, lambda: "America/Chicago")  # no day plans attached
     assert LiveDataSource(services, time_service=unplanned).view().her_state() is None
+
+
+# ------------------------------------------- R17-13: her stickers in the examples have a label
+
+
+def tag_her_stickers(world: Services, tag: str = "开心") -> list[str]:
+    with world.db.session() as session:
+        used = sorted(set(session.scalars(select(StickerUse.sticker_md5).where(StickerUse.by_her))))
+    catalog = StickerCatalog(world)
+    for md5 in used:
+        catalog.save_vision(md5, [tag], "笑得很开心的猫", "好消息", at=world.clock.now_utc())
+    return used
+
+
+def sticker_lines(found: list[Example]) -> list[str]:
+    lines = [line for e in found for line in (*e.reply, *(x for t in e.context for x in t.lines))]
+    return [line.text for line in lines if line.kind == "sticker"]
+
+
+async def test_the_live_examples_show_her_stickers_by_their_label(
+    world: Services, embedder: HashingBackend
+) -> None:
+    """R17-13: ``[表情包:开心]`` in an example, not the bare ``[表情包]`` the model might copy."""
+    used = tag_her_stickers(world)
+    assert used
+    data = LiveDataSource(world, memory=Memory(world), rng=random.Random(3))
+    try:
+        found = await data.view().examples([QueryTurn(False, "哈哈")], k=40)
+        shown = sticker_lines(found)
+        assert shown and set(shown) == {"[表情包:开心]"}
+        # a change by hand reaches the running bot at its next example (the state version)
+        StickerCatalog(world).set_manual(used[0], ["晚安"])
+        again = sticker_lines(await data.view().examples([QueryTurn(False, "哈哈")], k=40))
+        assert "[表情包:晚安]" in again
+    finally:
+        await data.aclose()
+
+
+async def test_a_sticker_without_a_tag_is_still_the_bare_marker_in_an_example(
+    world: Services, embedder: HashingBackend
+) -> None:
+    data = LiveDataSource(world, memory=Memory(world), rng=random.Random(3))
+    try:
+        shown = sticker_lines(await data.view().examples([QueryTurn(False, "哈哈")], k=40))
+        assert shown and set(shown) == {"[表情包]"}
+    finally:
+        await data.aclose()
+
+
+async def test_the_as_of_examples_use_the_pre_holdout_labels_of_the_training_export(
+    world: Services, embedder: HashingBackend
+) -> None:
+    """R17-13, R-TRN-013: one table of labels for the export, the evaluation and the view of t."""
+    used = tag_her_stickers(world, "撒娇")
+    source_ = AsOfSource(world, memory=Memory(world))
+    try:
+        found = await source_.at(PAST).examples([QueryTurn(False, "哈哈")], k=40)
+    finally:
+        await source_.retriever.aclose()
+    shown = sticker_lines(found)
+    lookup = StickerCatalog(world).tag_lookup()  # what the training export puts in its samples
+    assert shown and set(shown) == {f"[表情包:{lookup(md5)}]" for md5 in used} == {"[表情包:撒娇]"}
+
+
+# ------------------------------------------- R17-51: the views share what the selector has read
+
+
+def count_sticker_reads(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    reads = {"usage": 0, "records": 0}
+    load = UsageTable.load.__func__  # type: ignore[attr-defined]
+    records = StickerCatalog.records
+
+    def counted_load(cls: type[UsageTable], services: Services) -> UsageTable:
+        reads["usage"] += 1
+        return load(cls, services)  # type: ignore[no-any-return]
+
+    def counted_records(self: StickerCatalog, **kwargs: object) -> list:  # type: ignore[type-arg]
+        reads["records"] += 1
+        return records(self, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(UsageTable, "load", classmethod(counted_load))
+    monkeypatch.setattr(StickerCatalog, "records", counted_records)
+    return reads
+
+
+def test_the_live_view_reads_her_stickers_once_however_many_replies_pick_one(
+    world: Services, embedder: HashingBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-51: ``view.sticker_selector(rng)`` made a selector that read everything again."""
+    tag_her_stickers(world)
+    reads = count_sticker_reads(monkeypatch)
+    data = source(world, embedder)
+    for number in range(6):
+        data.view().sticker_selector(random.Random(number)).choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (1, 1)
+    StickerCatalog(world).set_manual(sorted(set(tag_her_stickers(world)))[0], ["晚安"])
+    data.view().sticker_selector(random.Random(9)).choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (2, 2)  # the state version moved: read again
+
+
+def test_every_view_of_one_as_of_source_reads_her_stickers_once(
+    world: Services, embedder: HashingBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tag_her_stickers(world)
+    reads = count_sticker_reads(monkeypatch)
+    source_ = AsOfSource(world, memory=Memory(world))
+    for number in range(6):
+        moment = PAST + timedelta(days=number)
+        source_.at(moment).sticker_selector(random.Random(number)).choose("开心", "")
+    assert (reads["usage"], reads["records"]) == (1, 1)
+    view = source_.at(PAST)
+    assert view.sticker_selector(random.Random(1)).view == view.sticker_view

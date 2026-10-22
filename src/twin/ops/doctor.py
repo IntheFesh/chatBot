@@ -34,6 +34,7 @@ from twin.config.secrets import (
     file_keyring_refusal,
 )
 from twin.config.settings import Settings
+from twin.ingest.conversations import MANY_FOUND, MANY_HINT, count_conversations_in_file
 from twin.llm.official import VISION_MODELS
 from twin.llm.pricing import PeakCalendar
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
@@ -326,6 +327,26 @@ def check_database(ctx: DoctorContext) -> CheckResult:
             )
         case SchemaState.OUTDATED | SchemaState.AHEAD:
             return CheckResult("database", CheckStatus.FAIL, status.hint(), status.hint())
+
+
+@doctor_check
+def check_conversations(ctx: DoctorContext) -> CheckResult:
+    """One target conversation in the database, not several (R-IMP-003, R17-41, D-695).
+
+    The import refuses a second conversation now; a database that got two before that rule is
+    only reported here - which one is hers is for the user to say, so nothing is deleted.
+    """
+    paths = ctx.paths()
+    if paths is None:
+        return CheckResult(
+            "conversations", CheckStatus.WARN, "skipped (configuration did not load)"
+        )
+    count = count_conversations_in_file(paths.db_path)
+    if count is None or count == 0:
+        return CheckResult("conversations", CheckStatus.OK, "no conversation imported yet")
+    if count == 1:
+        return CheckResult("conversations", CheckStatus.OK, "one conversation (the target)")
+    return CheckResult("conversations", CheckStatus.WARN, MANY_FOUND.format(count=count), MANY_HINT)
 
 
 @doctor_check

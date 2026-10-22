@@ -25,6 +25,7 @@ from tests.support.ingest import (
     second_services,
     start_import,
 )
+from tests.support.synth_chat import ChatSpec, build_chat
 from twin.config.secrets import SecretStore
 from twin.ingest.importer import (
     BatchEvent,
@@ -36,17 +37,25 @@ from twin.ingest.importer import (
     resumable_run,
 )
 from twin.ingest.media_import import ASSET_GROUP, MediaImporter
-from twin.ingest.normalize import RENDER_TYPE_KINDS
+from twin.ingest.normalize import RENDER_TYPE_KINDS, NormalizedMessage
+from twin.ingest.persist import (
+    BatchContext,
+    ConversationMismatchError,
+    RowSealer,
+    persist_messages,
+)
 from twin.ingest.runs import get_run, latest_run
 from twin.services import Services
 from twin.stickers.library import sticker_file_allowed
 from twin.storage.chat_models import (
     Conversation,
+    ImportRun,
     MediaAsset,
     Message,
     Sticker,
     StickerUse,
 )
+from twin.storage.crypto import get_keyring
 
 
 class PowerCut(BaseException):
@@ -242,9 +251,12 @@ def test_group_chats_and_other_conversations_are_ignored(
     with pytest.raises(TargetNotFoundError):
         prepare_import(services, export.root, target_username="wxid_" + "nobody0000")
     other = export.other_usernames[0]
-    other_run = run_import(services, export, target=other)
-    assert other_run.run.processed == 9  # a one-to-one chat can be chosen as the target
-    assert row_count(services, Conversation) == 2
+    with pytest.raises(ImportFailure, match="exactly one target"):
+        # R17-41: a one-to-one chat of someone else could once be chosen as a second target
+        # (this test then asserted that two conversations were stored); it would be mixed into
+        # her data, so it is refused
+        prepare_import(services, export.root, target_username=other)
+    assert row_count(services, Conversation) == 1 and row_count(services, Message) == 50
 
 
 def test_the_import_run_records_progress_and_speed(
@@ -359,23 +371,94 @@ def test_an_older_export_does_not_overwrite_a_newer_version(
         assert stored.source_export_id == "newer"
 
 
-def test_message_ids_of_another_conversation_are_refused(
+def test_a_second_conversation_is_refused_before_anything_is_imported(
     services: Services, tmp_path: Path
 ) -> None:
-    export = make_export(tmp_path, target_messages=20, other_conversations=1)
+    """R17-41: her data is read without a conversation id, so there may be only one."""
+    first = make_export(tmp_path / "a", target_messages=40, other_conversations=1)
+    run_import(services, first)
+    messages, runs = row_count(services, Message), row_count(services, ImportRun)
+    # the other one-to-one chat of the same export
+    with pytest.raises(ImportFailure, match="exactly one target"):
+        start_import(services, first, target=first.other_usernames[0])
+    # the same person's chat in a different export is the same conversation (an increment) ...
+    second = make_export(tmp_path / "b", target_messages=30, target_username="other-person-1")
+    assert second.target_username != first.target_username
+    with pytest.raises(ImportFailure, match="exactly one target"):  # ... another person's is not
+        start_import(services, second)
+    assert row_count(services, Conversation) == 1
+    assert row_count(services, Message) == messages  # nothing was inserted
+    assert row_count(services, ImportRun) == runs  # not even a run that would fail later
+
+
+def test_the_same_conversation_imported_again_is_still_an_increment(
+    services: Services, tmp_path: Path
+) -> None:
+    export = make_export(tmp_path, target_messages=40, other_conversations=1)
     run_import(services, export)
-    # the same ids now appear in another conversation's file
-    other_dir = next(
-        p for p in (export.root / "conversations").iterdir() if p.name.startswith("002_")
+    again = run_import(services, export)  # the rule must not turn re-imports away
+    assert again.run.duplicates == again.run.processed and again.run.inserted == 0
+    assert row_count(services, Conversation) == 1 and row_count(services, Message) == 40
+
+
+def test_a_run_prepared_before_the_other_conversation_arrived_stops_at_its_start(
+    services: Services, tmp_path: Path
+) -> None:
+    """R17-41, defence in depth: a queued run of conversation B must not start after A is in."""
+    export = make_export(tmp_path, target_messages=25, other_conversations=1)
+    waiting = start_import(services, export, target=export.other_usernames[0])  # B, prepared first
+    run_import(services, export)  # A is imported meanwhile
+    with pytest.raises(ImportFailure, match="exactly one target"):
+        run_import(services, export, target=export.other_usernames[0], run_id=waiting)
+    run = get_run(services.db, waiting)
+    assert run is not None and run.status == "failed" and "exactly one target" in (run.error or "")
+    assert row_count(services, Conversation) == 1 and row_count(services, Message) == 25
+
+
+def test_a_message_id_that_belongs_to_another_conversation_is_still_refused_at_the_row(
+    services: Services,
+) -> None:
+    """The row-level guard of ``persist`` stays as the last line of defence (R17-41).
+
+    The importer cannot reach it any more - a second conversation is refused before - so it is
+    exercised where it lives, with a conversation of an older database that has two.
+    """
+    build_chat(services, ChatSpec(days=2))
+    with services.db.session() as session:
+        existing = session.scalars(select(Message).limit(1)).one()
+        known_id = existing.id
+    now = services.clock.now_utc()
+    item = NormalizedMessage(
+        id=known_id,
+        local_id=None,
+        server_id=None,
+        create_time=now,
+        sort_seq=None,
+        is_sent=False,
+        kind="text",
+        render_type="Text",
+        text="x",
+        raw={},
     )
-    shutil_target = export.messages_path.read_bytes()
-    (other_dir / "messages.json").write_bytes(shutil_target)
-    with pytest.raises(ImportFailure, match="another conversation"):
-        run_import(services, export, target=export.other_usernames[0])
-    run = latest_run(services.db)
-    assert (
-        run is not None and run.status == "failed" and "another conversation" in (run.error or "")
-    )
+    with services.db.transaction(bump_state=False) as session:
+        other = Conversation(
+            username="legacy-other-conversation",
+            is_group=False,
+            message_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(other)
+        session.flush()
+        context = BatchContext(
+            conversation_id=other.id,
+            export_id="legacy",
+            exported_at=None,
+            now=now,
+            sealer=RowSealer(get_keyring()),
+        )
+        with pytest.raises(ConversationMismatchError, match="another conversation"):
+            persist_messages(session, [item], context)
 
 
 # --------------------------------------------------------------------- resuming

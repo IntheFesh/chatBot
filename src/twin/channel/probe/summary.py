@@ -3,9 +3,10 @@
 :func:`summarize` condenses a :class:`~twin.channel.probe.model.ProbePlan` into a
 :class:`ChannelProbeSummary`: the numbers the milestone check (round 09b) needs, the verdict
 on R-CH-010 and the suggested values for ``channel.proactive_window_safe_h`` and
-``channel.outbound_quota_safe``.  It is stored in the ``settings`` table under
-:data:`SUMMARY_KEY` (format: ``docs/DECISIONS.md`` D-152) and read back with
-:func:`load_channel_probe_summary`.
+``channel.outbound_quota_safe`` - and, beside them, the comparison of the moving GIF with the
+static PNG and the suggestion for ``stickers.gif_send_mode`` (R-STK-007, R17-38).  It is stored
+in the ``settings`` table under :data:`SUMMARY_KEY` (format: ``docs/DECISIONS.md`` D-152) and read
+back with :func:`load_channel_probe_summary`.
 
 The verdict (R-CH-010) is deliberately blunt:
 
@@ -75,6 +76,11 @@ class ChannelProbeSummary:
     steps: dict[str, dict[str, Any]]
     failures: list[dict[str, Any]]
     notes: list[str] = field(default_factory=list)
+    # R-STK-007 (R17-38): did the static test PNG show on the phone, and what the GIF and that
+    # say about ``stickers.gif_send_mode`` (``None``: no basis; a result stored before round 17
+    # has neither, which reads as unknown)
+    png_displayed: bool | None = None
+    gif_send_mode_suggestion: str | None = None
     schema_version: int = SUMMARY_SCHEMA_VERSION
 
     @property
@@ -140,6 +146,29 @@ def suggest_window_h(lower: float | None) -> float | None:
     if lower is None or lower <= 0:
         return None
     return math.floor(lower * MARGIN * 10) / 10
+
+
+def suggest_gif_mode(gif_animated: bool | None, png_displayed: bool | None) -> str | None:
+    """``stickers.gif_send_mode`` from what the phone showed (R-STK-007); ``None`` if it cannot say.
+
+    A GIF that moves needs no change (``as_is``).  One that stays still is as good as a picture,
+    so if the static PNG shows, sending the still first frame (``first_frame``) is the same
+    to the eye and does not depend on the platform's handling of GIFs.  Without a PNG that showed
+    there is no basis to prefer it, and without knowing whether the GIF moves there is none at all.
+    """
+    if gif_animated is True:
+        return "as_is"
+    if gif_animated is False and png_displayed is True:
+        return "first_frame"
+    return None
+
+
+def _png_displayed(media: dict[str, Any]) -> bool | None:
+    """Did the static test PNG arrive and show?  (``None`` if it was not asked or not answered.)"""
+    images = media.get("images")
+    row = images.get("png") if isinstance(images, dict) else None
+    phone = row.get("phone") if isinstance(row, dict) else None
+    return {"arrived": True, "missing": False, "not_delivered": False}.get(str(phone))
 
 
 def suggest_quota(n_messages: int | None) -> int | None:
@@ -212,6 +241,8 @@ def summarize(plan: ProbePlan) -> ChannelProbeSummary:
     upper = float(upper_raw) if isinstance(upper_raw, int | float) else None
     verdict, reasons = judge(n_messages, lower, upper)
     animated = media.data.get("gif_animated")
+    gif_moves = animated if isinstance(animated, bool) else None
+    png_shown = _png_displayed(media.data)
     notes: list[str] = []
     for step in plan.steps:
         if step.status is StepStatus.SKIPPED and step.skip_reason:
@@ -255,6 +286,8 @@ def summarize(plan: ProbePlan) -> ChannelProbeSummary:
         steps=_step_rows(plan),
         failures=_failure_rows(plan),
         notes=notes,
+        png_displayed=png_shown,
+        gif_send_mode_suggestion=suggest_gif_mode(gif_moves, png_shown),
     )
 
 
