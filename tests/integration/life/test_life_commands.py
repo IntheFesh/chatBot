@@ -223,3 +223,41 @@ async def test_every_command_is_answered_and_does_what_it_says(make_world: World
         assert not [a for a in session.scalars(select(Alert)) if a.category == "engine_error"]
     assert date(2026, 10, 9) == world.today() and world.now > datetime(2026, 10, 9, tzinfo=UTC)
     assert timedelta(0) < world.now - datetime(2026, 10, 9, 16, 0, tzinfo=UTC)
+
+
+async def test_a_fact_in_a_not_like_wording_is_remembered_after_the_yes(
+    make_world: WorldFactory,
+) -> None:
+    """R17-11 (D-674): ``/不像 <a fact>`` asks, the "是" remembers it, ``/记忆`` lists it."""
+    world = await make_world(
+        datetime(2026, 10, 9, 16, 0, tzinfo=UTC),
+        model=proactive_model(opening_curve(base=0.02)),
+    )
+    world.deepseek.facts_said.append("上海认识")
+    world.deepseek.book.queue.append("我们是在北京认识的呀")
+    await world.say("你还记得我们是怎么认识的吗")
+    await world.run_until_idle()
+    assert world.persona_said[-1].text == "我们是在北京认识的呀"
+    spoken = len(world.persona_said)
+
+    await world.say("/不像 我们是在上海认识的")
+    asked = world.system_said[-1].text
+    assert asked.startswith(PREFIX + texts.NOT_LIKE_DONE) and asked.endswith(texts.FACT_ASK)
+    assert len(world.deepseek.of_kind("correction_fact")) == 1
+
+    await world.say("是")
+    kept = world.system_said[-1].text
+    assert kept.startswith(PREFIX + "记住了（第 1 条）：我们是在上海认识的")
+    await world.say("/记忆")
+    assert world.system_said[-1].text.startswith(PREFIX + "1. 我们是在上海认识的")
+    await world.run_until_idle()
+    assert len(world.persona_said) == spoken  # the "是" was the answer to a question, not chat
+    rows = world.rows()
+    assert [r.text for r in rows if r.direction == "in" and r.is_command] == [
+        "/不像 我们是在上海认识的",
+        "是",
+        "/记忆",
+    ]
+    for call in world.deepseek.of_kind("memory"):  # the wording is stored once, by the yes
+        assert call.text.count("我们是在上海认识的") <= 1
+    assert world.deepseek.unexpected == []

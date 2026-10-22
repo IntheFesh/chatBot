@@ -68,10 +68,8 @@ class ParsedCommand:
     raw: str
 
 
-def _is_separator(char: str) -> bool:
-    """White space, a colon or sentence punctuation (``，,、。；！？…``) after a name."""
-    if char in SEPARATORS or char.isspace():
-        return True
+def _is_sentence_punctuation(char: str) -> bool:
+    """Punctuation such as ``，,、。；！？…`` that may stand for the space after a name."""
     if unicodedata.category(char) != "Po":
         return False
     return unicodedata.normalize("NFKC", char) not in _NOT_SEPARATORS
@@ -105,7 +103,7 @@ def _lenient(rest: str, stripped: str, known: Known) -> ParsedCommand | None:
         first = remainder[0]
         if first in SEPARATORS or first.isspace():
             return ParsedCommand(name, remainder.lstrip(SEPARATORS).strip(), stripped)
-        if _is_separator(first):  # "，": one punctuation mark stands for the space
+        if _is_sentence_punctuation(first):  # "，": one mark stands for the space
             return ParsedCommand(name, remainder[1:].lstrip(SEPARATORS).strip(), stripped)
         # Nothing separates the name from what follows: "思考开" is split, but only after a name
         # that ends in a CJK character and not after "/ " ("/ 思考开" is chat); what follows a

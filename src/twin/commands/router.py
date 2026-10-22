@@ -46,6 +46,7 @@ from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
 from twin.engine.dataview import LiveDataSource
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnMessages, BotTurnStore
+from twin.learning.corrections import FactProposer, PendingStore
 from twin.learning.dislike import NotLikeRecorder
 from twin.learning.pairs import PreferencePairStore
 from twin.learning.sample import LazyViewSource, SampleBuilder, ViewSource
@@ -189,7 +190,10 @@ class CommandRouter:
                 ),
                 memory=MemoryCommands(MemoryManager(known_memory, llm.client)),
                 learn=LearnCommands(
-                    learner, services.alerts, lambda: services.settings.training.dpo_min_pairs
+                    learner,
+                    services.alerts,
+                    lambda: services.settings.training.dpo_min_pairs,
+                    FactProposer(services, llm.client, turn_store, PendingStore(services)),
                 ),
                 cost=CostCommands(sources),
                 imports=ImportCommands(services, import_notes or ImportNotifyStore(services)),

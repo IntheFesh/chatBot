@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from tests.support.clock import ManualClock
 from tests.support.deepseek import API, TEST_KEY, error, ok, request_json
+from tests.support.embedding import HashingBackend
 from tests.support.engine_extras import ScriptedCommands
 from tests.support.engine_harness import (
     ClockData,
@@ -32,6 +33,7 @@ from tests.support.engine_harness import (
     make_draft,
     run_to_idle,
 )
+from tests.support.memory import make_memory
 from tests.support.waiting import wait_until
 from twin.commands import texts
 from twin.engine import machine
@@ -40,17 +42,25 @@ from twin.engine.feedback import FeedbackStore
 from twin.engine.rounds import RoundStore
 from twin.engine.turns import BotTurnMessages, BotTurnStore
 from twin.learning.corrections import (
+    KIND_FACT,
+    KIND_NOT_LIKE,
     CorrectionService,
+    FactProposer,
     PendingCorrection,
+    PendingStore,
     is_confirmation_word,
+    is_rejection_word,
     looks_like_correction,
 )
 from twin.learning.dislike import NotLikeRecorder
 from twin.learning.pairs import PreferencePairStore
 from twin.learning.sample import SampleBuilder
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
+from twin.memory.manage import MemoryManager
+from twin.memory.memory import Memory
 from twin.services import Services
 from twin.storage.engine_models import BotTurn
+from twin.storage.settings_store import get_setting, put_setting
 
 QUESTION = texts.PREFIX + texts.CORRECTION_ASK
 DONE = texts.PREFIX + texts.CORRECTION_DONE
@@ -259,6 +269,7 @@ class Rig:
     service: CorrectionService
     llm: LlmRuntime
     recorder: NotLikeRecorder
+    memory: Memory
 
     def new_service(self) -> CorrectionService:
         """A service over the same tables (the settings are read when it is made)."""
@@ -269,6 +280,7 @@ class Rig:
             self.recorder,
             BotTurnStore(services.db, clock),
             RoundStore(services.db),
+            memory=MemoryManager(self.memory, self.llm.client),
         )
 
     async def say(self, text: str, *, advance: float = 0.0) -> None:
@@ -287,7 +299,9 @@ class Rig:
 
 
 @pytest.fixture
-async def rig(services: Services, clock: ManualClock, api: respx.MockRouter) -> AsyncIterator[Rig]:
+async def rig(
+    services: Services, clock: ManualClock, api: respx.MockRouter, embedder: HashingBackend
+) -> AsyncIterator[Rig]:
     services.secrets.set(DEEPSEEK_SECRET, TEST_KEY)
     services.runtime.initialize()
     llm = build_llm_runtime(services)
@@ -300,10 +314,18 @@ async def rig(services: Services, clock: ManualClock, api: respx.MockRouter) -> 
         PreferencePairStore(services.db, clock),
         SampleBuilder(services, BotTurnMessages(services.db), ClockData(clock)),
     )
-    service = CorrectionService(services, llm.client, recorder, store, RoundStore(services.db))
+    memory = make_memory(services)
+    service = CorrectionService(
+        services,
+        llm.client,
+        recorder,
+        store,
+        RoundStore(services.db),
+        memory=MemoryManager(memory, llm.client),
+    )
     harness.engine.attach_corrections(service)
     await harness.engine.start()
-    yield Rig(harness, service, llm, recorder)
+    yield Rig(harness, service, llm, recorder, memory)
     await harness.engine.stop()
     await llm.client.aclose()
 
@@ -619,6 +641,206 @@ async def test_the_engine_can_say_a_system_message_on_its_own(
         ]
     finally:
         await harness.engine.stop()
+
+
+# ------------------------------------------------- R17-11 (D-674): a fact in a /不像 wording
+
+FACT = "我们是2019年在上海认识的"
+REMEMBERED = texts.PREFIX + "记住了（第 1 条）：" + FACT + texts.REMEMBER_AS_WRITTEN
+
+
+def remembered(rig: Rig) -> list[tuple[str, str]]:
+    """The facts of the memory as ``(text, source)``."""
+    listing = MemoryManager(rig.memory).list_items()
+    return [(item.text, item.source) for item in listing.items]
+
+
+async def ask_about_a_fact(rig: Rig, reply_id: str, wording: str = FACT) -> None:
+    """What ``/不像 <说法>`` leaves behind when the wording is a fact: the open question."""
+    services, clock = rig.harness.services, rig.harness.clock
+    proposer = FactProposer(
+        services,
+        rig.llm.client,
+        BotTurnStore(services.db, clock),
+        PendingStore(services),
+    )
+    assert await proposer.propose(wording, reply_id) == texts.FACT_ASK
+    pending = rig.service.pending()
+    assert pending is not None and (pending.kind, pending.text) == (KIND_FACT, wording)
+
+
+async def test_the_yes_to_the_fact_question_remembers_the_wording_once(rig: Rig) -> None:
+    """R17-11: before the fix nothing ever called ``MemoryManager.remember`` for a correction."""
+    rig.harness.services.settings.memory.fact_extraction = False  # the wording is stored as it is
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    calls = rig.harness.writer.calls
+    await rig.say("是", advance=60)
+    assert rig.said[-1] == REMEMBERED and rig.harness.writer.calls == calls
+    assert remembered(rig) == [(FACT, "user_command")]
+    assert rig.service.pending() is None
+    assert rig.recorder.feedback_of(reply_id) == []  # a fact question is not a "不像" verdict
+    yes_row = next(r for r in stored(rig) if r.direction == "in" and r.text == "是")
+    assert yes_row.is_command and stored(rig)[-1].is_command  # neither is conversation
+    rig.replies("真的吗")
+    await rig.say("是", advance=30)  # a second yes confirms nothing: it is a plain message
+    assert rig.said[-1] == "真的吗" and len(remembered(rig)) == 1
+
+
+async def test_a_fact_question_lapses_after_the_window_and_nothing_is_remembered(rig: Rig) -> None:
+    rig.harness.services.settings.memory.fact_extraction = False
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    rig.replies("是什么呀")
+    await rig.say("是", advance=61 * 60)
+    assert rig.said[-1] == "是什么呀" and remembered(rig) == []
+    assert not next(r for r in stored(rig) if r.text == "是").is_command
+
+
+async def test_a_fact_question_inside_the_window_is_still_open_at_59_minutes(rig: Rig) -> None:
+    rig.harness.services.settings.memory.fact_extraction = False
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    await rig.say("是", advance=59 * 60)
+    assert rig.said[-1] == REMEMBERED
+
+
+@pytest.mark.parametrize("word", ["不用", "算了", "不是", "否", "不用了！", "不要"])
+async def test_a_no_closes_the_question_and_remembers_nothing(rig: Rig, word: str) -> None:
+    rig.harness.services.settings.memory.fact_extraction = False
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    calls = rig.harness.writer.calls
+    await rig.say(word, advance=30)
+    assert rig.said[-1] == texts.PREFIX + texts.CORRECTION_REJECTED
+    assert rig.harness.writer.calls == calls  # she was not asked: it was not conversation
+    assert remembered(rig) == [] and rig.service.pending() is None
+    assert next(r for r in stored(rig) if r.direction == "in" and r.text == word).is_command
+
+
+async def test_a_no_closes_the_not_like_question_too(rig: Rig) -> None:
+    reply_id = await first_exchange(rig)
+    rig.replies("好吧 我改改")
+    await rig.say("她不会这么说")
+    await rig.say("算了", advance=30)
+    assert rig.said[-1] == texts.PREFIX + texts.CORRECTION_REJECTED
+    assert rig.recorder.feedback_of(reply_id) == [] and rig.service.pending() is None
+
+
+async def test_a_no_with_no_question_open_is_an_ordinary_message(rig: Rig) -> None:
+    await first_exchange(rig)
+    rig.replies("好吧")
+    await rig.say("不用", advance=30)
+    assert rig.said[-1] == "好吧"
+    assert not next(r for r in stored(rig) if r.text == "不用").is_command
+
+
+async def test_a_fact_question_is_closed_when_she_has_said_something_in_between(rig: Rig) -> None:
+    rig.harness.services.settings.memory.fact_extraction = False
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    rig.replies("你想听什么呀")
+    await rig.say("你再说一句", advance=30)
+    rig.replies("好的好的")
+    await rig.say("是", advance=30)
+    assert rig.said[-1] == "好的好的" and remembered(rig) == []
+
+
+async def test_the_open_fact_question_survives_a_restart(rig: Rig) -> None:
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    again = rig.new_service()
+    pending = again.pending()
+    assert pending is not None and (pending.kind, pending.text) == (KIND_FACT, FACT)
+    assert await again.is_confirmation("是", rig.harness.clock.now_utc() + timedelta(minutes=1))
+    assert await again.is_confirmation("不用", rig.harness.clock.now_utc() + timedelta(minutes=1))
+
+
+async def test_a_newer_question_of_the_other_kind_replaces_the_fact_question(rig: Rig) -> None:
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    rig.replies("好吧 我改改")
+    await rig.say("她不会这么说", advance=30)
+    pending = rig.service.pending()
+    assert pending is not None and (pending.kind, pending.text) == (KIND_NOT_LIKE, None)
+
+
+def test_a_question_stored_before_facts_were_asked_about_reads_as_a_not_like_question(
+    rig: Rig,
+) -> None:
+    services = rig.harness.services
+    store = PendingStore(services)
+    moment = rig.harness.clock.now_utc()
+    with services.db.transaction(bump_state=False) as session:
+        put_setting(
+            session,
+            "learning.correction.pending",
+            {"reply_id": "r-1", "asked_at": moment.isoformat()},
+            clock=services.clock,
+            record_history=False,
+        )
+    assert store.get() == PendingCorrection("r-1", moment, KIND_NOT_LIKE, None)
+    for broken in (
+        {"reply_id": "r-1", "asked_at": moment.isoformat(), "kind": "other"},
+        {"reply_id": "r-1", "asked_at": moment.isoformat(), "kind": KIND_FACT},  # no wording
+        {"reply_id": "r-1", "asked_at": "yesterday"},
+        {"asked_at": moment.isoformat()},
+        "not a dict",
+    ):
+        with services.db.transaction(bump_state=False) as session:
+            put_setting(
+                session,
+                "learning.correction.pending",
+                broken,
+                clock=services.clock,
+                record_history=False,
+            )
+        assert store.get() is None, broken
+    store.put(PendingCorrection("r-2", moment, KIND_FACT, FACT))
+    with services.db.session() as session:
+        raw = get_setting(session, "learning.correction.pending")
+    assert raw == {"reply_id": "r-2", "asked_at": moment.isoformat(), "kind": "fact", "text": FACT}
+    store.put(None)
+    assert store.get() is None
+
+
+class FailingMemory:
+    """A memory manager whose ``remember`` fails once and then works."""
+
+    def __init__(self, inner: MemoryManager) -> None:
+        self.inner = inner
+        self.failed = False
+
+    async def remember(self, text: str) -> Any:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("the memory is down")
+        return await self.inner.remember(text)
+
+
+async def test_a_memory_that_fails_leaves_the_fact_question_open_for_another_yes(rig: Rig) -> None:
+    rig.harness.services.settings.memory.fact_extraction = False
+    reply_id = await first_exchange(rig)
+    await ask_about_a_fact(rig, reply_id)
+    broken = FailingMemory(MemoryManager(rig.memory))
+    service = rig.new_service()
+    service._memory = broken  # type: ignore[assignment]
+    now = rig.harness.clock.now_utc() + timedelta(seconds=30)
+    with pytest.raises(RuntimeError, match="memory is down"):
+        await service.confirm(CommandContext(now, "in-1"))
+    assert service.pending() is not None and remembered(rig) == []
+    outcome = await service.confirm(CommandContext(now, "in-2"))
+    assert outcome == CommandOutcome(REMEMBERED) and service.pending() is None
+
+
+@pytest.mark.parametrize("text", ["不用", "算了", "不是", "否", " 不用了。", "不要"])
+def test_the_no_is_a_short_no(text: str) -> None:
+    assert is_rejection_word(text) and not is_confirmation_word(text)
+
+
+@pytest.mark.parametrize("text", ["", "是", "好", "不是吧", "不用管我", "我不要", "否则呢"])
+def test_anything_else_is_not_the_no(text: str) -> None:
+    assert not is_rejection_word(text)
 
 
 async def test_a_yes_for_a_reply_that_is_gone_is_told_so_and_closes_the_question(rig: Rig) -> None:

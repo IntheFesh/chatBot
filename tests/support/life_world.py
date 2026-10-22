@@ -185,6 +185,7 @@ KIND_OF_TEMPLATE = {
     "lifeline_generate": "lifeline",
     "lifeline_check": "lifeline",
     "correction_check": "correction",
+    "correction_fact_check": "correction_fact",
     "correction_rules": "rules",
     "correction_rule_check": "rules_check",
     "sticker_tag": "sticker_tag",
@@ -205,6 +206,8 @@ class LifeDeepSeek:
         self.book = ReplyBook()
         self.caption = "一张桌子上放着一杯咖啡的照片"
         self.rules = ["不要说得太客气", "少用句号"]  # what the weekly consolidation finds
+        # the words of a /不像 wording that make it a fact ("我们是在上海认识的"): none, by default
+        self.facts_said: list[str] = []
         self.sticker_tags = ["开心"]
         self.sticker_description = "一只笑着的小猫"
         self.calls: Counter[str] = Counter()
@@ -305,6 +308,10 @@ class LifeDeepSeek:
             return self._crisis(body)
         if kind == "correction":
             return self._plain('{"is_correction": false}')
+        if kind == "correction_fact":
+            wording = str(body["messages"][-1]["content"]).split("用户给的说法：", 1)[-1]
+            states = any(marker in wording for marker in self.facts_said)
+            return self._plain(json.dumps({"is_fact": states}))
         if kind == "rules":
             return self._plain(json.dumps({"rules": self.rules}, ensure_ascii=False))
         if kind == "rules_check":
