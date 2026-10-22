@@ -188,8 +188,8 @@ class CaptionService:
         return self._client
 
     async def aclose(self) -> None:
-        if self._owns_client and self._client is not None:
-            await self._client.aclose()
+        """Let go of the shared client; it is not closed here, others are using it (D-701)."""
+        if self._owns_client:
             self._client = None
 
     # ----------------------------------------------------------------- lookups

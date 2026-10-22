@@ -134,16 +134,25 @@ async def test_every_restart_is_logged_recorded_and_alerted_with_a_reason(
     assert any("restarting in" in a.title for a in alerts)
 
 
-async def test_the_fifth_quick_failure_in_a_row_is_critical_and_passes_the_rate_limit(
+async def test_the_fifth_quick_failure_in_a_row_is_critical_but_not_above_the_hourly_limit(
     harness: Harness, services: Services
 ) -> None:
+    """R17-22 (D-700, user decision): "同类 1 小时最多 1 封" has no exception for critical.
+
+    The old test said the critical alert passes the rate limit.  It is recorded, with its
+    severity, and only the first notice of the hour goes out.
+    """
     harness.start()
     for number in range(1, 6):
         await harness.clock.advance(await harness.crash(number))
     harness.stop.set()
     await harness.finish()
-    announced = [a for a in services.alerts.recent() if a.kind == "alert" and not a.suppressed]
-    assert sorted(a.severity for a in announced) == ["critical", "warning"]
+    alerts = [a for a in services.alerts.recent() if a.kind == "alert"]
+    assert [a.severity for a in alerts].count("critical") == 1
+    announced = [a for a in alerts if not a.suppressed]
+    assert [a.severity for a in announced] == ["warning"]
+    (critical,) = (a for a in alerts if a.severity == "critical")
+    assert critical.suppressed and critical.toast_state == "none"
 
 
 async def test_a_child_that_ran_for_half_an_hour_starts_the_wait_over(

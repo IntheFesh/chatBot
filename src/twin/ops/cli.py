@@ -6,7 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.llm.runtime import activate_offpeak_policy, build_llm_runtime
+from twin.llm.runtime import activate_offpeak_policy, build_llm_runtime, close_llm_runtime
 from twin.ops.jobs import (
     BatchNotFoundError,
     BatchTooLargeError,
@@ -169,9 +169,12 @@ def jobs_run(
     )
 
     async def _go() -> None:
-        if not app_running:  # with --force the running application owns its `running` jobs
-            await worker.recover()
-        summary = await worker.run_until_idle()
+        try:
+            if not app_running:  # with --force the running application owns its `running` jobs
+                await worker.recover()
+            summary = await worker.run_until_idle()
+        finally:
+            await close_llm_runtime(services)
         typer.echo(
             f"done={summary.done} retried={summary.retried} "
             f"failed={summary.failed} discarded={summary.discarded}"

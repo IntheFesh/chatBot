@@ -22,6 +22,7 @@ from twin.config.settings import ConfigFileError
 from twin.eval.cli import eval_app
 from twin.ingest.cli import images_app, import_app
 from twin.llm.cli import llm_app
+from twin.llm.runtime import close_llm_runtime
 from twin.memory.cli import memory_app
 from twin.ops.backup.cli import backup_app
 from twin.ops.cli import jobs_app
@@ -152,6 +153,7 @@ async def _serve(services: Services) -> None:
         await assembly.application.run(assembly.stop, signals=signals)
     finally:
         power.stop()
+        await close_llm_runtime(services)  # the one DeepSeek client of the process (D-701)
 
 
 @app.command("run")

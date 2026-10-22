@@ -11,6 +11,15 @@ class LlmConfigError(LlmError):
     """The configuration cannot work (unknown model, text-only model asked to read images)."""
 
 
+class LoopAffinityError(LlmError):
+    """The client is being used on two running event loops at once.
+
+    Its connection pool and its concurrency limits belong to one loop.  A command that runs
+    several loops one after the other is fine (the client moves to the new one); two loops that
+    run at the same time, in two threads, are not supported.
+    """
+
+
 class UnknownModelError(LlmConfigError):
     """No price is configured for the model, so its cost cannot be recorded."""
 

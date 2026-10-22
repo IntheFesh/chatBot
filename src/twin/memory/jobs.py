@@ -142,8 +142,6 @@ async def handle_memory_replay(ctx: JobContext) -> None:
         raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
-    finally:
-        await runtime.client.aclose()
     log.info(
         "memory_replayed",
         days=len(days),
@@ -178,8 +176,6 @@ async def handle_memory_summary(ctx: JobContext) -> None:
         raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
-    finally:
-        await runtime.client.aclose()
     log.info(
         "memory_summary_job",
         scope=scope,
@@ -222,8 +218,6 @@ async def handle_memory_extract(ctx: JobContext) -> None:
         raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
-    finally:
-        await runtime.client.aclose()
     log.info(
         "memory_extracted",
         facts=report.facts_added,

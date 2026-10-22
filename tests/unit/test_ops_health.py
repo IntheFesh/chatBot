@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
 import shutil
 from collections import namedtuple
 from datetime import UTC, datetime, timedelta
@@ -16,6 +18,7 @@ from twin.channel.base import AuthState
 from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.state import ChannelStateStore
 from twin.llm.health import LlmHealth, LlmHealthSnapshot, llm_health_of
+from twin.llm.reliability import BreakerState, CircuitBreaker
 from twin.ops.backup.archive import Manifest
 from twin.ops.backup.ledger import BackupLedger
 from twin.ops.health import (
@@ -324,12 +327,64 @@ def test_llm_health_counts_a_window_of_attempts(clock: ManualClock) -> None:
     assert health.snapshot(900).calls == 3 and health.snapshot(900).failures == 2
     recent = health.snapshot(60)
     assert (recent.calls, recent.failures, recent.error_rate) == (1, 1, 1.0)
-    health.breaker_opened()
-    assert health.snapshot(60).circuit_open
-    health.breaker_closed()
-    assert not health.snapshot(60).circuit_open
     clock.tick(120)  # nothing new for two minutes: the one-minute window is empty
     assert health.snapshot(1).calls == 0 and health.snapshot(1).error_rate == 0.0
+
+
+def test_the_circuit_flag_follows_the_state_of_the_registered_breakers(clock: ManualClock) -> None:
+    """R17-10 (D-701): "open" is read from the breaker objects; half-open does not count."""
+    health = LlmHealth(clock)
+    one = CircuitBreaker(clock, failure_threshold=2)
+    other = CircuitBreaker(clock, failure_threshold=2)
+    health.register_breaker(one)
+    health.register_breaker(other)
+    health.register_breaker(one)  # twice is once
+    assert not health.snapshot(60).circuit_open
+    for _ in range(2):
+        one.before_call()
+        one.record_failure()
+    assert health.snapshot(60).circuit_open
+    clock.tick(301)  # half-open: a probe may go, nothing is announced
+    assert one.state is BreakerState.HALF_OPEN and not health.snapshot(60).circuit_open
+    one.before_call()
+    one.record_failure()  # the probe failed: open again, still one opening
+    assert health.snapshot(60).circuit_open
+    clock.tick(301)
+    one.before_call()
+    one.record_success()
+    assert not health.snapshot(60).circuit_open
+    # two breakers, one of them open: the flag is "any"
+    for _ in range(2):
+        other.before_call()
+        other.record_failure()
+    assert health.snapshot(60).circuit_open
+    health.unregister_breaker(other)
+    assert not health.snapshot(60).circuit_open
+    health.unregister_breaker(other)  # nothing to do
+
+
+def test_a_breaker_that_is_dropped_leaves_the_record(clock: ManualClock) -> None:
+    health = LlmHealth(clock)
+    breaker = CircuitBreaker(clock, failure_threshold=1)
+    health.register_breaker(breaker)
+    breaker.before_call()
+    breaker.record_failure()
+    assert health.snapshot(60).circuit_open
+    del breaker  # a job's own client that went away while it was open
+    gc.collect()
+    assert not health.snapshot(60).circuit_open
+
+
+async def test_the_collector_reads_the_budget_of_the_one_runtime(services: Services) -> None:
+    """R17-10 (D-701): the health collector and the application look at the same budget."""
+    from twin.llm.runtime import build_llm_runtime
+
+    assert "llm_runtime" not in services.extras
+    report = await HealthCollector(services).collect()
+    assert report.get("budget") is not None
+    runtime = services.extras["llm_runtime"]  # made by the check, found again by everybody
+    assert build_llm_runtime(services) is runtime
+    assert await asyncio.to_thread(build_llm_runtime, services) is runtime
 
 
 # --------------------------------------------------------------------- the monitor

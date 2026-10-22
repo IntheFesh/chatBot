@@ -19,7 +19,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.llm.runtime import build_llm_runtime
+from twin.llm.runtime import build_llm_runtime, closing_llm_runtime
 from twin.memory.assemble import MemoryAssembler
 from twin.memory.blocks import MemoryQuery
 from twin.memory.jobs import queue_daily_summary
@@ -235,7 +235,7 @@ def memory_remember(
     services = get_cli_context().services()
     manager = _manager(services)
     try:
-        result = asyncio.run(manager.remember(text))
+        result = asyncio.run(closing_llm_runtime(services, manager.remember(text)))
     except ValueError as exc:
         raise CliError(str(exc), ExitCode.USAGE) from exc
     for item in result.facts:

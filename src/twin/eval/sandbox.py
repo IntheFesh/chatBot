@@ -341,7 +341,12 @@ class EvalSandbox:
 
 @dataclass
 class SandboxKit:
-    """A sandbox and what must be closed with it."""
+    """A sandbox and what must be closed with it.
+
+    The LLM runtime is not among them: it is the process's one (D-701) and the application, or
+    the command that ended, closes it with :func:`~twin.llm.runtime.close_llm_runtime`.  An
+    evaluation job that closed it would cut the engine's requests in flight.
+    """
 
     sandbox: EvalSandbox
     llm: LlmRuntime
@@ -352,7 +357,6 @@ class SandboxKit:
         for close in self.closers:
             await close()
         await self.style.aclose()
-        await self.llm.client.aclose()
 
 
 def build_sandbox(
@@ -382,7 +386,11 @@ def build_sandbox(
     )
     tag = LedgerTag("one_time", batch_id) if batch_id else None
     past = AsOfSource(services) if mode is SandboxMode.HOLDOUT else None
-    live = EvalLiveSource(services) if mode is SandboxMode.LIVE else None
+    # the live view trims the memory block with the calibrated estimator, as the engine does;
+    # the hold-out view (AsOfSource) deliberately does not (see twin.memory.asof)
+    live = (
+        EvalLiveSource(services, estimator=runtime.estimator) if mode is SandboxMode.LIVE else None
+    )
     sandbox = EvalSandbox(
         services, pipeline, mode=mode, channel=channel, clock=clock, tag=tag, past=past, live=live
     )

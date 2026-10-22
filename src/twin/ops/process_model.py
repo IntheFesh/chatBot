@@ -247,7 +247,7 @@ def enqueue_heavy(
     services: Services, specs: Sequence[JobSpec], *, foreground: bool = False
 ) -> list[str]:
     """Enqueue HEAVY work; with ``foreground`` run it now if the application is stopped."""
-    from twin.llm.runtime import activate_offpeak_policy
+    from twin.llm.runtime import activate_offpeak_policy, close_llm_runtime
     from twin.ops.jobs import JobQueue, Worker, default_registry, load_handlers
 
     queue = JobQueue(services.db, services.clock)
@@ -280,11 +280,14 @@ def enqueue_heavy(
         alerts=services.alerts,
         concurrency=services.settings.jobs.concurrency,
     )
-    summary = asyncio.run(_run_foreground(worker))
+
+    async def run_and_close() -> Any:
+        try:
+            await worker.recover()
+            return await worker.run_until_idle()
+        finally:
+            await close_llm_runtime(services)  # the jobs shared the process's one client (D-701)
+
+    summary = asyncio.run(run_and_close())
     typer.echo(f"finished: done={summary.done} retried={summary.retried} failed={summary.failed}")
     return ids
-
-
-async def _run_foreground(worker: Any) -> Any:
-    await worker.recover()
-    return await worker.run_until_idle()

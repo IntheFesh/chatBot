@@ -20,7 +20,7 @@ from twin.llm.probe import (
     save_probe,
 )
 from twin.llm.probe_report import render_report, write_report
-from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
+from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime, close_llm_runtime
 from twin.ops.process_model import CliError, CommandKind, command
 from twin.services import get_cli_context
 
@@ -72,7 +72,7 @@ def llm_probe(
         try:
             return await probe.run()
         finally:
-            await runtime.client.aclose()
+            await close_llm_runtime(services)
 
     result = asyncio.run(go())
     with services.db.transaction() as session:

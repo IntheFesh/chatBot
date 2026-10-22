@@ -267,27 +267,30 @@ def test_status_is_cached_until_the_ttl_or_a_forced_refresh(
 # ------------------------------------------------------------------ what is allowed
 
 
-def test_replies_are_always_allowed_and_other_work_is_held_back_in_order(rig: Rig) -> None:
+def test_replies_are_always_allowed_and_only_proactive_work_is_held_back(rig: Rig) -> None:
+    """R-LLM-008 item 3 pauses *proactive messages* and nothing else (D-115, round 17 item 17)."""
     for total in (0.0, 1.0, 1.25, 1.5, 2.0, 10.0):
         rig.reach(total)
         assert rig.manager.allow(Purpose.REPLY)
         assert rig.manager.allow("reply")
-    rig.reach(0.0 + 10.0)  # level 4
-    assert not any(rig.manager.allow(p) for p in Purpose if p is not Purpose.REPLY)
+    rig.reach(10.0)  # level 4
+    assert rig.manager.current_level() == BudgetLevel.STYLE_OR_MINIMAL
+    assert not rig.manager.allow(Purpose.PROACTIVE)
+    assert all(rig.manager.allow(p) for p in Purpose if p is not Purpose.PROACTIVE)
 
 
-def test_proactive_work_stops_at_level_three_and_background_work_at_level_four(
+def test_only_proactive_messages_stop_at_level_three_and_stay_stopped_at_level_four(
     db: Database, clock: ManualClock
 ) -> None:
+    """R17-17: the life line (PLAN), summaries and captions are not "proactive messages"."""
     rig = Rig(db, clock)
-    rig.reach(1.25)  # level 2
-    assert all(rig.manager.allow(p) for p in Purpose)
-    rig.reach(1.5)  # level 3
-    assert not rig.manager.allow(Purpose.PROACTIVE) and not rig.manager.allow(Purpose.PLAN)
-    assert rig.manager.allow(Purpose.SUMMARY) and rig.manager.allow(Purpose.EXTRACT)
-    rig.reach(2.0)  # level 4
-    assert not rig.manager.allow(Purpose.SUMMARY) and not rig.manager.allow(Purpose.CAPTION)
-    assert rig.manager.allow(Purpose.REPLY)
+    for total, level in ((0.0, 0), (1.0, 1), (1.25, 2), (1.5, 3), (2.0, 4)):
+        rig.reach(total)
+        assert rig.manager.current_level() == level
+        for purpose in Purpose:
+            expected = not (purpose is Purpose.PROACTIVE and level >= 3)
+            assert rig.manager.allow(purpose) is expected, (purpose, level)
+        assert rig.manager.allow("plan") and rig.manager.allow("caption")
 
 
 def test_limits_shrink_level_by_level(db: Database, clock: ManualClock) -> None:

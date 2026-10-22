@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import random
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from types import SimpleNamespace
 
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.embedding import HashingBackend
 from tests.support.engine_extras import ScriptedCommands
 from tests.support.engine_harness import (
     ScriptedChannel,
@@ -16,6 +18,7 @@ from tests.support.engine_harness import (
     make_draft,
     run_to_idle,
 )
+from tests.support.memory import add_fact, utc
 from tests.support.style_models import ScriptedStyleClient
 from tests.support.waiting import wait_until
 from twin.app import Application, HealthStatus
@@ -26,7 +29,10 @@ from twin.engine.backend_select import BackendMonitorComponent, BackendSelector
 from twin.engine.command_port import CommandOutcome
 from twin.engine.component import EngineComponent, build_engine, register_engine
 from twin.engine.style_runtime import StyleRuntime
+from twin.eval.sandbox import SandboxMode, build_sandbox
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
+from twin.memory.assemble import MemoryAssembler
+from twin.memory.blocks import MemoryQuery
 from twin.ops.state_watch import StateWatcher
 from twin.schedule.events import Resumed
 from twin.schedule.service import schedule_kit
@@ -252,3 +258,60 @@ async def test_an_engine_built_without_a_style_runtime_makes_one_from_the_settin
     assert isinstance(selector, BackendSelector)
     assert (await selector.choose()).name == "deepseek"  # nothing is registered: no style model
     assert isinstance(engine.commands, CommandRouter)
+
+
+async def test_the_live_memory_block_is_trimmed_with_the_clients_calibrated_estimator(
+    keyed: Services, clock: ManualClock, embedder: HashingBackend
+) -> None:
+    """R17-18 (D-703): the estimator the client calibrates is the one that sizes the block.
+
+    The live source used to make an uncalibrated estimator of its own, so the block was cut for
+    a prompt that DeepSeek then counted differently.  Here the client has learned that its
+    prompts are twice as long as the first guess: the same budget holds fewer facts.
+    """
+    llm = build_llm_runtime(keyed)
+    text = "你好世界" * 40
+    llm.estimator.observe(
+        [{"role": "user", "content": text}], int(llm.estimator.raw_text(text) * 2)
+    )
+    assert llm.estimator.factor > 1.5
+    engine = build_engine(keyed, ScriptedChannel(clock), runtime=llm, pipeline=ScriptedWriter())
+    source = engine._data  # type: ignore[attr-defined]
+    assert source.assembler.estimator is llm.estimator is llm.client.estimator
+    for number in range(14):
+        add_fact(
+            source.memory, f"她喜欢吃火锅第{number}种口味的汤底", utc(2026, 3, 1), importance=2
+        )
+    topic = MemoryQuery("想吃火锅")
+    now = utc(2026, 3, 10, 18)
+    plain = MemoryAssembler(source.memory).build(topic, now, 120)
+    calibrated = source.assembler.build(topic, now, 120)
+    assert len(plain.ids("fact")) > len(calibrated.ids("fact")) > 0
+
+
+async def test_the_command_router_and_the_evaluation_sandbox_use_the_same_estimator(
+    keyed: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = build_llm_runtime(keyed)
+    factories: list[Callable[[], object]] = []
+
+    def record(factory: Callable[[], object]) -> object:
+        factories.append(factory)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("twin.commands.router.LazyViewSource", record)
+    styled = StyleRuntime.from_services(keyed, llm)
+    CommandRouter.from_services(keyed, llm, selector=styled.selector)
+    assert factories[0]().assembler.estimator is llm.estimator  # type: ignore[attr-defined]
+    live = build_sandbox(keyed, mode=SandboxMode.LIVE, llm=llm)
+    holdout = build_sandbox(keyed, mode=SandboxMode.HOLDOUT, llm=llm)
+    try:
+        live_source = live.sandbox._live  # type: ignore[attr-defined]
+        assert live_source is not None and live_source.assembler.estimator is llm.estimator
+        # the hold-out view is the training export's view: reproducible, never calibrated
+        past = holdout.sandbox._past  # type: ignore[attr-defined]
+        assert past._assembler.estimator is not llm.estimator
+        assert past._assembler.estimator.factor == 1.0
+    finally:
+        await live.aclose()
+        await holdout.aclose()

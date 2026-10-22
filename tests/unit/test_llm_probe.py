@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -20,9 +21,11 @@ from twin.llm.probe import (
     HISTORY_LIMIT,
     PROBE_KEY,
     SCHEMA_VERSION,
+    CheckResult,
     LlmProbe,
     ProbeConfig,
     ProbeReport,
+    derive_capabilities,
     load_probe_report,
     load_probe_summary,
     save_probe,
@@ -387,14 +390,55 @@ async def test_json_that_fails_only_without_thinking_is_noted_separately(
     assert report.capabilities.json_in_thinking is True  # thinking mode itself was fine
 
 
-async def test_an_api_error_during_json_is_not_mistaken_for_unreliable_json(
+@pytest.mark.parametrize("status", [400, 422])
+async def test_a_rejection_of_json_in_thinking_mode_is_remembered(
+    keyed: Services, api: respx.MockRouter, status: int
+) -> None:
+    """R17-19 (D-117): a 400/422 is the API saying no, every time - that is evidence.
+
+    The old test said "an API error is no evidence" for a 422 as well; a transient error and a
+    deterministic rejection are different, and only the second one is recorded.
+    """
+    report = await run_probe(keyed, api, SimulatedDeepSeek(json_thinking_error=status))
+    json_check = report.check("json_output")
+    assert json_check.metrics["thinking_off_ok"] is True
+    assert json_check.metrics["thinking_on_parse_failures"] == 0
+    assert json_check.metrics["thinking_on_invalid_request"] == 3
+    assert json_check.metrics["thinking_off_invalid_request"] == 0
+    assert report.capabilities.json_in_thinking is False
+
+
+async def test_a_rejection_of_every_json_request_counts_for_thinking_mode_too(
     keyed: Services, api: respx.MockRouter
 ) -> None:
     report = await run_probe(keyed, api, SimulatedDeepSeek(json_server_error=422))
     json_check = report.check("json_output")
-    assert not json_check.passed and json_check.metrics["thinking_on_parse_failures"] == 0
-    assert json_check.metrics["thinking_on_api_failures"] == 3
-    assert report.capabilities.json_in_thinking is True  # no evidence against it
+    assert json_check.metrics["thinking_on_invalid_request"] == 3
+    assert json_check.metrics["thinking_off_invalid_request"] == 3
+    assert report.capabilities.json_in_thinking is False
+
+
+def test_the_capability_is_derived_from_the_counts_of_the_check() -> None:
+    """Old reports and hand-made checks without the new count keep the old reading."""
+    at = datetime(2026, 10, 9, tzinfo=UTC)
+    base = {"thinking_on_parse_failures": 0}
+    for metrics, expected in (
+        (base, True),
+        ({**base, "thinking_on_invalid_request": 0}, True),
+        # a 5xx, a rate limit or a timeout (the breaker would stop the probe before the end of
+        # the check on a real server) says nothing about thinking mode
+        ({**base, "thinking_on_invalid_request": 0, "thinking_on_api_failures": 3}, True),
+        ({**base, "thinking_on_invalid_request": 1}, False),
+        ({**base, "thinking_on_invalid_request": 3, "thinking_on_api_failures": 3}, False),
+        ({"thinking_on_parse_failures": 2}, False),
+    ):
+        checks = [
+            CheckResult(number, CHECKS[number], CHECKS[number], False, True, metrics=metrics)
+            if number == 4
+            else CheckResult(number, CHECKS[number], CHECKS[number], False, False, ran=False)
+            for number in range(1, 7)
+        ]
+        assert derive_capabilities(checks, at).json_in_thinking is expected, metrics
 
 
 async def test_an_inconclusive_detail_result_leaves_the_client_unchanged(

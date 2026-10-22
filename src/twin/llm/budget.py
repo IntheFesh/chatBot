@@ -11,13 +11,19 @@ level   effect (cumulative)
 0       normal
 1       chat thinking is switched off
 2       retrieved examples 8 -> 3, memory context budget halved
-3       proactive messages (and their planner) are paused
+3       proactive messages are paused (the planner's thinking goes with them)
 4       switch to the style model backend if an activated model passed the launch gate and is
         healthy (:class:`StyleBackendStatus`, round 14); otherwise stay on DeepSeek with a
-        minimal context and no thinking.  Background work on the daily account is held back too.
+        minimal context and no thinking.
 ======  =====================================================================================
 
-Replying to the user is never refused (``allow("reply")`` is always true).  An alert is raised
+Replying to the user is never refused (``allow("reply")`` is always true).  The SPEC's third
+step pauses *proactive messages* and nothing else, so from level 3 on :meth:`BudgetManager.allow`
+refuses :attr:`~twin.llm.types.Purpose.PROACTIVE` and no other purpose (D-115, revised in
+round 17): the daily life line (``plan``), summaries, extraction and captions keep going, only
+with their thinking switched off by the client.  A hybrid backend's planning step therefore no
+longer needs to be booked as ``reply`` to escape a refusal (D-275 kept the label, but the
+refusal it worked around is gone).  An alert is raised
 once when a period reaches ``budget.alert_ratio`` and once for every level entered; the "already
 told" marks live in the ``settings`` table so a restart does not repeat them, and they are keyed
 by day and month so they start afresh with the next period.
@@ -223,14 +229,15 @@ class BudgetManager:
     # ----------------------------------------------------------------- decisions
 
     def allow(self, purpose: str) -> bool:
-        """May a ``daily``-account call with this purpose go out at the current level?"""
-        level = self.current_level()
+        """May a ``daily``-account call with this purpose go out at the current level?
+
+        Literal R-LLM-008: replying is never refused and, from level 3, the one thing that is
+        paused is the proactive message (round 17, item 17).
+        """
         if purpose == Purpose.REPLY:
             return True
-        if level >= BudgetLevel.STYLE_OR_MINIMAL:
-            return False
-        if level >= BudgetLevel.PROACTIVE_PAUSED:
-            return Purpose(purpose) not in (Purpose.PLAN, Purpose.PROACTIVE)
+        if self.current_level() >= BudgetLevel.PROACTIVE_PAUSED:
+            return Purpose(purpose) is not Purpose.PROACTIVE
         return True
 
     def limits(self) -> BudgetLimits:
