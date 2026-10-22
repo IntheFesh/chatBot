@@ -19,8 +19,11 @@ from tests.support.reply_view import StaticDataView, StaticSelector, make_profil
 from twin.engine.backend import BackendRequest, BackendResult
 from twin.engine.pipeline import FALLBACK_BACKEND, ReplyPipeline
 from twin.engine.types import InboundItem, ReplyContext, SendLimits, UsageSummary
+from twin.llm.errors import BudgetDeniedError, CircuitOpenError
+from twin.llm.onetime import BatchPausedError
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
 from twin.memory.recent import Turn
+from twin.ops.jobs import JobDeferred
 from twin.retrieval.examples import Example, ExampleLine, ExampleTurn
 from twin.services import Services
 
@@ -538,3 +541,53 @@ async def test_the_seed_of_the_context_makes_the_random_choices_repeatable(
     first, second, third = data.rngs
     assert first is not None and second is not None and third is not None
     assert first.random() == second.random() != third.random()
+
+
+DEFERRING = (JobDeferred, CircuitOpenError, BudgetDeniedError)
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [BatchPausedError("b1"), CircuitOpenError(30.0), BudgetDeniedError("reply", 3)],
+    ids=["batch-paused", "breaker-open", "budget-denied"],
+)
+async def test_a_deferral_propagates_when_the_caller_asks_for_it(
+    pipeline: ReplyPipeline, refusal: Exception
+) -> None:
+    """R17-21 (D-660): the evaluation hands a job back instead of failing the pair.
+
+    The error of the first backend is not turned into "ask DeepSeek instead" and the error of
+    DeepSeek is not turned into a fallback draft.
+    """
+    style = ScriptedBackend("style", [refusal])
+    deepseek = ScriptedBackend("deepseek", [refusal])
+    for backend, name in ((style, "style"), (deepseek, "deepseek")):
+        runner = with_backends(pipeline, backend)
+        with pytest.raises(type(refusal)):
+            await runner.run(context(backend=name), view(), propagate=DEFERRING)
+        assert len(backend.requests) == 1
+    assert deepseek.requests[0].attempt == 1
+
+
+async def test_without_propagate_the_live_behaviour_is_unchanged(
+    api: respx.MockRouter, pipeline: ReplyPipeline
+) -> None:
+    """R17-21 (D-660): the engine still gets a fallback draft (and retries minutes later)."""
+    style = ScriptedBackend("style", [CircuitOpenError(30.0)])
+    route = route_of(api, ok(content="好呀"))
+    draft = await with_backends(pipeline, style).run(context(backend="style"), view())
+    assert draft.backend == "deepseek" and [b.text for b in draft.bubbles] == ["好呀"]
+    assert route.call_count == 1
+    assert [a.detail for a in draft.actions if a.step == "backend_error"] == ["CircuitOpenError"]
+    only = ScriptedBackend("deepseek", [BatchPausedError("b1")])
+    failed = await with_backends(pipeline, only).run(context(), view(), propagate=())
+    assert failed.needs_fallback and failed.fallback_reason == "backend_error"
+    assert [a.detail for a in failed.actions if a.step == "backend_error"] == ["BatchPausedError"]
+
+
+async def test_an_error_that_was_not_asked_for_is_still_a_fallback_signal(
+    pipeline: ReplyPipeline,
+) -> None:
+    only = ScriptedBackend("deepseek", [TimeoutError("slow")])
+    draft = await with_backends(pipeline, only).run(context(), view(), propagate=DEFERRING)
+    assert draft.needs_fallback and draft.fallback_reason == "backend_error"
