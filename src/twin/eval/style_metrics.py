@@ -386,22 +386,51 @@ def style_of_runs(
     if not items:
         names = ", ".join(run.id for run in runs)
         raise StyleError(f"run {names} has no generated replies of the {backend} backend")
-    settings = services.settings.profile
     bots = candidates_of(items, "bot")
-    measured = measure(candidate_recs(bots), settings.burst_gap_s, settings.segment_gap_min)
-    real = measure(
-        candidate_recs(candidates_of(items, "real")), settings.burst_gap_s, settings.segment_gap_min
-    )
-    messages = sum(len(c.lines) for c in bots)
     notes = [f"{len(bots)} replies of the {backend} backend; her real replies to the same contexts"]
     if len(runs) > 1:
         notes.append(f"the contexts of {len(runs)} evaluation runs together")
+    return style_of_candidates(
+        services,
+        profile.metrics,
+        bots,
+        real=candidates_of(items, "real"),
+        backend=backend,
+        run_id=runs[0].id,
+        notes=notes,
+    )
+
+
+def style_of_candidates(
+    services: Services,
+    reference: ProfileMetrics,
+    bots: Sequence[Candidate],
+    *,
+    real: Sequence[Candidate] | None = None,
+    backend: str | None = None,
+    run_id: str | None = None,
+    notes: Sequence[str] = (),
+) -> StyleReport:
+    """The six metrics of ``bots`` (replies to hold-out contexts) against the pre-holdout profile.
+
+    The one place that turns replies into a ``pre_holdout`` report: the blind runs
+    (:func:`style_of_runs`) and the comparison of two adapter stacks on the same test contexts
+    (``twin.training.stack_choice``, D-655) both come through here, so a stack is judged by the
+    very measuring and the very +-30 % of the M5 gate.
+    """
+    settings = services.settings.profile
+    measured = measure(candidate_recs(bots), settings.burst_gap_s, settings.segment_gap_min)
+    measured_real = (
+        measure(candidate_recs(real), settings.burst_gap_s, settings.segment_gap_min)
+        if real is not None
+        else None
+    )
     return StyleReport(
         "eval_items",
         "pre_holdout",
-        compare(profile.metrics, measured, live=False, real=real),
+        compare(reference, measured, live=False, real=measured_real),
         backend=backend,
-        run_id=runs[0].id,
-        messages=messages,
-        notes=notes,
+        run_id=run_id,
+        messages=sum(len(c.lines) for c in bots),
+        notes=list(notes),
     )

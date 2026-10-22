@@ -164,7 +164,7 @@ def test_the_qlora_profile_trains_on_a_4bit_base_in_dpo_and_evaluation_too() -> 
         assert config["quantization_bit"] == 4, kind
 
 
-def test_dpo_continues_the_sft_adapter_with_the_recommended_values() -> None:
+def test_dpo_trains_with_the_recommended_values_on_the_sft_adapter() -> None:
     config = yaml.safe_load(render_config(ConfigKind.DPO, PROFILES["5090-8b"], train_samples=1200))
     assert config["stage"] == "dpo"
     assert config["adapter_name_or_path"].endswith("/output/sft")
@@ -172,6 +172,61 @@ def test_dpo_continues_the_sft_adapter_with_the_recommended_values() -> None:
     assert config["pref_beta"] == 0.1 and config["pref_loss"] == "sigmoid"
     assert config["learning_rate"] == 5e-6
     assert config["dataset"] == "twin_dpo_train"
+
+
+REF_KEYS = ("ref_model", "ref_model_adapters", "ref_model_quantization_bit")
+
+
+@pytest.mark.parametrize("name", ["5090-8b", "pro6000-14b", "pro6000-32b"])
+def test_dpo_of_a_bf16_profile_makes_a_new_adapter_on_the_merged_sft_model(name: str) -> None:
+    """R17-49d (D-650): ``create_new_adapter`` merges SFT in memory; no ``ref_model`` is set.
+
+    LLaMA-Factory 0.9.5 (``model/adapter.py``): with ``is_trainable`` and ``create_new_adapter``
+    every adapter of ``adapter_name_or_path`` is merged and a new LoRA is created; without a
+    ``ref_model`` the trainer switches that new adapter off for the reference pass
+    (``train/dpo/trainer.py``), so the reference is the merged SFT model - the old setup continued
+    the SFT adapter and the reference was the bare base.
+    """
+    profile = PROFILES[name]
+    assert profile.dpo_mode == "layered" and profile.dpo_reference_quantization_bit is None
+    config = yaml.safe_load(render_config(ConfigKind.DPO, profile, train_samples=1200))
+    assert config["adapter_name_or_path"].endswith("/output/sft")
+    assert "," not in config["adapter_name_or_path"]
+    assert config["create_new_adapter"] is True
+    assert not any(key in config for key in REF_KEYS)
+    assert "quantization_bit" not in config
+    assert config["output_dir"].endswith("/output/dpo")
+    assert config["lora_rank"] == profile.lora_rank and config["lora_alpha"] == profile.lora_alpha
+    assert (
+        config["per_device_train_batch_size"] == 1 and config["gradient_accumulation_steps"] == 16
+    )
+
+
+def test_dpo_of_the_4bit_profile_holds_the_sft_model_as_an_explicit_4bit_reference() -> None:
+    """R17-49d (D-650): a quantised model cannot take a new adapter, so SFT is continued.
+
+    LLaMA-Factory 0.9.5 (``hparams/parser.py``) raises "Cannot create new adapter upon a quantized
+    model" for ``create_new_adapter`` there, so the key must be absent; the reference is given by
+    ``ref_model`` (the base), ``ref_model_adapters`` (the SFT adapter) and
+    ``ref_model_quantization_bit`` (``train/trainer_utils.py::create_ref_model``).
+    """
+    profile = PROFILES["5090-14b"]
+    assert profile.dpo_mode == "continued" and profile.dpo_reference_quantization_bit == 4
+    config = yaml.safe_load(render_config(ConfigKind.DPO, profile, train_samples=1200))
+    assert "create_new_adapter" not in config
+    assert config["adapter_name_or_path"].endswith("/output/sft")
+    assert config["quantization_bit"] == 4 and config["quantization_method"] == "bnb"
+    assert config["ref_model"] == config["model_name_or_path"] == profile.model_dir
+    assert config["ref_model_adapters"] == config["adapter_name_or_path"]
+    assert config["ref_model_quantization_bit"] == 4
+    assert config["output_dir"].endswith("/output/dpo")
+
+
+@pytest.mark.parametrize("name", list(PROFILES))
+def test_the_dpo_modes_follow_whether_the_base_is_quantised(name: str) -> None:
+    profile = PROFILES[name]
+    assert profile.dpo_mode == ("continued" if profile.quantization_bit else "layered")
+    assert f"TWIN_DPO_MODE={profile.dpo_mode}\n" in profile_env(profile)
 
 
 def test_evaluation_generates_one_reply_per_test_context_with_fixed_sampling() -> None:

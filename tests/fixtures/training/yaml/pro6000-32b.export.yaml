@@ -2,7 +2,8 @@
 ### rendered by twin.training.yaml_render; do not edit by hand
 ### The base is always loaded unquantised: an adapter trained on a 4-bit base can only be merged
 ### into the bf16 weights, and LLaMA-Factory refuses to merge into a quantised model.
-### export.sh points adapter_name_or_path at the best adapter (output/dpo when it exists).
+### export.sh sets adapter_name_or_path to the adapter stack that was kept: output/sft, or
+### output/sft,output/dpo (merged one after the other, in this order) / output/dpo (4-bit profile).
 
 ### model (no quantization_bit here)
 model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen3-32B

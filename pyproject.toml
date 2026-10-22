@@ -68,6 +68,7 @@ dev = [
     "pre-commit>=4.0",
     "shellcheck-py>=0.10",
     "aiosmtpd>=1.4.6",
+    "peft>=0.18",
 ]
 
 [tool.hatch.build.targets.wheel]

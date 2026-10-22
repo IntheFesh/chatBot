@@ -415,9 +415,9 @@ uv run twin train remote all --profile 5090-8b --dataset <数据集目录>   # �
 uv run twin train remote upload --bundle <训练包>
 uv run twin train remote setup          # 安装依赖、解密（要再输一次口令）、核对模板；模板一致性检查不过就停下，不要训练
 uv run twin train remote train
-uv run twin train remote dpo            # 偏好对够 200 对才有
-uv run twin train remote eval           # 验证集 loss 与每个测试上下文的一条生成
-uv run twin train remote export         # 合并 LoRA、转 GGUF、量化 Q4_K_M / Q5_K_M / Q8_0
+uv run twin train remote dpo            # 偏好对够 200 对才有；参考模型是 SFT 模型（第 17 轮，D-650）
+uv run twin train remote eval           # 验证集 loss 与每个测试上下文的一条生成；有 DPO 适配器时比较 SFT 与 SFT+DPO，保留更好的
+uv run twin train remote export         # 合并保留的适配器栈、转 GGUF、量化 Q4_K_M / Q5_K_M / Q8_0
 uv run twin train remote download       # 下载到 data\models\<run_id>\ 并校验每个 sha256
 uv run twin train remote cleanup        # 安全删除实例上的数据集、解密目录和日志里的样本
 uv run twin train remote status         # 列出所有运行，并提醒还有数据留在实例上的
@@ -435,6 +435,8 @@ uv run twin model list
 ### 6.7 继续训练与 DPO
 
 她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
+
+**DPO 的参考模型与适配器栈（第 17 轮，DECISIONS D-650 至 D-657）**：DPO 的参考模型是 SFT 模型，不是基座。bf16 三档（`5090-8b`、`pro6000-14b`、`pro6000-32b`）在合并了 SFT 的模型上新建一个 DPO 适配器（不多占显存和磁盘），所以模型是 `sft` + `dpo` 两个适配器叠加；`5090-14b`（4 比特）继续 SFT 适配器，参考是显式的 4 比特 SFT 模型，`dpo.sh` 先用最长的 64 条偏好对试跑 1 步，显存不够就降批大小，仍放不下才**仅这一档**退回“基座”作参考——退回时 `twin train remote dpo` 与 `twin train remote status` 会用大写的 `FALLBACK` 告诉你，`artifacts/dpo/dpo_reference.json`、训练报告（`artifacts/dpo/metrics.json`）和登记后的 `twin model show` 里也有。`twin train remote eval` 在有 DPO 适配器时用同一批留出样本评估 SFT 与 SFT+DPO 两个栈，按“风格指标在 ±30% 内的个数、偏差、验证集 loss”的顺序比较（全平保留 SFT），把更好的写回实例；`export` 合并的就是保留的那个（有 DPO 适配器却还没有评估的裁决时 `export.sh` 会停下，不会猜）。远程 vLLM 把两个适配器按秩拼接成一个适配器服务（`--max-lora-rank` 随之读自适配器配置）；`twin model register` 逐层核对哈希并记录适配器栈。第一次真实运行请留意：5090-14b 的试跑结果、`dpo_reference.json` 里的 `fallback`、两个栈的评估数字。
 
 ---
 
@@ -849,9 +851,9 @@ uv run twin purge --all
 | `twin train remote cleanup` | 轻量修改 | Erase the data on the instance (after the download); remember the time. |
 | `twin train remote connect` | 轻量修改 | Log in to the instance, show the GPU and the data disk, and remember its host key. |
 | `twin train remote download` | 轻量修改 | Download the model files to data/models/<run_id>/ and verify every sha256. |
-| `twin train remote dpo` | 轻量修改 | Preference training on the SFT adapter (only with enough pairs). |
-| `twin train remote eval` | 轻量修改 | Validation loss and one generated reply per test context. |
-| `twin train remote export` | 轻量修改 | Merge the adapter, convert to GGUF and quantise. |
+| `twin train remote dpo` | 轻量修改 | Preference training whose reference is the SFT model (only with enough pairs). |
+| `twin train remote eval` | 轻量修改 | Validation loss and one generated reply per test context; with a DPO adapter, the SFT stack and the SFT+DPO stack are compared on the same contexts and the better is kept. |
+| `twin train remote export` | 轻量修改 | Merge the kept adapter stack, convert to GGUF and quantise. |
 | `twin train remote setup` | 轻量修改 | Install the packages, decrypt the package and verify the template. |
 | `twin train remote status` | 只读 | List the training runs and remind of the ones that still have data on an instance. |
 | `twin train remote train` | 轻量修改 | Fine-tune the style model (continues from the last checkpoint). |

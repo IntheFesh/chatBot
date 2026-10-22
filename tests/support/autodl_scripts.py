@@ -8,6 +8,7 @@ the YAML it is given and leaves the files the real program would leave, so the s
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -182,6 +183,62 @@ def call_setup(autodl: Path, env: dict[str, str], body: str) -> subprocess.Compl
     return run_bash(prologue + body, env)
 
 
+# --------------------------------------------------------------------- tiny LoRA adapters
+
+
+def write_tiny_adapter(
+    directory: Path,
+    *,
+    rank: int = 4,
+    alpha: int | float = 8,
+    seed: int = 0,
+    modules: tuple[str, ...] = ("q_proj", "v_proj"),
+    in_features: int = 6,
+    out_features: int = 6,
+) -> None:
+    """A real (tiny) PEFT-format LoRA adapter: ``adapter_model.safetensors`` + config (R17-49d).
+
+    The adapters the fake training command leaves, and the ones the export tests start from, are
+    valid safetensors files with ``lora_A``/``lora_B`` matrices of the names PEFT writes, so the
+    tool that composes two layers into one (``adapter_stack.py``) runs on them for real.
+    """
+    import json
+
+    import numpy as np
+    from safetensors.numpy import save_file
+
+    generator = np.random.default_rng(seed)
+    tensors = {}
+    for layer in range(2):
+        for module in modules:
+            prefix = f"base_model.model.model.layers.{layer}.self_attn.{module}"
+            shape_a, shape_b = (rank, in_features), (out_features, rank)
+            tensors[f"{prefix}.lora_A.weight"] = generator.standard_normal(shape_a).astype(
+                "float32"
+            )
+            tensors[f"{prefix}.lora_B.weight"] = generator.standard_normal(shape_b).astype(
+                "float32"
+            )
+    directory.mkdir(parents=True, exist_ok=True)
+    save_file(tensors, str(directory / "adapter_model.safetensors"))
+    config = {
+        "peft_type": "LORA",
+        "task_type": "CAUSAL_LM",
+        "r": rank,
+        "lora_alpha": alpha,
+        "lora_dropout": 0.0,
+        "target_modules": list(modules),
+        "use_rslora": False,
+        "use_dora": False,
+        "fan_in_fan_out": False,
+        "bias": "none",
+        "modules_to_save": None,
+        "rank_pattern": {},
+        "alpha_pattern": {},
+    }
+    (directory / "adapter_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+
+
 # --------------------------------------------------------------------- fake LLaMA-Factory
 
 FAKE_CLI = r'''
@@ -191,6 +248,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+#@@TINY_ADAPTER@@
 
 LOG = Path(sys.argv[0]).with_name("cli_calls.log")
 mode, config_path = sys.argv[1], Path(sys.argv[2])
@@ -217,10 +276,19 @@ if config.get("dataset_dir"):
         samples = [row.get("id") for row in rows]
     if config.get("eval_dataset"):
         rows_of(config["eval_dataset"])
+adapters = [part.strip() for part in str(config.get("adapter_name_or_path") or "").split(",")
+            if part.strip()]
 with LOG.open("a", encoding="utf-8") as log:
     log.write(json.dumps({"mode": mode, "config": config_path.name,
                           "batch": config.get("per_device_train_batch_size"),
+                          "accumulation": config.get("gradient_accumulation_steps"),
                           "adapter": config.get("adapter_name_or_path"),
+                          "stage": config.get("stage"),
+                          "create_new_adapter": config.get("create_new_adapter"),
+                          "ref_model": config.get("ref_model"),
+                          "ref_model_adapters": config.get("ref_model_adapters"),
+                          "ref_model_quantization_bit": config.get("ref_model_quantization_bit"),
+                          "max_steps": config.get("max_steps"),
                           "dataset": config.get("dataset"),
                           "dataset_dir": config.get("dataset_dir"),
                           "eval_dataset": config.get("eval_dataset"),
@@ -237,11 +305,32 @@ if config.get("predict_with_generate"):
             sys.stderr.write(f"ImportError: This program requires something that is not installed: "
                              f"{distribution}\nTo fix: run `pip install {distribution}`.\n")
             sys.exit(1)
+# LLaMA-Factory 0.9.5, hparams/parser.py (_verify_model_args) and model/adapter.py
+if config.get("quantization_bit"):
+    if adapters and config.get("create_new_adapter"):
+        sys.stderr.write("ValueError: Cannot create new adapter upon a quantized model.\n")
+        sys.exit(1)
+    if adapters and len(adapters) != 1:
+        sys.stderr.write("ValueError: Quantized model only accepts a single adapter.\n")
+        sys.exit(1)
+for adapter in adapters:  # PeftModel.from_pretrained needs the files of every adapter
+    if not (Path(adapter) / "adapter_model.safetensors").is_file():
+        sys.stderr.write(f"ValueError: Can't find 'adapter_config.json' at '{adapter}'\n")
+        sys.exit(1)
 limit_file = Path(sys.argv[0]).with_name("max_batch")
 limit = int(limit_file.read_text()) if limit_file.exists() else 99
 if config.get("per_device_train_batch_size", 1) > limit:
     sys.stderr.write("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n")
     sys.exit(1)
+if config.get("max_steps") and Path(sys.argv[0]).with_name("fail_trial").exists():
+    sys.stderr.write("RuntimeError: a failure that has nothing to do with memory\n")
+    sys.exit(1)
+# a second model (ref_model) next to the policy takes memory: its own, lower, limit
+ref_limit_file = Path(sys.argv[0]).with_name("max_batch_with_ref")
+if config.get("ref_model") and ref_limit_file.exists():
+    if config.get("per_device_train_batch_size", 1) > int(ref_limit_file.read_text()):
+        sys.stderr.write("torch.OutOfMemoryError: CUDA out of memory (with the reference model)\n")
+        sys.exit(1)
 if mode == "export":
     if config.get("adapter_name_or_path") and config.get("quantization_bit"):
         sys.stderr.write("ValueError: Cannot merge adapters to a quantized model.\n")
@@ -254,8 +343,9 @@ if mode == "export":
 output = Path(config["output_dir"])
 output.mkdir(parents=True, exist_ok=True)
 if config.get("do_train"):
-    (output / "adapter_model.safetensors").write_bytes(b"adapter-weights")
-    (output / "adapter_config.json").write_text("{}", encoding="utf-8")
+    write_tiny_adapter(output, rank=int(config.get("lora_rank", 4)),
+                       alpha=config.get("lora_alpha", 8),
+                       seed=7 if config.get("stage") == "dpo" else 3)
     (output / "training_loss.png").write_bytes(b"png")
     state = {"best_model_checkpoint": str(output / "checkpoint-8"), "best_metric": 1.25,
              "global_step": 12, "epoch": 3.0,
@@ -274,6 +364,7 @@ elif config.get("do_predict"):
 elif config.get("do_eval"):
     (output / "eval_results.json").write_text(json.dumps({"eval_loss": 1.2}), encoding="utf-8")
 '''
+FAKE_CLI = FAKE_CLI.replace("#@@TINY_ADAPTER@@", inspect.getsource(write_tiny_adapter))
 
 
 EVAL_PACKAGES = ("jieba", "nltk", "rouge-chinese")
@@ -283,13 +374,16 @@ def install_fake_cli(
     tmp_path: Path,
     *,
     max_batch: int | None = None,
+    max_batch_with_ref: int | None = None,
     installed: tuple[str, ...] = EVAL_PACKAGES,
 ) -> Path:
     """Put a ``llamafactory-cli`` on the PATH of :func:`script_env`; returns its call log path.
 
     ``installed`` is what the instance's pip has installed (``stubs/installed.txt``, which
     :func:`install_stub_python` also writes): to generate replies the fake command insists on
-    the three evaluation packages, as the real one does.
+    the three evaluation packages, as the real one does.  ``max_batch`` is the largest
+    per-device batch that fits; ``max_batch_with_ref`` the (lower) one that fits when the config
+    holds an explicit ``ref_model`` - a second model next to the policy (R17-49d, D-651).
     """
     stubs = tmp_path / "stubs"
     stubs.mkdir(exist_ok=True)
@@ -302,6 +396,8 @@ def install_fake_cli(
     # the script reads its neighbours through argv[0], which is the python file
     if max_batch is not None:
         (stubs / "max_batch").write_text(str(max_batch), encoding="utf-8")
+    if max_batch_with_ref is not None:
+        (stubs / "max_batch_with_ref").write_text(str(max_batch_with_ref), encoding="utf-8")
     return stubs / "cli_calls.log"
 
 

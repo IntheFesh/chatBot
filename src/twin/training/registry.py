@@ -20,6 +20,13 @@ and :func:`record_eval`.  The flags start false; ``gate_passed`` starts empty (n
 The ``eval`` document of a row keeps what was learnt about the model since it was registered:
 ``activation_log`` (every activation and deactivation: when, what, forced or not), ``gate`` (the
 last verdict of the release gate) and ``tokenize_check`` (the last tokenizer comparison).
+
+It also keeps how the model was made (D-650..D-655): ``adapter_stack`` (the ordered adapters of the
+manifest, :mod:`twin.training.adapter_stack`; every layer is checked against its own sha256
+before anything is written, and a manifest from before the stacks is read as the one adapter it
+was), ``dpo_reference`` (which model the preference run used as its reference, and whether the
+4-bit profile fell back to the base) and ``stack_choice`` (which stack the evaluation kept, with
+the numbers).
 """
 
 from __future__ import annotations
@@ -36,11 +43,21 @@ from sqlalchemy.orm import Session
 
 from twin.storage.db import Database
 from twin.storage.training_models import ModelRegistryEntry, TrainingRun
+from twin.training.adapter_stack import (
+    AdapterStack,
+    StackError,
+    legacy_stack,
+    stack_from_json,
+    stack_of_manifest,
+)
 from twin.training.layout import ARTIFACT_MANIFEST
 from twin.training.profiles import PROFILES
 
 SCHEMA: Final = 1
 HASH_BLOCK = 1 << 20
+EVAL_ADAPTER_STACK: Final = "adapter_stack"
+EVAL_DPO_REFERENCE: Final = "dpo_reference"
+EVAL_STACK_CHOICE: Final = "stack_choice"
 LOCKED_FIELDS: Final = ("template_version", "persona_version", "profile_version", "dataset_version")
 EVAL_ACTIVATION_LOG: Final = "activation_log"
 EVAL_GATE: Final = "gate"
@@ -81,6 +98,27 @@ class ModelView:
     active: bool
     gate_passed: bool | None
     created_at: str
+
+    @property
+    def adapter_stack(self) -> AdapterStack | None:
+        """The adapters the model was made from; ``None`` when nothing is known about them.
+
+        A row registered before the stacks has only ``adapter_kind`` in its ``eval`` document: it
+        is read as the one adapter it was (D-653).
+        """
+        raw = self.eval.get(EVAL_ADAPTER_STACK)
+        if isinstance(raw, dict):
+            try:
+                return stack_from_json(raw)
+            except StackError:
+                return None
+        kind = self.eval.get("adapter_kind")
+        if not kind:
+            return None
+        known = self.kind == "adapter"
+        return legacy_stack(
+            str(kind), sha256=self.sha256 if known else None, size=self.size if known else None
+        )
 
 
 @dataclass(frozen=True)
@@ -199,8 +237,17 @@ def register_artifacts(
     if not isinstance(models, list) or not models:
         raise RegistryError("the manifest names no models")
     by_path = {entry["path"]: entry for entry in manifest["files"]}
+    try:
+        stack = stack_of_manifest(manifest, by_path)
+    except StackError as exc:
+        raise RegistryError(str(exc)) from None
     metrics = dict(manifest.get("metrics") or {})
     metrics["adapter_kind"] = manifest.get("adapter_kind")
+    metrics[EVAL_ADAPTER_STACK] = stack.to_json()
+    if manifest.get("dpo"):
+        metrics[EVAL_DPO_REFERENCE] = manifest["dpo"]
+    if manifest.get("stack_choice"):
+        metrics[EVAL_STACK_CHOICE] = manifest["stack_choice"]
 
     created = unchanged = 0
     views: list[ModelView] = []

@@ -39,13 +39,27 @@ PORT="${TWIN_VLLM_PORT:-8000}"
 MODEL_DIR="${TWIN_MODELS}/${TWIN_BASE_MODEL}"
 ADAPTER_DIR="${TWIN_HOME}/artifacts/adapter"
 
+# adapter_rank: the rank of the adapter that is served.  artifacts/adapter is ONE adapter - the only
+# layer of the stack, or the layers composed by rank concatenation (adapter_stack.py, D-652), whose
+# rank is the sum of theirs (64 for sft+dpo of the 8B and 14B profiles, 32 for the 32B one) - so
+# vLLM's limit is read from its adapter_config.json; the profile's own rank is the answer until
+# there is an adapter (--dry-run before the export).
+adapter_rank() {
+    local rank=""
+    if [ -f "${ADAPTER_DIR}/adapter_config.json" ]; then
+        rank="$("${TWIN_PYTHON}" -c 'import json, sys; print(int(json.load(open(sys.argv[1], encoding="utf-8"))["r"]))' \
+            "${ADAPTER_DIR}/adapter_config.json")" || rank=""
+    fi
+    echo "${rank:-${TWIN_LORA_RANK}}"
+}
+
 # vllm_arguments: the arguments of "vllm serve" (one per line).
 vllm_arguments() {
     printf '%s\n' serve "${MODEL_DIR}" \
         --host 127.0.0.1 --port "${PORT}" \
         --served-model-name base \
         --enable-lora --lora-modules "twin-style=${ADAPTER_DIR}" \
-        --max-lora-rank "${TWIN_LORA_RANK}" --max-loras 1 \
+        --max-lora-rank "$(adapter_rank)" --max-loras 1 \
         --max-model-len 4096 --dtype bfloat16
     # a 14B model in bf16 does not fit 32 GB next to the cache: load it 4-bit like in training
     if [ "${TWIN_QUANT_BIT}" != "0" ]; then

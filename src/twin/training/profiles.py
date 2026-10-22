@@ -22,6 +22,14 @@ Memory (``required_ram_gb``)
     the whole bf16 model in RAM; the other profiles merge on the GPU and only map the weights.
 Epochs
     3 below 20,000 training samples, 2 from there on (R-TRN-001).
+DPO reference model (``dpo_mode``; R-TRN-009, D-650)
+    the reference of a preference run is the SFT model, never the bare base.  A bf16 profile gets
+    it for free: LLaMA-Factory merges the SFT adapter into the base in memory and trains a *new*
+    adapter on top of it (``create_new_adapter``), and without a ``ref_model`` the trainer switches
+    that new adapter off for the reference pass - ``layered``, the stack is ``sft`` then ``dpo``.  A
+    quantised base cannot take a new adapter ("Cannot create new adapter upon a quantized model"),
+    so the 4-bit profile continues the SFT adapter and holds the SFT model as an explicit second
+    copy, quantised to 4 bit as well - ``continued``, the DPO adapter replaces the SFT adapter.
 """
 
 from __future__ import annotations
@@ -51,9 +59,12 @@ DEFAULT_WORKDIR: Final = "/root/autodl-tmp/twin"
 DPO_LEARNING_RATE: Final = "5.0e-6"
 DPO_BETA: Final = 0.1
 DPO_EPOCHS: Final = 2
+DPO_REFERENCE_QUANTIZATION_BIT: Final = 4
+"""``ref_model_quantization_bit`` of the profile whose base is quantised (D-650)."""
 
 Method = Literal["lora", "qlora"]
 ExportDevice = Literal["cpu", "auto"]
+DpoMode = Literal["layered", "continued"]
 
 
 class ProfileError(ValueError):
@@ -96,6 +107,18 @@ class TrainingProfile:
     def model_dir(self) -> str:
         """Where ``setup.sh`` downloads the bf16 base model on the instance."""
         return f"{MODELS_ROOT}/{self.base_model}"
+
+    @property
+    def dpo_mode(self) -> DpoMode:
+        """``layered``: DPO trains a new adapter over the merged SFT model (the stack is
+        ``sft, dpo``); ``continued``: a quantised base cannot take a new adapter, so the SFT
+        adapter is continued and ``dpo`` alone is the stack (D-650)."""
+        return "continued" if self.quantization_bit else "layered"
+
+    @property
+    def dpo_reference_quantization_bit(self) -> int | None:
+        """The quantisation of the explicit reference model; ``None`` when there is none."""
+        return DPO_REFERENCE_QUANTIZATION_BIT if self.dpo_mode == "continued" else None
 
 
 PROFILES: Final[dict[str, TrainingProfile]] = {
@@ -226,6 +249,7 @@ def profile_env(profile: TrainingProfile, *, dpo_min_pairs: int = 200) -> str:
         "TWIN_BATCH_SIZE": str(profile.per_device_train_batch_size),
         "TWIN_GRAD_ACCUM": str(profile.gradient_accumulation_steps),
         "TWIN_LORA_RANK": str(profile.lora_rank),
+        "TWIN_DPO_MODE": profile.dpo_mode,
         "TWIN_DPO_MIN_PAIRS": str(dpo_min_pairs),
     }
     return "".join(f"{key}={value}\n" for key, value in values.items())

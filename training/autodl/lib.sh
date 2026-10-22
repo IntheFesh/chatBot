@@ -182,15 +182,76 @@ oom_in_log() {
     grep -qE 'CUDA out of memory|OutOfMemoryError|CUBLAS_STATUS_ALLOC_FAILED' "$1"
 }
 
-# best_adapter [sft|dpo|auto]: the adapter directory an evaluation or an export uses.
-best_adapter() {
-    local which="${1:-auto}" dpo="${TWIN_HOME}/output/dpo" sft="${TWIN_HOME}/output/sft"
-    case "${which}" in
+# ----------------------------------------------------------------- adapter stacks
+# A model is an adapter STACK (D-650): "sft" is the SFT adapter; "dpo" is what the preference run
+# added to it.  A bf16 profile ("layered", TWIN_DPO_MODE) trains the DPO adapter on the SFT model
+# merged into the base, so its stack is the two adapters one after the other; the 4-bit profile
+# ("continued") continues the SFT adapter, so the DPO adapter alone is the whole stack.
+
+# dpo_adapter_exists: success when a preference run left an adapter.
+dpo_adapter_exists() {
+    [ -f "${TWIN_HOME}/output/dpo/adapter_model.safetensors" ]
+}
+
+# stack_adapters sft|dpo: the adapter directories of a stack in the order they are applied, comma
+# separated - the value of LLaMA-Factory's adapter_name_or_path.
+stack_adapters() {
+    local sft="${TWIN_HOME}/output/sft" dpo="${TWIN_HOME}/output/dpo"
+    case "$1" in
         sft) echo "${sft}" ;;
-        dpo) echo "${dpo}" ;;
-        auto)
-            if [ -f "${dpo}/adapter_model.safetensors" ]; then echo "${dpo}"; else echo "${sft}"; fi
+        dpo)
+            if [ "${TWIN_DPO_MODE:-layered}" = "layered" ]; then
+                echo "${sft},${dpo}"
+            else
+                echo "${dpo}"
+            fi
             ;;
+        *) return 1 ;;
+    esac
+}
+
+# stack_layers sft|dpo: the layer names of a stack, one per line, in the order they are applied.
+stack_layers() {
+    local dirs dir
+    local -a parts
+    dirs="$(stack_adapters "$1")" || return 1
+    IFS=, read -r -a parts <<<"${dirs}"
+    for dir in "${parts[@]}"; do
+        echo "${dir##*/}"
+    done
+}
+
+# require_adapters DIRS: every comma-separated directory holds an adapter.
+require_adapters() {
+    local dir script
+    local -a parts
+    IFS=, read -r -a parts <<<"$1"
+    for dir in "${parts[@]}"; do
+        script="train.sh"
+        if [ "${dir##*/}" = "dpo" ]; then script="dpo.sh"; fi
+        [ -f "${dir}/adapter_model.safetensors" ] || die "no adapter in ${dir}; run ${script} first"
+    done
+}
+
+# stack_kept: "sft" or "dpo", the stack the evaluation kept (D-655).  Without a DPO adapter there is
+# nothing to choose: "sft".  With one, `twin train remote eval` compared the two stacks and wrote
+# the winner to state/stack_choice; no record (or one that is neither word) is a failure.
+stack_kept() {
+    local file="${TWIN_HOME}/state/stack_choice" word
+    if ! dpo_adapter_exists; then
+        echo sft
+        return 0
+    fi
+    [ -s "${file}" ] || return 1
+    word="$(head -n1 "${file}")"
+    case "${word}" in sft | dpo) echo "${word}" ;; *) return 1 ;; esac
+}
+
+# stack_choice sft|dpo|auto: the stack an export uses ("auto" is the one that was kept).
+stack_choice() {
+    case "${1:-auto}" in
+        sft | dpo) echo "$1" ;;
+        auto) stack_kept ;;
         *) return 1 ;;
     esac
 }
@@ -466,13 +527,13 @@ EXPORT_STEPS=(
 
 export_step_text() {
     case "$1" in
-        merge_adapter) echo "merge the LoRA adapter into the bf16 base model (llamafactory-cli export)" ;;
+        merge_adapter) echo "merge the LoRA adapter stack (sft,dpo in this order, or the one that was kept) into the bf16 base model (llamafactory-cli export)" ;;
         prepare_llama_cpp) echo "clone llama.cpp ${TWIN_LLAMA_CPP_TAG:-?} and build llama-quantize on the CPU" ;;
         convert_f16) echo "convert the merged model to an F16 GGUF (convert_hf_to_gguf.py)" ;;
         delete_merged_hf) echo "delete the merged HF weights" ;;
         quantize) echo "quantize the F16 GGUF to ${TWIN_GGUF_QUANTS:-Q4_K_M,Q5_K_M,Q8_0}, written into artifacts/gguf" ;;
         delete_f16) echo "delete the F16 GGUF" ;;
-        collect_artifacts) echo "copy the adapter, compute sha256 and write artifacts/manifest.json" ;;
+        collect_artifacts) echo "copy the adapter stack (two layers are composed into the one adapter vLLM serves), compute sha256 and write artifacts/manifest.json" ;;
         *) return 1 ;;
     esac
 }

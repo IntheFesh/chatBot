@@ -96,6 +96,8 @@ def hyperparameters(
         "llamafactory_version": lf_template.LLAMAFACTORY_VERSION,
         "train_samples": train_samples,
         "dpo_min_pairs": dpo_min_pairs,
+        "dpo_mode": profile.dpo_mode,
+        "dpo_reference_quantization_bit": profile.dpo_reference_quantization_bit,
     }
 
 

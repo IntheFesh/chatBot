@@ -1,11 +1,15 @@
 ### LLaMA-Factory 0.9.5 - DPO on top of the SFT adapter (5090-8b)
 ### rendered by twin.training.yaml_render; do not edit by hand
-### The SFT adapter is continued (the reference model is the base model with the adapter switched
-### off), so one adapter lineage results in every profile: output/dpo replaces output/sft.
+### The reference model of a preference run is the SFT model, never the bare base (D-650).
+### layered (bf16 profile): LLaMA-Factory merges the SFT adapter into the base in memory and trains a
+### NEW adapter on top of it (create_new_adapter).  No ref_model is set, so the trainer switches the
+### new adapter off for the reference pass: the reference is the merged SFT model - no second copy
+### in VRAM, no merged copy on disk.  output/dpo is the delta over SFT; the adapter stack is sft,dpo.
 
 ### model
 model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen3-8B
 adapter_name_or_path: /root/autodl-tmp/twin/output/sft
+create_new_adapter: true
 trust_remote_code: false
 flash_attn: sdpa
 

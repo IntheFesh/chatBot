@@ -47,7 +47,7 @@
 2. **速度**：首词元延迟、每秒词元数、三个量化档在你的卡上的实际显存占用——`twin model serve` 的预热会写进 `/状态`，真实数字还是空的。
 3. **GGUF 是否带 BOS**：`twin model verify <id>` 会告诉你；若有差异，报告会指出第一个差异的位置和两边的词元。
 4. **Windows 作业对象**：`tests/unit/test_serving_windows.py`（`windows` 标记）在 Windows 上才跑；沙箱里没有跑过。
-5. **vLLM 0.26.0 + torch 2.11.0+cu129 在 RTX 5090 / RTX PRO 6000 上**能不能带 LoRA 和 bitsandbytes 4 位量化起来：第一次 `serve_vllm.sh` 会打印实际版本；起不来时先看 `vllm serve` 的报错，不要换版本号凑合。
+5. **vLLM 0.26.0 + torch 2.11.0+cu129 在 RTX 5090 / RTX PRO 6000 上**能不能带 LoRA 和 bitsandbytes 4 位量化起来：第一次 `serve_vllm.sh` 会打印实际版本；起不来时先看 `vllm serve` 的报错，不要换版本号凑合。（第 17 轮，D-652：保留了 DPO 时，服务的适配器是 SFT 与 DPO 两层按秩拼接成的一个，秩 64——32B 档位 32——`--max-lora-rank` 读自它的 `adapter_config.json`；vLLM 是否接受没有在真卡上试过。）
 6. **AutoDL 的 sshd 是否允许端口转发**，以及隧道的延迟：隧道测试用本地 SSH 服务器，行为是 asyncssh 的 `forward_local_port`；真实实例要你试 `twin model tunnel start` 和 `twin model tunnel status`。
 7. **按小时计费的提醒**：每天一次的系统消息在 `commands.morning_hour` 之后发，条件和内容有测试，但没有在真实实例上看过。
 8. **集成测试的真实 GGUF 版本**（`tests/integration/test_style_serving_e2e.py::test_ten_turns_through_the_hybrid_backend_with_a_real_gguf`）：设置环境变量 `TWIN_LLAMA_SERVER` 和 `TWIN_LLAMA_GGUF` 后才会跑，结果（首词元延迟中位数、违规率）写进测试目录的 `serving_report.json` 与测试报告属性。

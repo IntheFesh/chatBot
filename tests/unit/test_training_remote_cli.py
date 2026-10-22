@@ -588,3 +588,176 @@ def test_the_scripts_are_uploaded_with_the_dpo_minimum_the_package_was_built_wit
     uploaded_env = (instance.workdir / "autodl" / "profile.env").read_text("utf-8")
     assert "TWIN_DPO_MIN_PAIRS=50\n" in uploaded_env
     assert instance.latest_run().hyperparameters["dpo_min_pairs"] == 50
+
+
+# ----------------------------------------------------- the DPO reference and the stacks (R17-49d)
+
+DPO_SCRIPT = """#!/usr/bin/env bash
+set -eu
+mkdir -p "$TWIN_HOME/artifacts/dpo"
+cat >"$TWIN_HOME/artifacts/dpo/dpo_reference.json" <<'JSON'
+{RECORD}
+JSON
+echo "dpo done"
+"""
+
+EVAL_SCRIPT = """#!/usr/bin/env bash
+set -eu
+for stack in sft dpo; do
+    mkdir -p "$TWIN_HOME/artifacts/eval/$stack"
+    printf '{"id": "te0", "text": "a reply of the %s stack"}\\n' "$stack" \\
+        >"$TWIN_HOME/artifacts/eval/$stack/eval_generations.jsonl"
+    echo '{"val_loss": 1.2, "generated": 1}' >"$TWIN_HOME/artifacts/eval/$stack/eval_metrics.json"
+done
+echo "evaluated both stacks"
+"""
+
+
+def synthetic_score(stack: str, passed: int, val_loss: float | None = 1.2) -> Any:
+    from twin.training.stack_choice import MetricLine, StackScore
+
+    keys = (
+        "text_length",
+        "comma_rate",
+        "burst_size",
+        "sticker_share",
+        "emoji_code_rate",
+        "quote_rate",
+    )
+    lines = tuple(
+        MetricLine(
+            key, "pass" if index < passed else "fail", 0.1 if index < passed else 0.5, 1.0, 1.0
+        )
+        for index, key in enumerate(keys)
+    )
+    return StackScore(stack, lines, val_loss, 12)
+
+
+@posix_only
+def test_the_dpo_step_records_how_the_reference_model_was_chosen_and_a_fallback_is_loud(
+    instance: Instance,
+) -> None:
+    """R17-49d (D-651): a fall-back to the base is in the output, the run record and the status."""
+    uploaded(instance)
+    record = {
+        "mode": "continued",
+        "reference": "base",
+        "reference_quantization_bit": None,
+        "fallback": True,
+        "fallback_reason": "out of memory with the explicit 4-bit SFT reference",
+        "per_device_batch": 1,
+        "accumulation": 16,
+        "pairs": 300,
+    }
+    script = DPO_SCRIPT.replace("{RECORD}", json.dumps(record))
+    (instance.workdir / "autodl" / "dpo.sh").write_text(script, encoding="utf-8")
+    done = instance.cli("train", "remote", "dpo")
+    assert done.exit_code == 0, done.output
+    assert "dpo: FALLBACK - the reference model is the BASE" in done.output
+    step = instance.latest_run().steps["dpo"]
+    assert step["ok"] is True and step["reference"] == "base" and step["fallback"] is True
+    assert step["fallback_reason"] == record["fallback_reason"] and step["mode"] == "continued"
+    status = instance.cli("train", "remote", "status")
+    assert "dpo: FALLBACK, the reference model is the BASE, not the SFT model" in status.output
+    # the normal case, and a skipped step that left no record
+    sft = {
+        **record,
+        "mode": "layered",
+        "reference": "sft",
+        "fallback": False,
+        "fallback_reason": None,
+    }
+    (instance.workdir / "autodl" / "dpo.sh").write_text(
+        DPO_SCRIPT.replace("{RECORD}", json.dumps(sft)), encoding="utf-8"
+    )
+    again = instance.cli("train", "remote", "dpo", "--again")
+    assert "the reference model is the SFT model (the merged SFT model, no second copy)" in (
+        again.output
+    )
+    assert (
+        "FALLBACK" not in again.output and instance.latest_run().steps["dpo"]["fallback"] is False
+    )
+    assert (
+        "the reference model is the SFT model" in instance.cli("train", "remote", "status").output
+    )
+
+
+@posix_only
+def test_the_eval_step_compares_the_two_stacks_and_tells_the_instance_which_is_kept(
+    instance: Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-49d (D-655): both stacks' generations go to the judge; its winner is written back."""
+    import twin.training.cli as training_cli
+    from twin.training.stack_choice import StackFiles, choose_stack
+
+    seen: list[StackFiles] = []
+
+    def judge(services: Services, files: StackFiles) -> Any:
+        seen.append(files)
+        return choose_stack(synthetic_score("sft", 3), synthetic_score("dpo", 5))
+
+    monkeypatch.setattr(training_cli, "judge_stacks", judge)
+    uploaded(instance)
+    (instance.workdir / "autodl" / "eval.sh").write_text(EVAL_SCRIPT, encoding="utf-8")
+    done = instance.cli("train", "remote", "eval")
+    assert done.exit_code == 0, done.output
+    assert (
+        "stack kept: dpo (dpo has more style metrics within +-30% of hers: 5 for dpo against 3"
+        in (done.output)
+    )
+    assert len(seen) == 1
+    assert set(seen[0].generations) == {"sft", "dpo"}
+    assert "a reply of the dpo stack" in seen[0].generations["dpo"]
+    assert seen[0].metrics["sft"]["val_loss"] == 1.2 and seen[0].metrics["dpo"]["generated"] == 1
+    assert (instance.workdir / "state" / "stack_choice").read_text("utf-8") == "dpo\n"
+    verdict = json.loads(
+        (instance.workdir / "artifacts" / "eval" / "stack_choice.json").read_text("utf-8")
+    )
+    assert verdict["keep"] == "dpo" and verdict["stacks"]["dpo"]["passed"] == 5
+    assert "a reply of the" not in json.dumps(verdict)  # numbers and words, never a reply
+    step = instance.latest_run().steps["eval"]
+    assert step["ok"] is True and step["stack_kept"] == "dpo"
+    assert step["stack_verdict"]["stacks"]["sft"]["passed"] == 3
+    assert "stack kept: dpo" in instance.cli("train", "remote", "status").output
+
+
+@posix_only
+def test_the_eval_step_without_a_dpo_adapter_has_nothing_to_choose(
+    instance: Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import twin.training.cli as training_cli
+
+    def judge(services: Services, files: Any) -> Any:
+        raise AssertionError("one stack is not compared with itself")
+
+    monkeypatch.setattr(training_cli, "judge_stacks", judge)
+    uploaded(instance)
+    only_sft = EVAL_SCRIPT.replace("for stack in sft dpo", "for stack in sft")
+    (instance.workdir / "autodl" / "eval.sh").write_text(only_sft, encoding="utf-8")
+    done = instance.cli("train", "remote", "eval")
+    assert done.exit_code == 0, done.output
+    assert not (instance.workdir / "state" / "stack_choice").exists()
+    assert "stack_kept" not in instance.latest_run().steps["eval"]
+
+
+@posix_only
+def test_a_comparison_that_cannot_be_made_fails_the_eval_step_and_keeps_nothing(
+    instance: Instance, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-49d (D-655): no profile (say) - the step fails, no verdict is invented."""
+    import twin.training.cli as training_cli
+    from twin.training.stack_choice import StackChoiceError
+
+    def judge(services: Services, files: Any) -> Any:
+        raise StackChoiceError("there is no pre-holdout profile to judge the stacks against")
+
+    monkeypatch.setattr(training_cli, "judge_stacks", judge)
+    uploaded(instance)
+    (instance.workdir / "autodl" / "eval.sh").write_text(EVAL_SCRIPT, encoding="utf-8")
+    done = instance.cli("train", "remote", "eval")
+    assert done.exit_code == 1, done.output
+    assert "the two adapter stacks could not be compared" in done.output
+    assert "no pre-holdout profile" in done.output
+    run = instance.latest_run()
+    assert run.steps["eval"]["ok"] is False and run.status == "failed"
+    assert not (instance.workdir / "state" / "stack_choice").exists()

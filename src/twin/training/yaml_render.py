@@ -10,12 +10,16 @@ into the five configuration files the AutoDL scripts use and into ``dataset_info
     improvement.  Training resumes by itself from the last checkpoint when ``output_dir`` already
     holds one.
 ``dpo``
-    preference training that continues the SFT adapter.
+    preference training whose reference model is the SFT model (D-650): a bf16 profile merges the
+    SFT adapter in memory and trains a new adapter on it (``create_new_adapter``, no ``ref_model``);
+    the 4-bit profile continues the SFT adapter next to an explicit 4-bit reference
+    (``ref_model``, ``ref_model_adapters``, ``ref_model_quantization_bit``).
 ``eval_generate`` / ``eval_loss``
-    one generated reply per test context with fixed sampling, and the loss on the validation set.
+    one generated reply per test context with fixed sampling, and the loss on the validation set;
+    the scripts set ``adapter_name_or_path`` to the adapter stack under evaluation.
 ``export``
-    merges the adapter into the *unquantised* bf16 base; no profile sets ``quantization_bit``
-    here, and the 4-bit profile merges on the CPU.
+    merges the adapter stack (``sft,dpo``) into the *unquantised* bf16 base; no profile sets
+    ``quantization_bit`` here, and the 4-bit profile merges on the CPU.
 
 Templates and numbers come from :mod:`twin.training.profiles`; the format strings of the chat
 template are not repeated here - only its name is, and LLaMA-Factory resolves it.

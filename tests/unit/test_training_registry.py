@@ -188,6 +188,178 @@ def test_models_outside_the_models_directory_keep_their_absolute_path(
         assert len(session.scalars(select(ModelRegistryEntry)).all()) == 4
 
 
+# ------------------------------------------------------------------- adapter stacks (R17-49d)
+
+
+def test_the_registry_keeps_the_ordered_adapter_stack_with_every_layers_hash(
+    services: Services, tmp_path: Path
+) -> None:
+    """R17-49d (D-653): ``sft`` then ``dpo``, each with its sha256, rank and alpha, in every row."""
+    directory = tmp_path / "models" / "r-test-1"
+    reference = {"mode": "layered", "reference": "sft", "fallback": False}
+    choice = {"keep": "dpo", "reason": "more style metrics within +-30 % of hers: 5 against 4"}
+    manifest = build_artifact_dir(
+        directory, stack="sft+dpo", dpo_reference=reference, stack_choice=choice
+    )
+    result = register_artifacts(services.db, directory, models_dir=tmp_path / "models")
+    assert result.created == 4
+    listed = {entry["path"]: entry for entry in manifest["files"]}
+    for model in result.models:  # the GGUF rows were merged from the stack: they say so too
+        stack = model.adapter_stack
+        assert stack is not None and not stack.legacy
+        assert (stack.kind, stack.mode, stack.choice) == ("sft+dpo", "layered", "dpo")
+        assert stack.names == ("sft", "dpo")
+        for layer in stack.layers:
+            assert layer.sha256 == listed[layer.path]["sha256"] and layer.rank == 4
+        assert stack.served.composed and stack.served.rank == 8
+        assert model.eval["dpo_reference"] == reference and model.eval["stack_choice"] == choice
+    adapter = next(m for m in result.models if m.kind == "adapter")
+    assert adapter.sha256 == listed["adapter/adapter_model.safetensors"]["sha256"]
+    assert adapter.adapter_stack is not None
+    assert adapter.adapter_stack.served.sha256 == adapter.sha256  # the served file is this row
+    again = get_model(services.db, adapter.id)
+    assert again.adapter_stack == adapter.adapter_stack  # survives the database
+    assert "sft (r4," in again.adapter_stack.describe() and "composed, r8" in (
+        again.adapter_stack.describe()
+    )
+
+
+def test_a_manifest_from_before_the_stacks_is_read_as_the_one_adapter_it_was(
+    services: Services, tmp_path: Path
+) -> None:
+    """R17-49d (D-653): old registrations and old artifact directories keep working."""
+    directory = tmp_path / "models" / "r-test-1"
+    build_artifact_dir(directory)  # no adapter_stack.json: an export of the earlier scripts
+    result = register_artifacts(services.db, directory, models_dir=tmp_path / "models")
+    adapter = next(m for m in result.models if m.kind == "adapter")
+    stack = adapter.adapter_stack
+    assert stack is not None and stack.legacy and stack.kind == "sft" and stack.names == ("sft",)
+    assert stack.layers[0].sha256 == adapter.sha256 and not stack.served.composed
+    gguf = next(m for m in result.models if m.kind == "gguf")
+    assert gguf.adapter_stack is not None  # the manifest names the hash of the one adapter file
+    assert gguf.adapter_stack.layers[0].sha256 == adapter.sha256
+    assert "registered before adapter stacks existed" in stack.describe()
+    with services.db.transaction() as session:  # a GGUF row of the earlier registry
+        row = session.get(ModelRegistryEntry, gguf.id)
+        assert row is not None
+        row.eval = {"adapter_kind": "sft"}
+    old_gguf = get_model(services.db, gguf.id).adapter_stack
+    assert old_gguf is not None and old_gguf.layers[0].sha256 is None  # not known for this row
+    # a row written by the earlier registry has only adapter_kind in its eval document
+    with services.db.transaction() as session:
+        row = session.get(ModelRegistryEntry, adapter.id)
+        assert row is not None
+        row.eval = {"adapter_kind": "dpo", "best_val_loss": 1.0}
+    old = get_model(services.db, adapter.id)
+    assert old.adapter_stack is not None and old.adapter_stack.kind == "dpo"
+    assert old.adapter_stack.mode == "continued"  # the DPO adapter of those runs continued SFT
+    with services.db.transaction() as session:
+        row = session.get(ModelRegistryEntry, adapter.id)
+        assert row is not None
+        row.eval = {}
+    assert get_model(services.db, adapter.id).adapter_stack is None  # nothing is known
+
+
+def test_a_stack_that_does_not_match_the_files_it_lists_is_refused(
+    services: Services, tmp_path: Path
+) -> None:
+    """R17-49d (D-653): each layer is checked against its own hash before anything is written."""
+    directory = tmp_path / "r1"
+    manifest = build_artifact_dir(directory, stack="sft+dpo")
+
+    def write(stack: dict[str, object]) -> None:
+        (directory / "manifest.json").write_text(
+            json.dumps({**manifest, "adapter_stack": stack}), encoding="utf-8"
+        )
+
+    original = manifest["adapter_stack"]
+    layers = original["layers"]
+    swapped = [{**layers[0], "sha256": layers[1]["sha256"]}, layers[1]]
+    write({**original, "layers": swapped})
+    with pytest.raises(RegistryError, match="does not match its sha256 in the adapter stack"):
+        register_artifacts(services.db, directory)
+    write(
+        {
+            **original,
+            "layers": [
+                {**layers[0], "path": "adapters/ghost/adapter_model.safetensors"},
+                layers[1],
+            ],
+        }
+    )
+    with pytest.raises(RegistryError, match="not listed"):
+        register_artifacts(services.db, directory)
+    write({**original, "layers": list(reversed(layers))})
+    with pytest.raises(RegistryError, match="has the layers sft, dpo"):
+        register_artifacts(services.db, directory)
+    write({**original, "served": {**original["served"], "composed": False}})
+    with pytest.raises(RegistryError, match="only a stack of more than one layer is composed"):
+        register_artifacts(services.db, directory)
+    write({**original, "served": {**original["served"], "rank": 9}})
+    with pytest.raises(RegistryError, match="not the sum of the ranks"):
+        register_artifacts(services.db, directory)
+    write({**original, "kind": "all"})
+    with pytest.raises(RegistryError, match="unknown kind"):
+        register_artifacts(services.db, directory)
+    write({"layers": [], "served": {}})
+    with pytest.raises(RegistryError, match="lists no layers"):
+        register_artifacts(services.db, directory)
+    (directory / "manifest.json").write_text(
+        json.dumps({**manifest, "adapter_stack": "sft"}), encoding="utf-8"
+    )
+    with pytest.raises(RegistryError, match="not an object"):
+        register_artifacts(services.db, directory)
+    assert list_models(services.db) == []  # nothing was registered by any of them
+    write(original)
+    assert register_artifacts(services.db, directory).created == 4
+
+
+def test_a_damaged_stack_in_a_row_reads_as_unknown_and_a_nameless_layer_is_refused(
+    services: Services, tmp_path: Path
+) -> None:
+    """R17-49d (D-653): a row's stack is read, never trusted blindly and never a crash."""
+    from twin.training.adapter_stack import StackError, stack_from_json
+
+    directory = tmp_path / "r1"
+    build_artifact_dir(directory, stack="sft")
+    adapter = next(
+        m for m in register_artifacts(services.db, directory).models if m.kind == "adapter"
+    )
+    assert adapter.adapter_stack is not None and adapter.adapter_stack.kind == "sft"
+    with services.db.transaction() as session:
+        row = session.get(ModelRegistryEntry, adapter.id)
+        assert row is not None
+        row.eval = {"adapter_stack": {"layers": [{"path": "x"}], "served": {}}}
+    assert get_model(services.db, adapter.id).adapter_stack is None
+    nameless = {
+        "kind": "sft",
+        "mode": "layered",
+        "choice": "sft",
+        "layers": [{"path": "adapter/adapter_model.safetensors"}],
+        "served": {"path": "adapter/adapter_model.safetensors"},
+    }
+    with pytest.raises(StackError, match="no name or path"):
+        stack_from_json(nameless)
+
+
+def test_the_one_continued_adapter_of_the_4bit_profile_is_a_stack_of_one(
+    services: Services, tmp_path: Path
+) -> None:
+    directory = tmp_path / "r1"
+    fallback = {
+        "mode": "continued",
+        "reference": "base",
+        "fallback": True,
+        "fallback_reason": "oom",
+    }
+    build_artifact_dir(directory, profile="5090-14b", stack="dpo", dpo_reference=fallback)
+    result = register_artifacts(services.db, directory)
+    stack = result.models[0].adapter_stack
+    assert stack is not None and (stack.kind, stack.mode) == ("dpo", "continued")
+    assert stack.names == ("dpo",) and not stack.served.composed
+    assert result.models[0].eval["dpo_reference"]["fallback"] is True
+
+
 # ------------------------------------------------------------------------------- CLI
 
 
@@ -226,6 +398,35 @@ def test_the_model_commands_register_list_and_show(data_dir: Path) -> None:
         assert text in shown.output
     missing = runner.invoke(app, ["model", "show", "r-nope"])
     assert missing.exit_code == 1 and "no model 'r-nope'" in missing.output
+
+
+def test_model_show_tells_how_the_model_was_made(data_dir: Path) -> None:
+    """R17-49d (D-651, D-653, D-655): the stack, the reference model and the stack that was kept."""
+    directory = data_dir / "models" / "r-test-1"
+    reference = {
+        "mode": "continued",
+        "reference": "base",
+        "fallback": True,
+        "fallback_reason": "out of memory",
+    }
+    choice = {"keep": "dpo", "reason": "more style metrics within +-30 % of hers"}
+    build_artifact_dir(
+        directory,
+        profile="5090-14b",
+        stack="dpo",
+        dpo_reference=reference,
+        stack_choice=choice,
+    )
+    assert runner.invoke(app, ["model", "register", str(directory)]).exit_code == 0
+    shown = runner.invoke(app, ["model", "show", "r-test-1-lora"])
+    assert shown.exit_code == 0, shown.output
+    flat = " ".join(shown.output.split())
+    assert "adapter stack" in flat and "dpo: dpo (r4," in flat
+    assert "dpo reference model" in flat and "the BASE (adapter switched off), a fall-back" in flat
+    assert "stack kept by the evaluation" in flat and "dpo: more style metrics" in flat
+    assert "eval: adapter_stack" not in flat  # shown above, not as a raw document
+    plain = runner.invoke(app, ["model", "show", "r-test-1-Q4_K_M"])
+    assert "adapter stack" in " ".join(plain.output.split())
 
 
 def test_the_register_command_reports_a_damaged_directory(data_dir: Path) -> None:

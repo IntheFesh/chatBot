@@ -7,6 +7,7 @@ are the earliest and have nothing to do with length.  This tool writes a small d
 longest training samples instead:
 
     make_trial_dataset.py --data-dir DATA --dataset NAME --out-dir TRIAL [--count 64]
+        [--trial-name twin_sft_trial] [--trial-file sft_trial.jsonl]
 
 ``TRIAL/sft_trial.jsonl`` holds the ``--count`` longest rows of the file that ``DATA/dataset_info.json``
 names for the dataset ``NAME`` (rows are copied unchanged; the length is the number of characters of
@@ -14,6 +15,10 @@ names for the dataset ``NAME`` (rows are copied unchanged; the length is the num
 sample to the context length of the model already); ``TRIAL/dataset_info.json`` has one entry,
 ``twin_sft_trial``, a copy of the entry of ``NAME`` that points at that file, so the columns and tags
 stay the ones the exporter wrote.  Nothing about the content is printed.
+
+A preference row (``chosen`` and ``rejected`` next to the conversation) is as long as its prompt
+plus the longer of its two replies: both are run through the model, and the longer one decides the
+memory (the trial of ``dpo.sh``, D-651; it names its own dataset and file with the two options).
 """
 
 from __future__ import annotations
@@ -46,7 +51,16 @@ def sample_length(row: object) -> int:
         if not isinstance(value, str):
             raise TrialDataError("a turn has no text")
         total += len(value)
+    if "chosen" in row or "rejected" in row:
+        total += max(_reply_length(row.get("chosen")), _reply_length(row.get("rejected")))
     return total
+
+
+def _reply_length(reply: object) -> int:
+    value = reply.get("value") if isinstance(reply, dict) else None
+    if not isinstance(value, str):
+        raise TrialDataError("a preference row has a reply without text")
+    return len(value)
 
 
 def select_longest(lines: list[str], count: int) -> list[tuple[int, str]]:
@@ -66,7 +80,15 @@ def select_longest(lines: list[str], count: int) -> list[tuple[int, str]]:
     return [(-negative, line) for negative, _, line in measured[: max(count, 0)]]
 
 
-def build(data_dir: Path, dataset: str, out_dir: Path, count: int) -> tuple[int, int, int, int]:
+def build(
+    data_dir: Path,
+    dataset: str,
+    out_dir: Path,
+    count: int,
+    *,
+    trial_name: str = TRIAL_DATASET,
+    trial_file: str = TRIAL_FILE,
+) -> tuple[int, int, int, int]:
     """Write the trial dataset; ``(selected, total, shortest, longest)`` (lengths of the selected)."""
     try:
         info = json.loads((data_dir / "dataset_info.json").read_text(encoding="utf-8"))
@@ -84,8 +106,8 @@ def build(data_dir: Path, dataset: str, out_dir: Path, count: int) -> tuple[int,
     if not chosen:
         raise TrialDataError(f"{source.name} has no samples")
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / TRIAL_FILE).write_text("".join(f"{line}\n" for _, line in chosen), encoding="utf-8")
-    trial_info = {TRIAL_DATASET: {**entry, "file_name": TRIAL_FILE}}
+    (out_dir / trial_file).write_text("".join(f"{line}\n" for _, line in chosen), encoding="utf-8")
+    trial_info = {trial_name: {**entry, "file_name": trial_file}}
     (out_dir / "dataset_info.json").write_text(
         json.dumps(trial_info, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
@@ -99,10 +121,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT)
+    parser.add_argument("--trial-name", default=TRIAL_DATASET)
+    parser.add_argument("--trial-file", default=TRIAL_FILE)
     args = parser.parse_args(argv)
     try:
         selected, total, shortest, longest = build(
-            args.data_dir, args.dataset, args.out_dir, args.count
+            args.data_dir,
+            args.dataset,
+            args.out_dir,
+            args.count,
+            trial_name=args.trial_name,
+            trial_file=args.trial_file,
         )
     except TrialDataError as exc:
         sys.stderr.write(f"error: {exc}\n")

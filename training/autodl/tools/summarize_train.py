@@ -57,6 +57,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", required=True, type=Path)
     parser.add_argument("--gpu-log", type=Path)
     parser.add_argument("--gpu-name", default="")
+    parser.add_argument(
+        "--dpo-reference",
+        type=Path,
+        help="dpo_reference.json of dpo.sh: how the reference model was chosen (kept as 'dpo')",
+    )
     args = parser.parse_args(argv)
 
     state_path = args.output_dir / "trainer_state.json"
@@ -65,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     state = json.loads(state_path.read_text(encoding="utf-8"))
     metrics = summarise(state, args.gpu_log, args.gpu_name)
+    if args.dpo_reference is not None and args.dpo_reference.is_file():
+        metrics["dpo"] = json.loads(args.dpo_reference.read_text(encoding="utf-8"))
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "metrics.json").write_text(
         json.dumps(metrics, indent=2) + "\n", encoding="utf-8"
