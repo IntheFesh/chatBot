@@ -18,6 +18,7 @@ from tests.support.embedding import HashingBackend
 from tests.support.training_history import MOMENT, record_training
 from twin.cli import app
 from twin.config.secrets import SecretStore
+from twin.ops import purge_cli
 from twin.ops.backup.archive import read_manifest
 from twin.ops.backup.layout import POOL_DIRNAME
 from twin.ops.backup.sealed import BackupDecryptionError
@@ -37,7 +38,6 @@ from twin.ops.purge import (
     purge_all,
     purge_training,
 )
-from twin.ops import purge_cli
 from twin.ops.purge_cli import purge_command
 from twin.services import CliContext, Services, set_cli_context
 from twin.storage.keystore import INDEX_NAME, KeyStore, key_secret_name

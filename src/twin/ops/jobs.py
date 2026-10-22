@@ -8,7 +8,8 @@
 * :class:`Worker` runs handlers with bounded concurrency, retries failures with
   exponential backoff, marks a job ``failed`` and raises an alert once its
   attempts are used up, and after a restart returns ``running`` jobs to
-  ``pending`` (:meth:`Worker.recover`).
+  ``pending`` (:meth:`Worker.recover`) - except a job whose worker is still alive in another
+  process (:mod:`twin.ops.liveness`, D-712).
 * Off-peak scheduling is decided by an injected :class:`OffPeakPolicy`.  The
   production policy is registered by round 01 (R-LLM-007); until then
   :class:`DeferredOffPeakPolicy` is in force, under which ``offpeak_only`` jobs
@@ -36,6 +37,7 @@ from sqlalchemy import and_, func, or_, select
 from twin.clock import Clock
 from twin.llm.redaction import redact_text
 from twin.ops.alerts import AlertSink
+from twin.ops.liveness import ProcessProbe
 from twin.ops.logging import get_logger
 from twin.storage.db import Database
 from twin.storage.models import JOB_STATUSES, Job
@@ -187,12 +189,22 @@ def _view(job: Job) -> JobView:
 # -------------------------------------------------------------------- queue
 
 
-class JobQueue:
-    """Repository over the ``jobs`` table."""
+OwnerAlive = Callable[[str | None, datetime | None], bool]
 
-    def __init__(self, db: Database, clock: Clock) -> None:
+
+class JobQueue:
+    """Repository over the ``jobs`` table.
+
+    ``owner_alive(worker_id, claimed_at)`` tells :meth:`recover_running` whether the worker that
+    claimed a ``running`` job is still working (default: :meth:`ProcessProbe.owner_alive`).
+    """
+
+    def __init__(
+        self, db: Database, clock: Clock, *, owner_alive: OwnerAlive | None = None
+    ) -> None:
         self._db = db
         self._clock = clock
+        self._owner_alive: OwnerAlive = owner_alive or ProcessProbe().owner_alive
 
     def enqueue(
         self,
@@ -352,13 +364,16 @@ class JobQueue:
     def recover_running(self) -> tuple[int, list[JobView]]:
         """After a restart: ``running`` -> ``pending`` (or ``failed`` if attempts are used up).
 
-        Returns ``(requeued_count, newly_failed_jobs)``.
+        A job whose worker is still alive in another process stays ``running`` (D-712): taking
+        it over would execute it twice.  Returns ``(requeued_count, newly_failed_jobs)``.
         """
         requeued = 0
         failed: list[JobView] = []
         now = self._clock.now_utc()
         with self._db.transaction(bump_state=False) as session:
             for job in session.execute(select(Job).where(Job.status == "running")).scalars():
+                if self._owner_alive(job.locked_by, job.started_at):
+                    continue
                 job.locked_by = None
                 if job.attempts >= job.max_attempts:
                     job.status = "failed"

@@ -354,6 +354,45 @@ def test_jobs_run_until_idle_executes_in_the_foreground(
     assert "done=2" in listing.output
 
 
+def test_jobs_run_until_idle_holds_the_run_lock_while_it_works_and_force_does_not(
+    initialised: Path,
+) -> None:
+    """R17-27 (D-711): the worker of ``jobs run --until-idle`` is the application while it runs."""
+    seen: list[bool] = []
+    locks_dir = resolve_paths(load_settings()).data_dir / "locks"
+
+    async def handler(ctx: JobContext) -> None:
+        probe = InstanceLock(LOCK_RUN, locks_dir=locks_dir)
+        free = probe.acquire()
+        probe.release()
+        seen.append(free)
+
+    default_registry.register("cli_lock_probe", handler)
+    try:
+        queue_owner = open_services()
+        try:
+            queue = JobQueue(queue_owner.db, queue_owner.clock)
+            queue.enqueue("cli_lock_probe", {})
+        finally:
+            queue_owner.close()
+        assert runner.invoke(app, ["jobs", "run", "--until-idle"]).exit_code == 0
+        assert seen == [False]  # no other process could have taken the lock meanwhile
+        application = InstanceLock(LOCK_RUN, locks_dir=locks_dir)
+        assert application.acquire()  # given back at the end
+        try:
+            queue_owner = open_services()
+            try:
+                JobQueue(queue_owner.db, queue_owner.clock).enqueue("cli_lock_probe", {})
+            finally:
+                queue_owner.close()
+            forced = runner.invoke(app, ["jobs", "run", "--until-idle", "--force"])
+        finally:
+            application.release()
+        assert forced.exit_code == 0 and seen == [False, False]  # the application's lock is its own
+    finally:
+        default_registry._handlers.pop("cli_lock_probe", None)
+
+
 def test_jobs_run_requires_the_flag_and_defers_to_a_running_application(
     initialised: Path, demo_handler: list[int]
 ) -> None:

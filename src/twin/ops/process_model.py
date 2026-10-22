@@ -265,8 +265,13 @@ def app_is_running(services: Services) -> bool:
 def enqueue_heavy(
     services: Services, specs: Sequence[JobSpec], *, foreground: bool = False
 ) -> list[str]:
-    """Enqueue HEAVY work; with ``foreground`` run it now if the application is stopped."""
+    """Enqueue HEAVY work; with ``foreground`` run it now if the application is stopped.
+
+    The foreground run holds the ``run`` lock until it has finished (D-711); if the application
+    holds it, nothing is run here and the queued jobs are left to the application.
+    """
     from twin.llm.runtime import activate_offpeak_policy
+    from twin.ops.foreground import ApplicationRunningError, foreground_run_lock
     from twin.ops.jobs import JobQueue, Worker, default_registry, load_handlers
 
     queue = JobQueue(services.db, services.clock)
@@ -286,20 +291,22 @@ def enqueue_heavy(
     if not foreground:
         typer.echo(f"queued {len(ids)} job(s); the running application will execute them")
         return ids
-    if app_is_running(services):
+    try:
+        with foreground_run_lock(services):
+            load_handlers()
+            activate_offpeak_policy(services)
+            worker = Worker(
+                queue,
+                default_registry,
+                services.clock,
+                services=services,
+                alerts=services.alerts,
+                concurrency=services.settings.jobs.concurrency,
+            )
+            summary = asyncio.run(_run_foreground(worker))
+    except ApplicationRunningError:
         typer.echo("the application is running and will execute the queued job(s)")
         return ids
-    load_handlers()
-    activate_offpeak_policy(services)
-    worker = Worker(
-        queue,
-        default_registry,
-        services.clock,
-        services=services,
-        alerts=services.alerts,
-        concurrency=services.settings.jobs.concurrency,
-    )
-    summary = asyncio.run(_run_foreground(worker))
     typer.echo(f"finished: done={summary.done} retried={summary.retried} failed={summary.failed}")
     return ids
 

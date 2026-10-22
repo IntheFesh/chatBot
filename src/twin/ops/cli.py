@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.table import Table
 
 from twin.llm.runtime import activate_offpeak_policy, build_llm_runtime
+from twin.ops.foreground import foreground_run_lock
 from twin.ops.jobs import (
     BatchNotFoundError,
     BatchTooLargeError,
@@ -177,7 +178,11 @@ def jobs_run(
             f"failed={summary.failed} discarded={summary.discarded}"
         )
 
-    asyncio.run(_go())
+    if force:  # a second worker beside the application cannot hold the lock the application has
+        asyncio.run(_go())
+    else:
+        with foreground_run_lock(services):  # D-711: `twin run` cannot start beside this worker
+            asyncio.run(_go())
 
 
 @jobs_app.command("approve")

@@ -722,6 +722,52 @@ def test_foreground_heavy_work_runs_with_the_same_worker_when_the_app_is_stopped
     assert "done=1" in capsys.readouterr().out
 
 
+def test_foreground_heavy_work_holds_the_run_lock_until_it_has_finished(
+    services: Services, heavy_registry: HandlerRegistry
+) -> None:
+    """R17-27 (D-711): ``twin run`` is refused (BUSY) while the foreground worker is working."""
+    seen: dict[str, object] = {}
+    locks_dir = services.paths.locks_dir
+    run_spec = get_spec(dict(iter_commands(app))["run"])
+    assert run_spec is not None
+
+    async def handler(ctx: JobContext) -> None:
+        seen["free_inside"] = can_take(locks_dir, LOCK_RUN)
+        with ExitStack() as stack:
+            try:
+                _guard_locks(stack, run_spec, locks_dir)
+            except CliError as exc:
+                seen["twin_run"] = exc.code
+
+    heavy_registry.register("heavy_task", handler)
+    enqueue_heavy(services, [JobSpec("heavy_task", {})], foreground=True)
+    assert seen == {"free_inside": False, "twin_run": ExitCode.BUSY}
+    assert can_take(locks_dir, LOCK_RUN)
+
+
+def test_foreground_heavy_work_does_not_take_over_the_applications_running_job(
+    services: Services, heavy_registry: HandlerRegistry, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ran: list[str] = []
+
+    async def handler(ctx: JobContext) -> None:
+        ran.append(ctx.job.id)
+
+    heavy_registry.register("heavy_task", handler)
+    queue = JobQueue(services.db, services.clock)
+    busy = queue.enqueue("heavy_task", {"n": 1})
+    queue.claim_next({"heavy_task"}, offpeak_allowed=True, worker_id="4242-application")
+    lock = hold(services, LOCK_RUN)
+    try:
+        enqueue_heavy(services, [JobSpec("heavy_task", {"n": 2})], foreground=True)
+    finally:
+        lock.release()
+    assert ran == []
+    job = queue.get(busy)
+    assert job is not None and job.status == "running"
+    assert "will execute the queued job" in capsys.readouterr().out
+
+
 def test_foreground_heavy_work_leaves_execution_to_a_running_application(
     services: Services, heavy_registry: HandlerRegistry, capsys: pytest.CaptureFixture[str]
 ) -> None:

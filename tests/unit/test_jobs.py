@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import timedelta
+import subprocess
+import sys
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -12,6 +15,8 @@ import pytest
 from tests.support.clock import ManualClock
 from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
+from tests.support.win32 import FakeWin32
+from twin.clock import SystemClock
 from twin.ops.alerts import AlertService
 from twin.ops.jobs import (
     BatchNotFoundError,
@@ -30,6 +35,7 @@ from twin.ops.jobs import (
     load_handlers,
     set_offpeak_policy,
 )
+from twin.ops.liveness import ProcessProbe
 from twin.storage.db import Database
 from twin.storage.models import Alert, Job
 
@@ -281,6 +287,113 @@ async def test_recovery_fails_jobs_that_already_used_all_attempts(
     assert job.last_error is not None and "attempts exhausted" in job.last_error
     with db.session() as session:
         assert session.query(Alert).count() == 1
+
+
+# ---------------------------------------------- a worker that is still alive (round 17 item 27)
+
+
+def claim_as(queue: JobQueue, job_type: str, worker_id: str) -> str:
+    job_id = queue.enqueue(job_type, {"n": 1}, max_attempts=3)
+    claimed = queue.claim_next({job_type}, offpeak_allowed=True, worker_id=worker_id)
+    assert claimed is not None and claimed.id == job_id and claimed.status == "running"
+    return job_id
+
+
+async def test_a_job_whose_worker_is_alive_in_another_process_is_not_taken_over(
+    db: Database, registry: HandlerRegistry, clock: ManualClock
+) -> None:
+    """R17-27 (D-712): a restart returns the dead worker's jobs, not the living one's.
+
+    Before: ``recover_running`` flipped every ``running`` row, so a ``--force`` worker's job (or a
+    foreground import's) went back to ``pending`` the moment an application started, and ran twice.
+    """
+    api = FakeWin32()
+    api.processes = {4242: clock.now_utc().timestamp() - 3600}  # alive, started an hour before
+    probe = ProcessProbe(platform="win32", win32=api, own_pid=1)
+    queue = JobQueue(db, clock, owner_alive=probe.owner_alive)
+    alive = claim_as(queue, "t", "4242-livingone")
+    dead = claim_as(queue, "t", "4243-deadone")  # no such process any more
+    no_pid = claim_as(queue, "t", "dead-process")
+    worker = make_worker(queue, registry, db, clock)
+    assert await worker.recover() == 2
+    kept = queue.get(alive)
+    assert kept is not None and (kept.status, kept.attempts) == ("running", 1)
+    for job_id in (dead, no_pid):
+        gone = queue.get(job_id)
+        assert gone is not None and (gone.status, gone.attempts) == ("pending", 1)
+    with db.session() as session:
+        assert session.get(Job, alive).locked_by == "4242-livingone"  # type: ignore[union-attr]
+        assert session.query(Alert).count() == 0
+    assert queue.cancel(alive)  # and the user can still end it
+
+
+async def test_a_living_worker_keeps_a_job_even_when_its_attempts_are_used_up(
+    db: Database, registry: HandlerRegistry, clock: ManualClock
+) -> None:
+    """The "attempts exhausted" ending is for a worker that died while running the last attempt."""
+    api = FakeWin32()
+    api.processes = {4242: clock.now_utc().timestamp() - 10}
+    queue = JobQueue(
+        db,
+        clock,
+        owner_alive=ProcessProbe(platform="win32", win32=api, own_pid=1).owner_alive,
+    )
+    job_id = queue.enqueue("t", {}, max_attempts=1)
+    queue.claim_next({"t"}, offpeak_allowed=True, worker_id="4242-livingone")
+    assert queue.recover_running() == (0, [])
+    job = queue.get(job_id)
+    assert job is not None and job.status == "running"
+    api.processes.clear()  # it died
+    requeued, failed = queue.recover_running()
+    assert requeued == 0 and [j.id for j in failed] == [job_id]
+
+
+async def test_the_claim_time_is_what_the_check_is_given(db: Database, clock: ManualClock) -> None:
+    asked: list[tuple[str | None, datetime | None]] = []
+
+    def owner_alive(worker_id: str | None, claimed_at: datetime | None) -> bool:
+        asked.append((worker_id, claimed_at))
+        return False
+
+    queue = JobQueue(db, clock, owner_alive=owner_alive)
+    claim_as(queue, "t", "4242-livingone")
+    assert queue.recover_running()[0] == 1
+    assert asked == [("4242-livingone", clock.now_utc())]
+
+
+@pytest.fixture
+def sleeper() -> Iterator[subprocess.Popen[bytes]]:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        yield process
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_recovery_with_the_real_check_leaves_a_live_process_alone_and_takes_a_dead_ones(
+    db: Database, sleeper: subprocess.Popen[bytes]
+) -> None:
+    queue = JobQueue(db, SystemClock())  # the default check, on a claim made just now
+    alive = claim_as(queue, "t", f"{sleeper.pid}-aaaa")
+    assert queue.recover_running() == (0, [])
+    sleeper.kill()
+    sleeper.wait()
+    assert queue.recover_running()[0] == 1
+    job = queue.get(alive)
+    assert job is not None and job.status == "pending"
+
+
+def test_recovery_with_the_real_check_does_not_trust_a_pid_that_is_younger_than_the_claim(
+    db: Database, sleeper: subprocess.Popen[bytes], clock: ManualClock
+) -> None:
+    """After a power loss the pid of the dead worker belongs to some other program."""
+    clock.set_time(datetime.now(UTC) - timedelta(hours=2))
+    queue = JobQueue(db, clock)
+    reused = claim_as(queue, "t", f"{sleeper.pid}-aaaa")  # claimed two hours ago
+    assert queue.recover_running()[0] == 1
+    job = queue.get(reused)
+    assert job is not None and job.status == "pending"
 
 
 async def test_cancelled_while_running_discards_the_result(
