@@ -233,6 +233,21 @@ probe_python_version() {
     "${TWIN_PYTHON}" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])'
 }
 
+# probe_eval_packages: the packages LLaMA-Factory needs to generate replies for the evaluation
+# (predict_with_generate: jieba, nltk, rouge-chinese) that are NOT installed, one name per line;
+# nothing is printed when all three are there.
+probe_eval_packages() {
+    "${TWIN_PYTHON}" - <<'PY'
+from importlib import metadata
+
+for name in ("jieba", "nltk", "rouge-chinese"):
+    try:
+        metadata.version(name)
+    except metadata.PackageNotFoundError:
+        print(name)
+PY
+}
+
 # probe_torch: "version cuda arch,arch,..." of the installed PyTorch, or "none none ".
 probe_torch() {
     "${TWIN_PYTHON}" - <<'PY' 2>/dev/null || echo "none none "
@@ -253,6 +268,18 @@ run_python_check() {
     check_python_version "${found}" "${TWIN_PYTHON_MIN}" || return 1
     mkdir -p "${TWIN_HOME}/state"
     printf '%s\n' "${found}" >"${TWIN_HOME}/state/python.version"
+}
+
+# run_eval_packages_check: LLaMA-Factory checks jieba, nltk and rouge-chinese as mandatory when
+# it generates replies (eval.sh; DISABLE_VERSION_CHECK does not skip it) and its wheel does not
+# list them, so a missing one only shows in the second step of eval.sh.  Stop here instead.
+run_eval_packages_check() {
+    local missing
+    missing="$(probe_eval_packages)" || die "cannot look for the evaluation packages with ${TWIN_PYTHON}"
+    if [ -n "${missing}" ]; then
+        die "LLaMA-Factory needs ${missing//$'\n'/, } to generate the replies of the evaluation; run setup.sh ${TWIN_PROFILE} install again"
+    fi
+    log "evaluation packages (jieba, nltk, rouge-chinese) - ok"
 }
 
 # run_resource_checks: the disk and memory checks of the profile in profile.env.

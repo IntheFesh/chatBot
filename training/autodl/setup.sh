@@ -7,9 +7,9 @@
 #                    makes sure PyTorch is a CUDA 12.8 build for Blackwell, installs the pinned
 #                    training packages and downloads the base model from ModelScope.  Run it
 #                    again after an interruption: every step skips what is already done.
-# verify             runs after decrypt.sh: the template consistency check (R-TRN-011) and a
-#                    one-step trial run whose batch size is lowered until it no longer runs out
-#                    of memory.
+# verify             runs after decrypt.sh: the packages the evaluation needs, the template
+#                    consistency check (R-TRN-011) and a one-step trial run whose batch size is
+#                    lowered until it no longer runs out of memory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,6 +19,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_NAME="${1:-}"
 MODE="${2:-install}"
 
+# jieba, nltk and rouge-chinese are not dependencies of the llamafactory wheel, but 0.9.5 checks
+# them as mandatory whenever it generates replies (predict_with_generate, i.e. eval.sh).
 install_packages() {
     log "installing the pinned packages (LLaMA-Factory ${TWIN_LLAMAFACTORY})"
     "${TWIN_PYTHON}" -m pip install \
@@ -31,6 +33,9 @@ install_packages() {
         "bitsandbytes==${TWIN_BITSANDBYTES}" \
         "modelscope==${TWIN_MODELSCOPE}" \
         "zstandard==${TWIN_ZSTANDARD}" \
+        "jieba==${TWIN_JIEBA}" \
+        "nltk==${TWIN_NLTK}" \
+        "rouge-chinese==${TWIN_ROUGE_CHINESE}" \
         "cryptography>=${TWIN_CRYPTOGRAPHY_MIN}" \
         matplotlib
 }
@@ -167,6 +172,7 @@ run_verify() {
     use_data_disk
     [ -f "${TWIN_HOME}/data/dataset_info.json" ] || die "no dataset yet; run decrypt.sh first"
     [ -f "${TWIN_HOME}/.setup_done" ] || die "run setup.sh ${TWIN_PROFILE} install first"
+    run_eval_packages_check
     run_parity_check
     run_trial_step
     log "verification finished"
@@ -182,4 +188,7 @@ main() {
     esac
 }
 
-main
+# Sourcing the file (the tests do) defines the functions without running anything.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main
+fi

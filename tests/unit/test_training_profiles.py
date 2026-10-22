@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -231,6 +232,19 @@ def test_the_committed_versions_file_is_the_one_python_generates() -> None:
     assert committed == versions.versions_env()
     assert f"TWIN_LLAMAFACTORY={lf_template.LLAMAFACTORY_VERSION}\n" in committed
     assert "cu128" in versions.TORCH_INDEX_URL and "cu13" not in versions.TORCH_INDEX_URL
+
+
+def test_the_packages_llamafactory_checks_to_generate_replies_are_pinned() -> None:
+    """R17-1 (D-631): jieba, nltk and rouge-chinese are mandatory for ``predict_with_generate``."""
+    lines = dict(line.split("=", 1) for line in versions.versions_env().splitlines())
+    pins = {
+        "TWIN_JIEBA": versions.JIEBA,
+        "TWIN_NLTK": versions.NLTK,
+        "TWIN_ROUGE_CHINESE": versions.ROUGE_CHINESE,
+    }
+    for key, pin in pins.items():
+        assert lines[key] == pin
+        assert re.fullmatch(r"\d+(\.\d+)+", pin), f"{key} must be an exact version, not {pin!r}"
 
 
 def test_the_assets_directory_is_found_next_to_the_sources() -> None:

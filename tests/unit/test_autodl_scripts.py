@@ -21,9 +21,12 @@ from tests.support.autodl_scripts import (
     AUTODL,
     ROOT,
     call_function,
+    call_setup,
     cli_calls,
     install_fake_cli,
     install_scripts,
+    install_stub_python,
+    pip_calls,
     posix_only,
     prepared_workdir,
     run_script,
@@ -32,6 +35,7 @@ from tests.support.autodl_scripts import (
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
 from twin.training.profiles import PROFILES
+from twin.training.versions import JIEBA, NLTK, ROUGE_CHINESE
 
 PASSPHRASE = "correct horse battery staple"
 SCRIPTS = sorted(path.name for path in AUTODL.glob("*.sh"))
@@ -509,6 +513,126 @@ def test_the_verify_step_needs_the_data_and_a_finished_setup(tmp_path: Path) -> 
     (workdir / "data").mkdir()
     (workdir / "data" / "dataset_info.json").write_text("{}", encoding="utf-8")
     assert "install first" in run_script(workdir, env, "setup.sh", "5090-8b", "verify").stderr
+
+
+# ------------------------------------------------- the packages of the evaluation (R17-1)
+
+SETUP_WITHOUT_THE_DOWNLOAD = (
+    # the instance's PyTorch is fine, the GPU is there, the disk and memory are plenty; the
+    # download of the base model (tens of GB) and zstd's apt-get are the only things not run
+    "probe_gpu() { echo 'NVIDIA GeForce RTX 5090, 32607 MiB, 570.86.10, 12.0'; }; "
+    "probe_torch() { echo '2.9.1+cu128 12.8 sm_80,sm_90,sm_120'; }; "
+    "probe_free_gb() { echo 900; }; probe_present_gb() { echo 0; }; probe_ram_gb() { echo 256; }; "
+    "ensure_zstd() { :; }; download_base_model() { :; }; "
+)
+
+
+@posix_only
+def test_install_packages_installs_what_llamafactory_needs_for_generation(tmp_path: Path) -> None:
+    """R17-1 (D-631): jieba, nltk and rouge-chinese are not in the wheel's dependencies.
+
+    LLaMA-Factory 0.9.5 checks them as mandatory when ``predict_with_generate`` is set (eval.sh),
+    ``DISABLE_VERSION_CHECK`` does not skip the check, and ``install_packages`` installed none.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    done = call_setup(autodl, env, "install_packages")
+    assert done.returncode == 0, done.stderr
+    requested = {
+        argument for call in pip_calls(tmp_path) if call[:1] == ["install"] for argument in call[1:]
+    }
+    assert {f"jieba=={JIEBA}", f"nltk=={NLTK}", f"rouge-chinese=={ROUGE_CHINESE}"} <= requested
+    assert "llamafactory==0.9.5" in requested and "zstandard==0.25.0" in requested
+
+
+@posix_only
+def test_eval_fails_without_the_generation_dependencies_and_passes_with_them(
+    tmp_path: Path,
+) -> None:
+    """R17-1 (D-631): the setup of the instance leaves what the second step of eval.sh needs.
+
+    The fake ``llamafactory-cli`` refuses ``predict_with_generate`` when one of the three
+    packages is not installed (an ImportError with "To fix: run pip install ...", as the real one
+    does); the pip of the instance is a recorder, so what ``setup.sh install`` asks pip for is
+    what is "installed".
+    """
+    workdir = prepared_workdir(tmp_path)
+    autodl = workdir / "autodl"
+    install_fake_cli(tmp_path, installed=())
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    assert run_script(workdir, env, "train.sh", "5090-8b").returncode == 0
+    # an instance set up by an earlier version of the scripts: eval.sh dies in its second step
+    stale = run_script(workdir, env, "eval.sh", "5090-8b")
+    assert stale.returncode != 0 and "pip install jieba" in stale.stderr
+    done = call_setup(autodl, env, SETUP_WITHOUT_THE_DOWNLOAD + "run_install")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert (workdir / "state" / "python.version").is_file()
+    fixed = run_script(workdir, env, "eval.sh", "5090-8b")
+    assert fixed.returncode == 0, fixed.stderr
+    assert (workdir / "artifacts" / "eval" / "eval_generations.jsonl").is_file()
+
+
+@posix_only
+def test_the_probe_names_the_evaluation_packages_that_are_missing(tmp_path: Path) -> None:
+    """R17-1 (D-631): the real probe, on a site directory with distributions (no overrides)."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    site = tmp_path / "site"
+    env = script_env(workdir, tmp_path, PYTHONPATH=str(site))
+    del env["TWIN_PROBE_OVERRIDES"]  # the tests' default stands in for the probe; this one is real
+
+    def install(name: str) -> None:
+        info = site / f"{name.replace('-', '_')}-1.0.dist-info"
+        info.mkdir(parents=True)
+        metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
+        (info / "METADATA").write_text(metadata, encoding="utf-8")
+
+    site.mkdir()
+    everything = call_function(autodl, env, "probe_eval_packages")
+    assert everything.stdout.split() == ["jieba", "nltk", "rouge-chinese"], everything.stderr
+    install("nltk")
+    assert call_function(autodl, env, "probe_eval_packages").stdout.split() == [
+        "jieba",
+        "rouge-chinese",
+    ]
+    install("jieba")
+    install("rouge-chinese")
+    complete = call_function(autodl, env, "probe_eval_packages; run_eval_packages_check")
+    assert complete.returncode == 0, complete.stderr
+    assert complete.stdout.count("evaluation packages") == 1  # the probe itself printed nothing
+
+
+@posix_only
+def test_verify_names_the_missing_generation_packages(tmp_path: Path) -> None:
+    """R17-1 (D-631): the missing package stops the verification, not hours of work later."""
+    workdir = prepared_workdir(tmp_path)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path, probe_eval_packages="echo nltk; echo rouge-chinese"
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 1
+    assert "needs nltk, rouge-chinese to generate the replies" in done.stderr
+    assert "run setup.sh 5090-8b install again" in done.stderr
+    assert cli_calls(log) == []  # neither the template check nor the trial step ran
+
+
+@posix_only
+def test_sourcing_setup_defines_the_functions_and_runs_nothing(tmp_path: Path) -> None:
+    """R17-1 (D-631): the guard of ``main``, which lets the tests call ``install_packages``."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path)
+    names = ["install_packages", "run_install", "run_verify", "main"]
+    done = call_setup(autodl, env, "declare -F " + " ".join(names))
+    assert done.returncode == 0, done.stderr
+    assert [line.split()[-1] for line in done.stdout.splitlines()] == names
 
 
 # ---------------------------------------------------------------------------- decrypt
