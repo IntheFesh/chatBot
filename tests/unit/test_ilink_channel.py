@@ -264,9 +264,11 @@ async def test_measured_limits_appear_in_the_capabilities(
 # ---------------------------------------------------- stored state and binding
 
 
-async def test_unbinding_forgets_the_conversation_but_keeps_the_login(
+async def test_unbinding_forgets_the_conversation_and_the_login(
     api: respx.MockRouter, h: Harness, clock: ManualClock
 ) -> None:
+    """R17-53a (D-743, user decision): the bot token goes with the binding; ``twin channel login``
+    makes a new one.  (Before round 17 the login, the cursor and the poll record stayed.)"""
     batch = [message(text_item("还没读"), mid=51, created_ms=now_ms(clock))]
     api.post(GET_UPDATES).respond(200, json=updates(batch, cursor="C5"))
     await h.channel.poll_once()
@@ -274,7 +276,8 @@ async def test_unbinding_forgets_the_conversation_but_keeps_the_login(
     assert h.store.unbind() is True
     assert h.store.bound_user() is None and h.store.inbox() == []
     assert h.store.context_token() is None and h.store.window_state().last_inbound_at is None
-    assert h.store.credentials() is not None and h.store.cursor() == "C5"
+    assert h.store.credentials() is None and h.store.cursor() == ""
+    assert h.store.auth_record().state is AuthState.NOT_LOGGED_IN
     assert h.store.unbind() is False
 
 
