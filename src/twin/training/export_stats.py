@@ -69,6 +69,8 @@ class SampleFacts:
     pre_holdout: bool  # False: a sample of the test part
     planned: bool
     plan_selected: bool
+    proactive: bool  # the context ends with the cue: nobody was waiting for this reply
+    after_gap: bool  # the pause before the reply is longer than the segment gap
     turns: int  # messages of the conversation part (her and the user's turns)
     prelude: bool
     trimmed: bool
@@ -118,6 +120,8 @@ class StatsCollector:
                 "val": len(val),
                 "test": len(self.test),
                 "total": len(everything),
+                "proactive": sum(1 for f in everything if f.proactive),
+                "after_gap": sum(1 for f in everything if f.after_gap),
             },
             "dropped": dict(sorted(self.dropped.items())),
             "target_lines_dropped": dict(sorted(self.target_dropped.items())),

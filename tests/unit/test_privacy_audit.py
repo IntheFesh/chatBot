@@ -20,6 +20,7 @@ The detailed behaviour is tested where it lives; this file is the part that fail
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import shutil
 import subprocess
@@ -36,6 +37,8 @@ from tests.support.synthetic import (
     mobile,
     wxid,
 )
+from twin.llm.redaction import redact_prompt, use_prompt_redactor
+from twin.llm.style_client import LlamaCppCompletionClient, VllmCompletionClient
 from twin.ops.logging import configure_logging, get_logger, shutdown_logging
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -264,9 +267,13 @@ def test_the_deepseek_client_redacts_every_message_before_the_request() -> None:
     assert not any("create" in call for call in calls[:first_redact]), "a request before redaction"
 
 
-def test_the_remote_style_prompt_is_redacted_by_default_and_the_local_one_is_not_sent_out() -> None:
-    source = (SRC / "llm" / "style_client.py").read_text(encoding="utf-8")
-    assert "outbound: Callable[[str], str] | None = redact_text" in source
+def test_both_style_prompts_are_redacted_by_default_with_the_numbered_process_redactor() -> None:
+    """R17-20 (D-641): the AutoDL prompt and the local one go through ``prompt_redactor()``."""
+    for client in (LlamaCppCompletionClient, VllmCompletionClient):
+        default = inspect.signature(client.__init__).parameters["outbound"].default
+        assert default is redact_prompt, client.__name__
+    with use_prompt_redactor():
+        assert redact_prompt(f"打 {mobile()}") == "打 [手机号#1]"
 
 
 # ------------------------------------------------------- 4. each privacy requirement has tests
@@ -280,6 +287,7 @@ PRIVACY_TESTS = {
     "R-PRIV-002": [
         "tests/unit/test_llm_deepseek.py::test_personal_identifiers_never_leave_the_machine",
         "tests/unit/test_llm_style_client.py::test_vllm_redacts_the_prompt_because_it_leaves_the_machine",
+        "tests/unit/test_llm_style_client.py::test_both_servers_receive_identical_numbered_placeholders",
         "tests/unit/test_redaction.py::test_identifiers_are_replaced_by_type_tokens",
     ],
     "R-PRIV-003": [

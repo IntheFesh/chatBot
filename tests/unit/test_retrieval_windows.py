@@ -116,6 +116,85 @@ def test_a_new_segment_cuts_the_context_even_inside_one_day(utc: Services) -> No
     assert found[("嗯",)] == [["上午的事"]]
 
 
+def assembled(services: Services, **options: bool) -> dict[tuple[str, ...], list[list[str]]]:
+    """``{reply texts: context texts}`` of every window an assembler with ``options`` makes."""
+    from twin.ingest.corpus import conversation_skeleton
+
+    names = texts_by_id(services)
+    assembler = WindowAssembler(120, 3600, 8, **options)
+    found: dict[tuple[str, ...], list[list[str]]] = {}
+    with services.db.session() as session:
+        drafts = [assembler.add(m) for m in session.scalars(conversation_skeleton())]
+    for draft in [*drafts, assembler.finish()]:
+        if draft is not None:
+            found[tuple(str(names[i]) for i in draft.reply_ids)] = [
+                [str(names[i]) for i in turn] for turn in draft.context_ids
+            ]
+    return found
+
+
+def test_r17_6_the_context_goes_on_across_a_pause_when_the_assembler_is_asked_to(
+    utc: Services,
+) -> None:
+    write_dialogue(
+        utc,
+        [
+            (day(0, 9), [U("上午的事"), H("嗯")]),
+            (day(0, 11, 30), [U("下午的事"), H("好")]),  # 2.5 h later: another segment
+        ],
+    )
+    assert assembled(utc)[("好",)] == [["下午的事"]]  # the default of the retrieval library
+    assert assembled(utc, clear_at_segment=False)[("好",)] == [["上午的事"], ["嗯"], ["下午的事"]]
+
+
+def test_r17_6_the_assembler_can_keep_merged_turns_like_the_live_prompt(utc: Services) -> None:
+    write_dialogue(
+        utc,
+        [
+            (
+                day(0, 9),
+                [
+                    U("问"),
+                    H("答一"),
+                    Msg("h", "答二", gap=300.0),
+                    U("再问"),
+                    Msg("u", "补充", gap=300.0),
+                ],
+            ),
+            (day(0, 9, 30), [H("最后")]),
+        ],
+    )
+    raw = assembled(utc)
+    assert raw[("答二",)] == [["问"], ["答一"]]  # bursts are turns of their own by default
+    assert raw[("最后",)] == [["问"], ["答一"], ["答二"], ["再问"], ["补充"]]
+    merged = assembled(utc, merge_sides=True)
+    assert merged[("答二",)] == [["问"], ["答一"]]  # the window of a block ends before the block
+    assert merged[("最后",)] == [["问"], ["答一", "答二"], ["再问", "补充"]]
+
+
+def test_r17_6_merged_turns_are_counted_not_bursts(utc: Services) -> None:
+    """The window holds ``context_turns`` merged turns: the oldest ones fall out, never half."""
+    from twin.ingest.corpus import conversation_skeleton
+
+    messages = [U("u0"), H("h0"), U("u1"), H("h1"), Msg("h", "h1b", gap=300.0), U("u2"), H("h2")]
+    write_dialogue(utc, [(day(0, 9), messages), (day(0, 12), [H("后来")])])
+    merged = assembled(utc, merge_sides=True, clear_at_segment=False)
+    assert len(merged[("后来",)]) == 6  # u0, h0, u1, h1+h1b, u2, h2
+
+    small = WindowAssembler(120, 3600, 3, clear_at_segment=False, merge_sides=True)
+    names = texts_by_id(utc)
+    with utc.db.session() as session:
+        for message in session.scalars(conversation_skeleton()):
+            small.add(message)
+    last = small.finish()
+    assert last is not None
+    assert [[str(names[i]) for i in turn] for turn in last.context_ids] == [
+        ["h1", "h1b"],
+        ["u2"],
+        ["h2"],
+    ]
+
+
 def test_context_turns_follow_the_configuration(utc: Services) -> None:
     utc.settings.retrieval.context_turns = 2
     write_dialogue(utc, [(day(0), alternating(8))])

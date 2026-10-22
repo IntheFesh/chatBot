@@ -1,12 +1,19 @@
 """Her reply blocks and the conversation before each of them, for the training export (R-TRN-002).
 
 A **reply block** is one of her bursts (the unit of :mod:`twin.retrieval.windows`); its
-**context** is the merged turns of both sides that precede it in the same conversation segment,
-at most eight (the same number the live prompt keeps).  The blocks are found with the same
+**context** is the merged turns of both sides that precede it, at most eight (the same number the
+live prompt keeps).  The blocks are found with the same
 :class:`~twin.retrieval.windows.WindowAssembler` the retrieval library uses, so the training set
-and the example library cut the conversation at the same places, and the messages are read only
-through :mod:`twin.ingest.corpus` (R-STO-007: ``bot_turns`` is a different table the exporter
-never opens).
+and the example library cut the conversation into bursts at the same places, and the messages are
+read only through :mod:`twin.ingest.corpus` (R-STO-007: ``bot_turns`` is a different table the
+exporter never opens).
+
+Where the context starts.  By default a pause longer than ``profile.segment_gap_min`` starts it
+afresh (the evaluation draws its samples so, ``eval.samples``).  The export asks for
+``across_gaps=True``: the running bot reads the last eight turns whatever the pause was, so a
+reply 200 minutes after the user's message, her first message after a night, and her second burst
+all have the context the live prompt would have (D-642, R-TRN-002); a block whose context does not
+end with a user turn becomes a proactive sample (:func:`twin.training.export`).
 
 **Only her real messages (R-TRN-004).**  :func:`block_from_rows` is the one door a block enters
 through.  Its reply must consist of rows of the ``messages`` table that she sent: any other object
@@ -141,12 +148,25 @@ def block_from_rows(
 
 
 def iter_block_refs(
-    services: Services, *, since: datetime | None = None, until: datetime | None = None
+    services: Services,
+    *,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    across_gaps: bool = False,
 ) -> Iterator[BlockRef]:
-    """Her reply blocks in time order (``since <= first message < until``) with their context."""
+    """Her reply blocks in time order (``since <= first message < until``) with their context.
+
+    ``across_gaps`` (the export): the context is the last :data:`STYLE_CONTEXT_TURNS` *merged*
+    turns whatever the pauses between them; otherwise (the default) a pause longer than
+    ``profile.segment_gap_min`` starts the context afresh and its turns are the bursts.
+    """
     profile = services.settings.profile
     assembler = WindowAssembler(
-        profile.burst_gap_s, profile.segment_gap_min * 60.0, STYLE_CONTEXT_TURNS
+        profile.burst_gap_s,
+        profile.segment_gap_min * 60.0,
+        STYLE_CONTEXT_TURNS,
+        clear_at_segment=not across_gaps,
+        merge_sides=across_gaps,
     )
 
     def wanted(draft: WindowDraft) -> bool:

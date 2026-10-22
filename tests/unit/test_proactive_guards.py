@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import run_with_plans
 from tests.support.export_world import World, build_world
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.retrieval.openers import OpenerExamples
@@ -170,9 +171,12 @@ def test_a_proactive_message_its_reason_and_a_rating_are_in_no_training_file(
     world: World, tmp_path: Path
 ) -> None:
     write_her_first_words(world.services)
-    result = TrainingSetExporter(
-        world.services, TOKENIZER, ExportOptions(out_dir=tmp_path / "sft", plan_ratio=0.0)
-    ).run()
+    result = run_with_plans(
+        world.services,
+        TrainingSetExporter(
+            world.services, TOKENIZER, ExportOptions(out_dir=tmp_path / "sft", plan_ratio=0.0)
+        ),
+    )
     assert result.dataset is not None
     for name in result.dataset.data_files():
         text = result.dataset.file_path(name).read_text(encoding="utf-8")

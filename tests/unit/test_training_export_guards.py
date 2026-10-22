@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import run_with_plans
 from tests.support.export_world import World, build_world, live_card
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from tests.support.training_artifacts import build_artifact_dir
@@ -234,9 +235,12 @@ def test_every_prompt_is_built_from_the_view_of_the_moment_of_its_block(
         return real(self, moment)
 
     monkeypatch.setattr(AsOfSource, "at", recording)
-    result = TrainingSetExporter(
-        services, tiny_qwen_tokenizer(), ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
-    ).run()
+    result = run_with_plans(
+        services,
+        TrainingSetExporter(
+            services, tiny_qwen_tokenizer(), ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
+        ),
+    )
     assert result.dataset is not None
     times = {ref.sample_id: ref.reply_at for ref in iter_block_refs(services)}
     exported = {
@@ -244,8 +248,17 @@ def test_every_prompt_is_built_from_the_view_of_the_moment_of_its_block(
         for name in ("sft_train.jsonl", "sft_val.jsonl", "sft_test.jsonl")
         for line in result.dataset.file_path(name).read_text(encoding="utf-8").splitlines()
     }
-    assert exported and {times[i] for i in exported} <= set(asked)
-    assert len(asked) == len(exported)  # one view per sample, none for anything else
+    sample_moments = {times[i] for i in exported}
+    assert exported and sample_moments <= set(asked)
+    # one view of the sample's own moment (D-644: the moment the user last wrote is read through a
+    # view as well, to tell whether she woke up - always an earlier one, never a later one)
+    latest: datetime | None = None
+    for moment in asked:
+        if moment in sample_moments:
+            latest = moment
+        else:
+            assert latest is not None and moment < latest, "a view of the future of its sample"
+    assert sum(1 for moment in asked if moment in sample_moments) >= len(exported)
     assert all(moment.tzinfo is not None for moment in asked)
 
 
@@ -267,9 +280,12 @@ def test_the_registry_locks_the_versions_the_export_used_and_renders_with_them(
     world: World, tmp_path: Path
 ) -> None:
     services = world.services
-    result = TrainingSetExporter(
-        services, tiny_qwen_tokenizer(), ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
-    ).run()
+    result = run_with_plans(
+        services,
+        TrainingSetExporter(
+            services, tiny_qwen_tokenizer(), ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
+        ),
+    )
     dataset = result.dataset
     assert dataset is not None
     meta = dataset.meta

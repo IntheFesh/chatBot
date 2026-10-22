@@ -18,6 +18,7 @@ from twin.profile.diffing import diff_metrics, summarize
 from twin.profile.holdout import holdout_cutoff
 from twin.profile.store import VersionError, VersionStore
 from twin.services import Services
+from twin.storage.chat_models import Message
 from twin.storage.profile_models import ActivityModelVersion, ProfileVersion
 
 
@@ -188,27 +189,79 @@ def test_the_address_candidates_come_from_the_data_not_from_a_word_list(
 def test_pre_holdout_reads_nothing_from_the_held_out_period(
     services: Services, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """R17-50: the ids are recorded where the statistics are made, after any filtering.
+
+    The recording used to wrap ``_ScopePass.feed`` and apply the very test ``feed`` applies, so
+    "the pre-holdout scope saw exactly the messages before the cutoff" held whatever ``feed`` did.
+    Now the three collectors of each scope are wrapped themselves: what reaches them is what the
+    scope has read.
+    """
     from twin.profile import builder
+    from twin.profile.activity_collect import ActivityCollector
+    from twin.profile.metrics import WindowCollector
+    from twin.profile.phrases import PhraseCollector
+    from twin.profile.units import Rec
 
-    seen: dict[str, set[str]] = {"live": set(), "pre_holdout": set()}
-    original = builder._ScopePass.feed
+    owners: dict[int, tuple[str, str]] = {}  # id of a collector -> (scope, which collector)
+    held: list[object] = []  # the collectors stay alive, so their ids are not reused
+    fed: dict[tuple[str, str], list[Rec]] = {}
+    texts: dict[tuple[str, str], list[str]] = {}
 
-    def recording(self: builder._ScopePass, rec: builder.Rec) -> None:
-        if self.end_ts is None or rec.ts < self.end_ts:
-            seen[self.scope].add(rec.id)
-        original(self, rec)
+    def register(scope: str, name: str, collector: object) -> None:
+        owners[id(collector)] = (scope, name)
+        held.append(collector)
+        fed.setdefault((scope, name), [])
+        texts.setdefault((scope, name), [])
 
-    monkeypatch.setattr(builder._ScopePass, "feed", recording)
+    original_init = builder._ScopePass.__init__
+
+    def tracking_init(self: builder._ScopePass, scope: str, *args: object) -> None:
+        original_init(self, scope, *args)
+        register(scope, "window", self.full)
+        register(scope, "recent", self.recent)
+        register(scope, "activity", self.activity)
+        register(scope, "phrases_her", self.phrases[True])
+        register(scope, "phrases_user", self.phrases[False])
+
+    original_window = WindowCollector.feed
+    original_activity = ActivityCollector.feed
+    original_phrase = PhraseCollector.feed
+
+    def window_feed(self: WindowCollector, rec: Rec) -> object:
+        fed[owners[id(self)]].append(rec)
+        return original_window(self, rec)
+
+    def activity_feed(self: ActivityCollector, rec: Rec, step: object) -> None:
+        fed[owners[id(self)]].append(rec)
+        original_activity(self, rec, step)
+
+    def phrase_feed(self: PhraseCollector, text: str) -> None:
+        texts[owners[id(self)]].append(text)
+        original_phrase(self, text)
+
+    monkeypatch.setattr(builder._ScopePass, "__init__", tracking_init)
+    monkeypatch.setattr(WindowCollector, "feed", window_feed)
+    monkeypatch.setattr(ActivityCollector, "feed", activity_feed)
+    monkeypatch.setattr(PhraseCollector, "feed", phrase_feed)
     built(services)
     cutoff = holdout_cutoff(services)
     with services.db.session() as session:
         rows = [(m.id, m.create_time_utc, m.kind) for m in session.scalars(conversation_messages())]
-    after = {i for i, at, kind in rows if at >= cutoff and kind != "system"}
-    before = {i for i, at, kind in rows if at < cutoff and kind != "system"}
+    after = [i for i, at, kind in rows if at >= cutoff and kind != "system"]
+    before = [i for i, at, kind in rows if at < cutoff and kind != "system"]
     assert after and before
-    assert seen["pre_holdout"] == before  # exactly the messages before the cutoff ...
-    assert not seen["pre_holdout"] & after  # ... and none of the held-out ones
-    assert seen["live"] == before | after
+    for name in ("window", "activity"):
+        # exactly the messages before the cutoff, each once and in order - and none after it
+        assert [r.id for r in fed[("pre_holdout", name)]] == before, name
+        assert [r.id for r in fed[("live", name)]] == before + after, name
+    recent = [r.id for r in fed[("pre_holdout", "recent")]]
+    assert recent and set(recent) <= set(before) and not set(recent) & set(after)
+    assert {r.id for r in fed[("live", "recent")]} & set(after)
+    for scope, ids in (("pre_holdout", before), ("live", before + after)):
+        recs = [r for r in fed[(scope, "window")] if r.id in set(ids)]
+        for side, name in ((True, "phrases_her"), (False, "phrases_user")):
+            wanted = sorted(r.text for r in recs if r.text and r.her is side)
+            assert sorted(texts[(scope, name)]) == wanted, (scope, name)
     with services.db.session() as session:
         her_before = len([m for m in session.scalars(her_messages()) if m.create_time_utc < cutoff])
         her_after = len([m for m in session.scalars(her_messages()) if m.create_time_utc >= cutoff])
@@ -225,6 +278,56 @@ def test_pre_holdout_reads_nothing_from_the_held_out_period(
     assert pre.metrics.window_info("recent")["end"] <= stop
     model = load_activity_model(services, "pre_holdout")
     assert model is not None and model.her_messages == her_before
+
+
+def test_messages_after_the_cutoff_change_the_live_profile_and_never_the_pre_holdout_one(
+    services: Services,
+) -> None:
+    """R17-50, the behaviour behind the ids: later and edited messages move only the live scope."""
+    truth, first = built(services)
+    cutoff = holdout_cutoff(services)  # stored by the first build: more data does not move it
+    store = VersionStore(services.db, services.clock)
+    pre, live = store.active_profile("pre_holdout"), store.active_profile("live")
+    assert pre is not None and live is not None and truth.last_message_at is not None
+    activity = load_activity_model(services, "pre_holdout")
+    assert activity is not None
+    with services.db.transaction(bump_state=False) as session:  # edit what she said after it
+        edited = session.scalars(
+            select(Message)
+            .where(Message.create_time_utc >= cutoff, Message.is_sent.is_(False))
+            .where(Message.kind == "text")
+            .order_by(Message.create_time_utc)
+            .limit(25)
+        ).all()
+        assert len(edited) == 25
+        for row in edited:
+            row.text = "好，嗯，行，是的，对啊，那就这样吧"
+    last = truth.last_message_at
+    append_texts(
+        services,
+        [
+            (last + timedelta(days=1, minutes=3 * i), True, "好，嗯，行，是的，对啊")
+            for i in range(300)
+        ],
+    )
+    second = rebuild(services, "all", reason="import")
+    assert holdout_cutoff(services) == cutoff
+    kept = second.result("pre_holdout")
+    assert (
+        kept is not None and kept.status == "unchanged"
+    )  # the same metrics digest, no new version
+    assert kept.profile_version_id == pre.id
+    now_pre = store.active_profile("pre_holdout")
+    assert now_pre is not None and now_pre.id == pre.id
+    assert diff_metrics(store.metrics(pre.id), store.metrics(now_pre.id)) == []
+    still = load_activity_model(services, "pre_holdout")
+    assert still is not None and still.her_messages == activity.her_messages
+    moved = second.result("live")
+    assert moved is not None and moved.status == "created" and moved.changes
+    now_live = store.active_profile("live")
+    assert now_live is not None and now_live.id != live.id
+    assert diff_metrics(store.metrics(live.id), store.metrics(now_live.id))
+    assert first.result("pre_holdout") is not None
 
 
 def test_the_recent_window_of_the_live_scope_ends_at_the_newest_message(
