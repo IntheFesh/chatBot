@@ -10,10 +10,14 @@ behind it - the only code that writes the ``alerts`` table:
   critical);
 * an alert that is worth telling the user about is **delivered** by the delivery component
   (:mod:`twin.ops.alert_delivery`): a Windows notification and an e-mail.  At most one notice
-  per category goes out per ``ops.alert_cooldown_min`` (an hour); a repeat is stored as
-  ``suppressed`` and a worse one (higher severity) is let through;
+  per category goes out per ``ops.alert_cooldown_min`` (an hour), counted from the newest
+  notice of the category that went out, an alert or a recovery; a repeat is stored as
+  ``suppressed``, whatever its severity (D-700, round 17: the SPEC's "同类 1 小时最多 1 封" has
+  no exception);
 * when the cause is gone, :meth:`AlertService.recover` closes the open alerts of the category and
-  queues **one** "recovered" notice - only if the alert it closes was announced;
+  queues **one** "recovered" notice - only if the user's last news of the category was an alert.
+  Inside the cooldown that notice is put off until the hour is over (``mail_next_at``) and a new
+  alert of the category withdraws it, so a fault that flaps costs one notice per hour;
 * the text that leaves the machine is made from fixed wording and numbers
   (:mod:`twin.ops.alert_text`), never from chat content.
 
@@ -39,10 +43,10 @@ from twin.storage.models import ALERT_SEVERITIES, Alert
 
 log = get_logger("twin.alerts")
 
-SEVERITY_RANK = {severity: rank for rank, severity in enumerate(ALERT_SEVERITIES)}
 ALERT_KEEP_DAYS = 90
 STALE_AFTER = timedelta(hours=24)  # a notice that was never delivered is not sent a day later
 CLAIM_LEASE = timedelta(minutes=2)  # a delivery attempt that did not report back is retried
+NOTICE_LOOKBACK = 8  # newest announced rows read to find the last notice of a category
 
 
 class AlertSink(Protocol):
@@ -327,7 +331,9 @@ class AlertService:
         suppressed = False
         with self._db.transaction(bump_state=False) as session:
             if announce:
-                suppressed = self._held_back(session, canonical, severity, now)
+                suppressed = self._held_back(session, canonical, now)
+                # the problem is back: a "recovered" notice that is still waiting would lie
+                self._withdraw_waiting_recovery(session, canonical, now)
             wanted = announce and not suppressed
             session.add(
                 Alert(
@@ -354,35 +360,70 @@ class AlertService:
         if announce and not suppressed:
             self._poke()
 
-    def _held_back(self, session: Any, category: str, severity: str, now: datetime) -> bool:
-        """True if an announcement of this category went out within the cooldown (and this one
-        is not worse than it)."""
-        since = now - self._cooldown
-        last = session.scalars(
-            select(Alert)
-            .where(
-                Alert.category == category,
-                Alert.kind == "alert",
-                Alert.suppressed.is_(False),
-                Alert.resolved_at.is_(None),
-                Alert.created_at > since,
-                or_(Alert.toast_state != "none", Alert.mail_state != "none"),
+    def _notices(self, session: Any, category: str) -> list[Alert]:
+        """The newest announced rows of ``category`` (alerts and recoveries), newest first."""
+        return list(
+            session.scalars(
+                select(Alert)
+                .where(
+                    Alert.category == category,
+                    Alert.suppressed.is_(False),
+                    or_(Alert.toast_state != "none", Alert.mail_state != "none"),
+                )
+                .order_by(Alert.created_at.desc(), Alert.id.desc())
+                .limit(NOTICE_LOOKBACK)
             )
-            .order_by(Alert.created_at.desc())
-            .limit(1)
-        ).first()
-        if last is None:
+        )
+
+    @staticmethod
+    def _is_waiting(row: Alert) -> bool:
+        """A "recovered" notice that was put off and has not been shown yet.
+
+        It is the only row that is queued with a time in the future while its notification is
+        still to come (an alert whose mail is being retried has shown its notification).
+        """
+        return (
+            row.kind == "recovery" and row.toast_state == "pending" and row.mail_next_at is not None
+        )
+
+    @staticmethod
+    def _noticed_at(row: Alert) -> datetime:
+        """When the user was (or is about to be) told: a put-off notice counts from its showing."""
+        return max(t for t in (row.created_at, row.toast_at, row.mail_at) if t is not None)
+
+    def _gone_notices(self, session: Any, category: str) -> list[Alert]:
+        """The announced rows that went out or are queued to go out now, newest first."""
+        return [row for row in self._notices(session, category) if not self._is_waiting(row)]
+
+    def _held_back(self, session: Any, category: str, now: datetime) -> bool:
+        """True if a notice of this category (an alert or a recovery) went out within the
+        cooldown.  A put-off recovery has not gone out; it is withdrawn by the alert asking."""
+        gone = self._gone_notices(session, category)
+        if not gone:
             return False
-        return SEVERITY_RANK[severity] <= SEVERITY_RANK[last.severity]
+        return now - max(self._noticed_at(row) for row in gone) < self._cooldown
+
+    def _withdraw_waiting_recovery(self, session: Any, category: str, now: datetime) -> None:
+        """A new alert of the category takes the waiting "recovered" notice back (D-700)."""
+        for row in self._notices(session, category):
+            if self._is_waiting(row):
+                row.suppressed = True
+                row.toast_state = "none"
+                row.mail_state = "none"
+                row.mail_next_at = None
+                row.updated_at = now
+                log.info("alert_recovery_withdrawn", category=category)
 
     def recover(self, category: str, title: str, *, detail: dict[str, Any] | None = None) -> bool:
         """The cause of ``category`` is gone: close its alerts, announce it once.
 
-        Returns ``True`` if a "recovered" notice was queued (there was an announced alert to
-        close).
+        Returns ``True`` if a "recovered" notice was queued: the user's last news of the
+        category was an alert.  Inside the cooldown of that news the notice is put off until
+        the cooldown is over (and a new alert withdraws it); otherwise it goes out at once.
         """
         canonical = canonical_category(RECOVERIES.get(category, category), detail)
         now = self._clock.now_utc()
+        due_at: datetime | None = None
         with self._db.transaction(bump_state=False) as session:
             open_rows = list(
                 session.scalars(
@@ -395,14 +436,19 @@ class AlertService:
             )
             if not open_rows:
                 return False
-            announced = any(
-                not row.suppressed and (row.toast_state != "none" or row.mail_state != "none")
-                for row in open_rows
-            )
             for row in open_rows:
                 row.resolved_at = now
-            if not announced:
+            notices = self._notices(session, canonical)
+            gone = [row for row in notices if not self._is_waiting(row)]
+            told = any(
+                not row.suppressed and (row.toast_state != "none" or row.mail_state != "none")
+                for row in open_rows
+            ) or (bool(gone) and gone[0].kind == "alert")
+            if not told or len(gone) < len(notices):  # nothing to correct, or one is waiting
                 return False
+            last = max(self._noticed_at(row) for row in gone)
+            if now - last < self._cooldown:
+                due_at = last + self._cooldown
             session.add(
                 Alert(
                     category=canonical,
@@ -414,12 +460,14 @@ class AlertService:
                     suppressed=False,
                     toast_state="pending",
                     mail_state="pending",
+                    mail_next_at=due_at,
                     created_at=now,
                     updated_at=now,
                 )
             )
-        log.info("alert_recovered", category=canonical)
-        self._poke()
+        log.info("alert_recovered", category=canonical, put_off=due_at is not None)
+        if due_at is None:
+            self._poke()
         return True
 
     def _poke(self) -> None:
@@ -442,11 +490,8 @@ class AlertService:
                     .where(
                         or_(Alert.toast_state == "pending", Alert.mail_state == "pending"),
                         or_(Alert.claimed_at.is_(None), Alert.claimed_at < now - CLAIM_LEASE),
-                        or_(
-                            Alert.mail_next_at.is_(None),
-                            Alert.mail_next_at <= now,
-                            Alert.toast_state == "pending",
-                        ),
+                        # a put-off "recovered" notice waits in both channels (D-700)
+                        or_(Alert.mail_next_at.is_(None), Alert.mail_next_at <= now),
                     )
                     .order_by(Alert.created_at)
                     .limit(limit)

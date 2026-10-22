@@ -200,19 +200,24 @@ def test_other_categories_have_their_own_cooldown(services: Services) -> None:
     assert [v.suppressed for v in views(services.alerts)] == [False, False]
 
 
-def test_a_worse_alert_is_not_held_back_by_the_cooldown(services: Services) -> None:
+def test_a_worse_alert_does_not_get_through_the_cooldown_either(services: Services) -> None:
+    """R17-22 (D-700): "同类 1 小时最多 1 封" has no exception for a higher severity."""
     alerts = services.alerts
     alerts.raise_alert("disk_low", "getting low", severity="warning")
     alerts.raise_alert("disk_low", "still low", severity="warning")
     alerts.raise_alert("disk_low", "almost full", severity="critical")
-    assert [v.suppressed for v in views(alerts)] == [False, True, False]
+    assert [v.suppressed for v in views(alerts)] == [False, True, True]
+    assert [v.toast_state for v in views(alerts)] == ["pending", "none", "none"]
 
 
-def test_recovery_announces_once_and_clears_the_cooldown(
+def test_a_recovery_inside_the_cooldown_is_put_off_not_sent_at_once(
     services: Services, clock: ManualClock
 ) -> None:
+    """R17-22 (D-700): the old test pinned "announced at once, not held back" after a recovery."""
     alerts = services.alerts
+    first_at = clock.now_utc()
     alerts.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(30)
     assert alerts.recover("disk_low", "disk space is back") is True
     assert alerts.recover("disk_low", "again") is False  # nothing open any more
     rows = views(alerts)
@@ -220,11 +225,126 @@ def test_recovery_announces_once_and_clears_the_cooldown(
         ("alert", True),
         ("recovery", False),
     ]
-    assert rows[1].toast_state == "pending" and rows[1].severity == "info"
-    # the next failure is a new episode: announced at once, not held back by the old one
+    recovery = rows[1]
+    assert recovery.severity == "info" and not recovery.suppressed
+    # the notice waits for the end of the hour that the alert opened, in both channels
+    assert (recovery.toast_state, recovery.mail_state) == ("pending", "pending")
+    assert recovery.mail_next_at == first_at + timedelta(hours=1)
+    assert alerts.claim_due()[0].kind == "alert"  # only the alert is due now
+    assert alerts.claim_due() == []
+    # the failure comes back a minute later: still the same hour, so nothing goes out for it,
+    # and the notice that said "recovered" is withdrawn
     clock.tick(60)
     alerts.raise_alert("disk_low", "low again", severity="critical")
-    assert views(alerts)[-1].suppressed is False
+    again, recovery = views(alerts)[-1], views(alerts)[1]
+    assert again.suppressed is True and again.toast_state == "none"
+    assert recovery.suppressed is True
+    assert (recovery.toast_state, recovery.mail_state) == ("none", "none")
+
+
+async def test_ten_flaps_in_half_an_hour_send_one_mail_and_the_end_is_told_once(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-22: alert, recovery, alert, ... for thirty minutes is one mail, then one more."""
+    notifier, mailer = RecordingNotifier(), RecordingMailer()
+    delivery = make_delivery(services, clock, notifier=notifier, mailer=mailer)
+    start = clock.now_utc()
+    for _ in range(10):
+        services.alerts.raise_alert("disk_low", "the disk is low", severity="critical")
+        clock.tick(60)
+        services.alerts.recover("disk_low", "the disk is fine")
+        clock.tick(120)
+        await delivery.deliver_once()
+    assert clock.now_utc() - start == timedelta(minutes=30)
+    assert len(mailer.sent) == 1 and len(notifier.shown) == 1  # the first alert, nothing else
+    assert "已恢复" not in mailer.sent[0].subject
+    # the hour of the first alert (shown three minutes in) is over: the last recovery goes out,
+    # once, with the news that the disk is fine
+    clock.tick(34 * 60)
+    await delivery.deliver_once()
+    await delivery.deliver_once()
+    assert len(mailer.sent) == 2 and len(notifier.shown) == 2
+    assert "已恢复" in mailer.sent[1].subject
+    rows = views(services.alerts)
+    assert sum(1 for v in rows if v.kind == "recovery" and not v.suppressed) == 1
+    assert sum(1 for v in rows if v.kind == "alert" and not v.suppressed) == 1
+
+
+async def test_a_put_off_recovery_is_sent_once_when_its_hour_is_over(
+    services: Services, clock: ManualClock
+) -> None:
+    notifier, mailer = RecordingNotifier(), RecordingMailer()
+    delivery = make_delivery(services, clock, notifier=notifier, mailer=mailer)
+    services.alerts.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(120)
+    services.alerts.recover("disk_low", "disk space is back")
+    await delivery.deliver_once()
+    assert len(mailer.sent) == 1  # the alert; the recovery is not due yet
+    clock.tick(3600 - 121)
+    assert await delivery.deliver_once() == 0
+    clock.tick(2)
+    assert await delivery.deliver_once() == 1
+    assert [m.subject for m in mailer.sent] == [
+        "[wechat-twin] 磁盘剩余空间不足",
+        "[wechat-twin] 已恢复：磁盘剩余空间不足",
+    ]
+    assert len(notifier.shown) == 2
+    assert await delivery.deliver_once() == 0  # and not again
+    assert len(mailer.sent) == 2
+
+
+def test_a_new_alert_after_the_hour_is_announced_and_withdraws_an_overdue_recovery(
+    services: Services, clock: ManualClock
+) -> None:
+    """The delivery was not running when the put-off recovery fell due: the news is stale."""
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(60)
+    alerts.recover("disk_low", "disk space is back")
+    clock.tick(3 * 3600)  # the recovery is long overdue and was never sent
+    alerts.raise_alert("disk_low", "low again", severity="critical")
+    _, recovery, again = views(alerts)
+    assert again.suppressed is False and again.toast_state == "pending"
+    assert recovery.suppressed is True and recovery.mail_state == "none"
+
+
+def test_a_recovery_that_was_announced_is_the_hours_notice_for_the_next_alert(
+    services: Services, clock: ManualClock
+) -> None:
+    """R17-22: the newest notice counts, whether it was an alert or a recovery."""
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(3700)
+    alerts.recover("disk_low", "disk space is back")  # an hour on: announced at once
+    recovery = views(alerts)[-1]
+    assert recovery.kind == "recovery" and recovery.mail_next_at is None
+    assert recovery.toast_state == "pending"
+    clock.tick(60)
+    alerts.raise_alert("disk_low", "low again", severity="critical")
+    assert views(alerts)[-1].suppressed is True
+    # the user's last news is "recovered": the second recovery has nothing to correct
+    clock.tick(60)
+    assert alerts.recover("disk_low", "fine again") is False
+    assert [v.kind for v in views(alerts)] == ["alert", "recovery", "alert"]
+
+
+def test_the_end_of_a_flapping_episode_is_told_when_the_last_news_was_the_alert(
+    services: Services, clock: ManualClock
+) -> None:
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    clock.tick(60)
+    alerts.recover("disk_low", "back")
+    clock.tick(60)
+    alerts.raise_alert("disk_low", "low again", severity="critical")  # suppressed, withdraws it
+    clock.tick(60)
+    assert alerts.recover("disk_low", "back for good") is True
+    last = views(alerts)[-1]
+    assert (last.kind, last.suppressed) == ("recovery", False)
+    assert last.mail_next_at is not None and last.toast_state == "pending"
+    # one put-off recovery at a time
+    assert alerts.recover("disk_low", "and again") is False
+    assert sum(1 for v in views(alerts) if v.mail_state == "pending") == 2  # the alert + this one
 
 
 def test_recovery_of_something_never_announced_says_nothing(services: Services) -> None:
@@ -296,6 +416,8 @@ async def test_the_recovered_notice_says_so(services: Services, clock: ManualClo
     notifier, mailer = RecordingNotifier(), RecordingMailer()
     delivery = make_delivery(services, clock, notifier=notifier, mailer=mailer)
     services.alerts.raise_alert("disk_low", "low", severity="critical")
+    await delivery.deliver_once()
+    clock.tick(3601)  # no notice of this category within the last hour: nothing to wait for
     services.alerts.recover("disk_low", "disk space is back")
     await delivery.deliver_once()
     assert [m.subject for m in mailer.sent] == [
