@@ -13,9 +13,10 @@ from tests.support.style_server import (
     running_server,
     vllm_defaults,
 )
-from tests.support.synthetic import mobile
+from tests.support.synthetic import mobile, mobile_formatted
 from twin.config.loader import load_settings
 from twin.llm.errors import StyleModelError
+from twin.llm.redaction import use_prompt_redactor
 from twin.llm.style_client import (
     IM_END,
     LlamaCppCompletionClient,
@@ -28,6 +29,13 @@ from twin.llm.style_client import (
 PROMPT = RenderedPrompt(
     "<|im_start|>system\n你是她。<|im_end|>\n<|im_start|>user\n在吗<|im_end|>\n<|im_start|>assistant\n"
 )
+
+
+@pytest.fixture(autouse=True)
+def fresh_numbering() -> Iterator[None]:
+    """The prompt redactor numbers per process: every test starts at ``#1`` and puts it back."""
+    with use_prompt_redactor():
+        yield
 
 
 @pytest.fixture
@@ -226,12 +234,80 @@ async def test_llama_timeouts_are_reported_as_timeouts(
     await slow.aclose()
 
 
-async def test_llama_does_not_redact_because_the_server_is_local(
+def prompt_with(*numbers: str) -> str:
+    said = "，".join(f"我的号码 {number}" for number in numbers)
+    return f"<|im_start|>user\n{said}<|im_end|>\n<|im_start|>assistant\n"
+
+
+async def test_both_servers_receive_identical_numbered_placeholders(
+    server: StyleServer, llama: LlamaCppCompletionClient, vllm: VllmCompletionClient
+) -> None:
+    """R17-20: the local server used to get the real number, the remote one an unnumbered token.
+
+    Training saw ``[手机号#1]`` (R-TRN-007, D-326), so both servers must be sent that, for the
+    same entity in the same form.
+    """
+    text = prompt_with(mobile())
+    await llama.generate(RenderedPrompt(text), StyleParams())
+    await vllm.generate(RenderedPrompt(text), StyleParams())
+    local = server.last("/completion").json["prompt"]
+    remote = server.last("/v1/completions").json["prompt"]
+    expected = prompt_with("[手机号#1]")
+    assert local == remote == expected
+    assert mobile() not in local + remote
+
+
+async def test_the_second_number_is_the_second_placeholder_and_the_same_number_is_the_same_token(
+    server: StyleServer, llama: LlamaCppCompletionClient, vllm: VllmCompletionClient
+) -> None:
+    other = mobile_formatted()
+    assert other != mobile()
+    await llama.generate(RenderedPrompt(prompt_with(mobile(), other)), StyleParams())
+    assert server.last("/completion").json["prompt"] == prompt_with("[手机号#1]", "[手机号#2]")
+    # the other client of the same process, and a later prompt: same entity, same placeholder
+    await vllm.generate(RenderedPrompt(prompt_with(other, mobile())), StyleParams())
+    assert server.last("/v1/completions").json["prompt"] == prompt_with("[手机号#2]", "[手机号#1]")
+    await llama.generate(RenderedPrompt(prompt_with(mobile())), StyleParams())
+    assert server.last("/completion").json["prompt"] == prompt_with("[手机号#1]")
+
+
+async def test_redaction_leaves_existing_tokens_alone(
     server: StyleServer, llama: LlamaCppCompletionClient
 ) -> None:
-    text = f"<|im_start|>user\n我的号码 {mobile()}<|im_end|>\n<|im_start|>assistant\n"
+    text = prompt_with("[手机号#1]", "[手机号]", "[邮箱#7]")
     await llama.generate(RenderedPrompt(text), StyleParams())
     assert server.last("/completion").json["prompt"] == text
+
+
+async def test_a_prompt_without_personal_data_is_sent_exactly_as_rendered(
+    server: StyleServer, llama: LlamaCppCompletionClient, vllm: VllmCompletionClient
+) -> None:
+    await llama.generate(PROMPT, StyleParams())
+    await vllm.generate(PROMPT, StyleParams())
+    assert server.last("/completion").json["prompt"] == PROMPT.text
+    assert server.last("/v1/completions").json["prompt"] == PROMPT.text
+
+
+async def test_llama_tokenize_sends_the_same_redacted_text_as_a_prompt(
+    server: StyleServer, llama: LlamaCppCompletionClient
+) -> None:
+    """What the token check compares is what ``generate`` would send."""
+    text = prompt_with(mobile())
+    await llama.tokenize(text)
+    assert server.last("/tokenize").json["content"] == prompt_with("[手机号#1]")
+    await llama.generate(RenderedPrompt(text), StyleParams())
+    assert server.last("/completion").json["prompt"] == prompt_with("[手机号#1]")
+
+
+async def test_a_client_can_be_built_to_send_the_prompt_as_it_is(
+    server: StyleServer, clock: ManualClock
+) -> None:
+    llama_defaults(server)
+    plain = LlamaCppCompletionClient(server.url, clock=clock, timeout_s=5, outbound=None)
+    text = prompt_with(mobile())
+    await plain.generate(RenderedPrompt(text), StyleParams())
+    assert server.last("/completion").json["prompt"] == text
+    await plain.aclose()
 
 
 # -------------------------------------------------------------------------- vLLM
@@ -272,7 +348,7 @@ async def test_vllm_redacts_the_prompt_because_it_leaves_the_machine(
     text = f"<|im_start|>user\n我的号码 {mobile()}<|im_end|>\n<|im_start|>assistant\n"
     await vllm.generate(RenderedPrompt(text), StyleParams())
     sent = server.last("/v1/completions").json["prompt"]
-    assert mobile() not in sent and "[手机号]" in sent
+    assert mobile() not in sent and "[手机号#1]" in sent
     assert sent.startswith("<|im_start|>user\n") and sent.endswith("<|im_start|>assistant\n")
 
 
@@ -309,7 +385,7 @@ async def test_vllm_tokenize_sends_the_same_redacted_text_as_a_prompt(
     text = f"<|im_start|>user\n我的号码 {mobile()}<|im_end|>\n<|im_start|>assistant\n"
     await vllm.tokenize(text)
     sent = server.last("/tokenize").json["prompt"]
-    assert mobile() not in sent and "[手机号]" in sent
+    assert mobile() not in sent and "[手机号#1]" in sent
 
 
 async def test_vllm_errors_and_authentication(server: StyleServer, clock: ManualClock) -> None:

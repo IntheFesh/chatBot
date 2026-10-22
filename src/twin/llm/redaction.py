@@ -22,8 +22,10 @@ symbols are mapped one-to-one to ASCII, so offsets stay valid and ``１３８...
 
 :func:`redact` returns a :class:`RedactionResult`; :func:`redact_text` is the string-only
 shortcut used by the logging layer.  :class:`ConsistentRedactor` keeps one numbered token per
-distinct entity (``[手机号#1]``) for training exports (R-TRN-007).  :func:`find_tokens`
-detects tokens in a model reply (R-ENG-012).
+distinct entity (``[手机号#1]``) for training exports (R-TRN-007); :func:`prompt_redactor` is the
+one of the running process, which every prompt sent to a style model server goes through, so the
+placeholders the model sees at inference are the numbered ones it was trained on (R-LLM-011,
+D-641).  :func:`find_tokens` detects tokens in a model reply (R-ENG-012).
 
 This module is a leaf: it imports nothing from the rest of the project, so the logging and job
 layers can use it without cycles.
@@ -33,7 +35,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Iterable
+import threading
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -346,18 +350,20 @@ class ConsistentRedactor:
     def __init__(self, *, salt: str = "twin-redaction-v1") -> None:
         self._salt = salt
         self._numbers: dict[str, dict[str, int]] = {kind: {} for kind in KINDS}
+        self._lock = threading.Lock()  # numbering may be asked from a worker thread and the loop
 
     def _fingerprint(self, hit: _Hit) -> str:
         digest = hashlib.sha256(f"{self._salt}\x1f{hit.kind}\x1f{hit.key}".encode()).hexdigest()
         return digest[:32]
 
     def _token(self, hit: _Hit) -> str:
-        numbers = self._numbers[hit.kind]
         fingerprint = self._fingerprint(hit)
-        number = numbers.get(fingerprint)
-        if number is None:
-            number = len(numbers) + 1
-            numbers[fingerprint] = number
+        with self._lock:
+            numbers = self._numbers[hit.kind]
+            number = numbers.get(fingerprint)
+            if number is None:
+                number = len(numbers) + 1
+                numbers[fingerprint] = number
         return f"{REPLACEMENTS[hit.kind][:-1]}#{number}]"
 
     def redact(self, text: str) -> RedactionResult:
@@ -373,11 +379,13 @@ class ConsistentRedactor:
 
     def counts(self) -> dict[str, int]:
         """Number of distinct entities seen per kind."""
-        return {kind: len(numbers) for kind, numbers in self._numbers.items() if numbers}
+        with self._lock:
+            return {kind: len(numbers) for kind, numbers in self._numbers.items() if numbers}
 
     def state(self) -> dict[str, dict[str, int]]:
         """Hash -> number tables, for storing next to a dataset and resuming later."""
-        return {kind: dict(numbers) for kind, numbers in self._numbers.items() if numbers}
+        with self._lock:
+            return {kind: dict(numbers) for kind, numbers in self._numbers.items() if numbers}
 
     @classmethod
     def from_state(
@@ -389,3 +397,49 @@ class ConsistentRedactor:
                 raise ValueError(f"unknown redaction kind {kind!r}")
             redactor._numbers[kind] = {str(k): int(v) for k, v in numbers.items()}
         return redactor
+
+
+# ------------------------------------------------- the redactor of prompts for the style model
+
+_PROMPT_REDACTOR: ConsistentRedactor | None = None
+_PROMPT_REDACTOR_LOCK = threading.Lock()
+
+
+def prompt_redactor() -> ConsistentRedactor:
+    """The process-wide redactor of the prompts sent to a style model server (R-LLM-011, D-641).
+
+    The training set is redacted by one :class:`ConsistentRedactor`, so the model learned
+    ``[手机号#1]``-style placeholders (R-TRN-007, D-326).  At inference every prompt, to the local
+    llama.cpp server as well as to vLLM on AutoDL, goes through this one instance: the same entity
+    keeps the same number in every prompt of the process and two different entities never share
+    one.  The numbering lives as long as the process (it is not stored).
+    """
+    global _PROMPT_REDACTOR
+    with _PROMPT_REDACTOR_LOCK:
+        if _PROMPT_REDACTOR is None:
+            _PROMPT_REDACTOR = ConsistentRedactor()
+        return _PROMPT_REDACTOR
+
+
+def redact_prompt(text: str) -> str:
+    """``text`` through :func:`prompt_redactor` (the default ``outbound`` of the style clients).
+
+    The redactor is looked up on every call, so a client built before :func:`use_prompt_redactor`
+    swapped it still uses the current one.
+    """
+    return prompt_redactor().redact_text(text)
+
+
+@contextmanager
+def use_prompt_redactor(redactor: ConsistentRedactor | None = None) -> Iterator[ConsistentRedactor]:
+    """Borrow the process-wide prompt redactor (a fresh one by default) and put the old one back."""
+    global _PROMPT_REDACTOR
+    with _PROMPT_REDACTOR_LOCK:
+        previous = _PROMPT_REDACTOR
+        borrowed = redactor if redactor is not None else ConsistentRedactor()
+        _PROMPT_REDACTOR = borrowed
+    try:
+        yield borrowed
+    finally:
+        with _PROMPT_REDACTOR_LOCK:
+            _PROMPT_REDACTOR = previous

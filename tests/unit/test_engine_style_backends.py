@@ -21,11 +21,13 @@ from tests.support.deepseek import API, TEST_KEY, error, ok
 from tests.support.reply_view import StaticDataView
 from tests.support.style_models import ScriptedStyleClient, down, register_model
 from tests.support.style_server import StyleServer, llama_defaults
+from tests.support.synthetic import mobile
 from twin.engine.hybrid_backend import NO_REPLY_PLANNED, HybridPlan
 from twin.engine.pipeline import ReplyPipeline
 from twin.engine.style_runtime import ConfiguredStyleClient, StyleRuntime
 from twin.engine.types import InboundItem, ReplyContext
 from twin.llm.errors import StyleModelError
+from twin.llm.redaction import use_prompt_redactor
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
 from twin.llm.style_client import RenderedPrompt, StyleParams
 from twin.memory.recent import Turn
@@ -410,6 +412,27 @@ async def test_the_real_client_sends_one_string_to_the_completion_endpoint(
         assert sent_prompt["prompt"].endswith("在吗<|im_end|>\n" + OPENER)
         assert "<|im_end|>" in sent_prompt["stop"]
         assert sent_prompt["temperature"] == 0.7 and sent_prompt["n_predict"] == 200
+    finally:
+        server.stop()
+
+
+async def test_r17_20_the_server_gets_numbered_placeholders_for_what_the_user_wrote(
+    ready: Services, llm: LlmRuntime
+) -> None:
+    """R17-20: a phone number in the message never reaches the local server as digits."""
+    server = StyleServer()
+    llama_defaults(server, "好呀")
+    server.start()
+    try:
+        ready.settings.style_model.endpoint = server.url
+        runtime = StyleRuntime.from_services(ready, llm)
+        pipeline = pipeline_of(ready, llm, runtime)
+        with use_prompt_redactor():
+            await pipeline.run(context(f"我的号码 {mobile()}"), data())
+            await runtime.aclose()
+            sent_prompt = server.last("/completion").json["prompt"]
+        assert mobile() not in sent_prompt
+        assert sent_prompt.endswith("我的号码 [手机号#1]<|im_end|>\n" + OPENER)
     finally:
         server.stop()
 

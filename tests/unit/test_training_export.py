@@ -505,7 +505,10 @@ def test_r17_9_the_residual_scan_sees_a_number_at_the_end_of_a_sentence(
     with pytest.raises(ExportError, match=r"personal data \(phone\)"):
         scan_sample(sample)
     clean = export_module.SftSample(
-        "w10", "系统", (lf_template.Turn("user", "版本 3.12.13，pi=3.14159，10.234.567.8901"),), "好"
+        "w10",
+        "系统",
+        (lf_template.Turn("user", "版本 3.12.13，pi=3.14159，10.234.567.8901"),),
+        "好",
     )
     scan_sample(clean)
 
