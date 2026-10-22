@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -381,6 +382,29 @@ async def test_a_server_that_serves_another_model_is_refused(tmp_path: Path) -> 
         await outside.wait()
 
 
+async def test_a_server_of_another_run_with_the_same_file_name_is_refused(tmp_path: Path) -> None:
+    """R17-7 (D-664): adopting it would serve the earlier model as the new one.
+
+    The refusal names both files by their whole path, so that the user can tell which run is
+    still being served.
+    """
+    old = make_model_file(tmp_path / "models" / "run-1" / "gguf", "5090-8b-Q5_K_M.gguf")
+    new = make_model_file(tmp_path / "models" / "run-2" / "gguf", "5090-8b-Q5_K_M.gguf")
+    port = free_port()
+    outside = await start_outside(tmp_path, old, port)
+    try:
+        manager, _, _ = make_manager(tmp_path, port=port, model=new)
+        with pytest.raises(ServeError, match="serves another model") as refused:
+            # a manager that adopted the server would watch it for ever: the limit makes the
+            # old behaviour a failure and not a hang
+            await asyncio.wait_for(manager.run(), 15)
+        assert str(old) in str(refused.value) and str(new) in str(refused.value)
+        assert outside.returncode is None  # and it is left alone
+    finally:
+        outside.kill()
+        await outside.wait()
+
+
 async def test_the_child_is_put_in_the_job_object_when_there_is_one(tmp_path: Path) -> None:
     api = FakeWin32()
     job = ProcessJob(api, platform="win32")
@@ -459,12 +483,62 @@ def test_the_tail_of_the_log_has_the_last_non_empty_lines_cut_short(tmp_path: Pa
     assert log_tail(tmp_path / "missing.txt") == ""
 
 
-def test_a_model_file_is_recognised_by_its_name_whatever_the_slashes() -> None:
+def test_a_model_file_is_recognised_by_its_whole_path_whatever_the_slashes() -> None:
+    """R17-7 (D-664): the slashes and ``.``/``..`` are spelling; the directory is not."""
     expected = Path("D:/data/models/run-1/Q5_K_M.gguf")
     assert same_model_file("D:\\data\\models\\run-1\\Q5_K_M.gguf", expected)
-    assert same_model_file("/other/place/Q5_K_M.gguf", expected)
+    assert same_model_file("D:/data/models/./run-1/../run-1/Q5_K_M.gguf", expected)
+    assert same_model_file("\\\\?\\D:\\data\\models\\run-1\\Q5_K_M.gguf", expected)
+    # the pin of the first version said that this one is "the same model" (it compared the name)
+    assert not same_model_file("/other/place/Q5_K_M.gguf", expected)
+    assert not same_model_file("D:/data/models/run-2/Q5_K_M.gguf", expected)
     assert not same_model_file("/other/place/Q4_K_M.gguf", expected)
     assert not same_model_file(None, expected) and not same_model_file("", expected)
+    assert not same_model_file("run-1/Q5_K_M.gguf", expected)  # a relative path is not ours
+
+
+def test_a_same_named_file_in_another_run_directory_is_not_the_same_model(tmp_path: Path) -> None:
+    """R17-7 (D-664): a retrain of the same profile and quant has the same file name.
+
+    ``models/<run>/gguf/<profile>-<quant>.gguf``: the old comparison by name took the model of
+    the earlier run for the one that was asked for, and a pair evaluated "the new model" with the
+    answers of the old one.
+    """
+    first = make_model_file(tmp_path / "models" / "run-1" / "gguf", "5090-8b-Q5_K_M.gguf")
+    second = make_model_file(tmp_path / "models" / "run-2" / "gguf", "5090-8b-Q5_K_M.gguf")
+    assert first.read_bytes() == second.read_bytes()  # even the same bytes: another file
+    assert not same_model_file(str(first), second)
+    assert not same_model_file(str(second), first)
+    assert same_model_file(str(first), first) and same_model_file(str(second), second)
+
+
+def test_the_same_file_under_another_name_on_disk_is_the_same_model(tmp_path: Path) -> None:
+    """R17-7 (D-664): two names of one file (a hard link) are one model: ``samefile`` decides."""
+    model = make_model_file(tmp_path / "models", "model-Q5_K_M.gguf")
+    alias = tmp_path / "alias" / "other-name.gguf"
+    alias.parent.mkdir()
+    os.link(model, alias)
+    assert same_model_file(str(alias), model) and same_model_file(str(model), alias)
+    detour = tmp_path / "models" / ".." / "models" / "model-Q5_K_M.gguf"
+    assert same_model_file(str(detour), model)
+
+
+def test_the_case_of_a_path_matters_only_where_the_file_system_ignores_it() -> None:
+    """R17-7 (D-664): Windows paths are compared without case, POSIX paths with it."""
+    expected = Path("/data/models/Run-1/Q5_K_M.gguf")
+    reported = "/DATA/Models/run-1/q5_k_m.gguf"
+    assert same_model_file(reported, expected, platform="win32")
+    assert not same_model_file(reported, expected, platform="linux")
+    assert not same_model_file("/data/models/run-2/q5_k_m.gguf", expected, platform="win32")
+
+
+@pytest.mark.windows
+def test_on_windows_a_path_in_another_case_is_the_same_model(tmp_path: Path) -> None:
+    model = make_model_file(tmp_path / "Models" / "Run-1", "Model-Q5_K_M.gguf")
+    shouted = str(model).upper().replace("\\", "/")
+    assert same_model_file(shouted, model)
+    other = make_model_file(tmp_path / "Models" / "Run-2", "Model-Q5_K_M.gguf")
+    assert not same_model_file(shouted, other)
 
 
 async def test_the_model_path_of_a_server_is_read_from_props(tmp_path: Path) -> None:

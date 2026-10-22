@@ -18,7 +18,9 @@
 
 A server that is already listening on the port is **adopted** when it serves the very model file
 (a ``twin model serve`` in another window) and refused when it serves something else or is not a
-llama-server: the port is never taken over and never shared.
+llama-server: the port is never taken over and never shared.  "The very file" is the whole path
+(:func:`same_model_file`), not the file name: a retrained model of the same profile and quant is
+called the same and lies in another run directory (R17-7, D-664).
 
 The manager only ever starts a program on this computer, on ``127.0.0.1``; the address check is in
 :class:`~twin.serving.llamacpp.ServerSpec`.
@@ -28,13 +30,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
+import posixpath
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import IO, Final
 
 import httpx
@@ -136,11 +140,45 @@ async def served_model_path(endpoint: str) -> str | None:
     return path if isinstance(path, str) else None
 
 
-def same_model_file(reported: str | None, expected: Path) -> bool:
-    """Whether the path a server reports is the model file (compared by file name)."""
+def _normalised(path: str, platform: str) -> str:
+    """A path as one comparable string: forward slashes, no ``.``/``..``, no long-path prefix.
+
+    On Windows the case is dropped too (the file system ignores it); elsewhere it is kept.
+    """
+    text = path.replace("\\", "/")
+    if text.startswith("//?/"):
+        text = text[4:]
+    text = posixpath.normpath(text)
+    return text.casefold() if platform == "win32" else text
+
+
+def _is_absolute(path: str) -> bool:
+    """Absolute in either spelling: a Windows path reported to a POSIX test is still absolute."""
+    return PurePosixPath(path).is_absolute() or PureWindowsPath(path).is_absolute()
+
+
+def same_model_file(reported: str | None, expected: Path, *, platform: str | None = None) -> bool:
+    """Whether the path a server reports is the model file (the **whole** path, R17-7, D-664).
+
+    The two paths are the same when they are one string once the spelling is gone (slashes,
+    ``.``/``..``, the case on Windows) or, when both name a file that exists here, when they are
+    one file on the disk (a link, a short name).  Never by the file name alone: the models of two
+    training runs of the same profile and quant have the same name in different directories, and
+    a server of the earlier run is not the server of the later one.  A relative path reported by
+    another process cannot be placed (its working directory is not ours): it is not the file.
+    """
     if not reported:
         return False
-    return Path(reported.replace("\\", "/")).name == expected.name
+    chosen = sys.platform if platform is None else platform
+    wanted = str(expected)
+    if _normalised(reported, chosen) == _normalised(wanted, chosen):
+        return True
+    if not _is_absolute(reported):
+        return False
+    try:
+        return os.path.samefile(reported, expected)
+    except (OSError, ValueError):  # one of them is not here: the strings decided
+        return False
 
 
 def _creation_flags(platform: str) -> int:
@@ -345,7 +383,7 @@ class LlamaServerManager:
         if not same_model_file(reported, self._spec.model):
             raise ServeError(
                 f"port {self._spec.port} is used by a llama-server that serves another model "
-                f"({Path(reported.replace(chr(92), '/')).name}); stop it first"
+                f"({reported}, not {self._spec.model}); stop it first"
             )
         return True
 

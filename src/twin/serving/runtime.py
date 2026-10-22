@@ -67,8 +67,13 @@ SHA_BLOCK: Final = 1 << 20
 
 
 def model_path(services: Services, model: ModelView) -> Path:
-    """Where the file of a registered model is."""
-    return resolve_model_path(services.paths.models_dir, model)
+    """Where the file of a registered model is: an absolute path, symlinks and ``..`` resolved.
+
+    The path goes to ``llama-server -m`` and is what a running server reports in ``/props``; the
+    comparison of the two (:func:`~twin.serving.server.same_model_file`) is by the whole path
+    (R17-7, D-664), so it must not depend on how the data directory happens to be spelled.
+    """
+    return resolve_model_path(services.paths.models_dir, model).resolve()
 
 
 def verify_model_file(model: ModelView, path: Path, *, full: bool = True) -> None:
