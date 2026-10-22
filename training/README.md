@@ -65,6 +65,9 @@ the same source:
   messages for SFT.  A ranking dataset (`ranking: true`) has an odd number of messages and the
   `chosen` / `rejected` replies as `{"from": "gpt", "value": ...}` objects.
 * `flash_attn` accepts `auto | disabled | sdpa | fa2 | fa3`; the configs use `sdpa`.
+* `max_samples` keeps the *first* N rows (`data/loader.py`: `dataset.select(range(max_samples))`); the trial step of
+  `setup.sh verify` therefore trains on `trial_data/sft_trial.jsonl`, the 64 longest training samples
+  (`tools/make_trial_dataset.py`), because memory is decided by length (R17, D-633).
 * `stage: dpo` defaults: `pref_beta: 0.1`, `pref_loss: sigmoid`; the official example uses a
   learning rate of 5e-6.  With a LoRA adapter the reference model is the same model with the adapter
   switched off.  `adapter_name_or_path` + `do_train` continues that adapter.

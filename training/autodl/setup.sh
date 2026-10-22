@@ -130,19 +130,33 @@ run_parity_check() {
 }
 
 # One training step with the configured batch layout; on a CUDA out-of-memory failure the
-# per-device batch is halved (and the accumulation doubled) until the step runs.
+# per-device batch is halved (and the accumulation doubled) until the step runs.  The step
+# trains on the LONGEST samples of the training set (tools/make_trial_dataset.py): memory is
+# decided by length, and LLaMA-Factory's max_samples would take the first, i.e. earliest, rows.
+# The copy of those samples is removed when the script ends, however it ends.
+TRIAL_SAMPLES=64
+
 run_trial_step() {
     local config="${TWIN_HOME}/config/sft.yaml" trial="${TWIN_HOME}/config/trial.yaml"
     local batch accum next trial_log="${TWIN_HOME}/logs/trial.log"
+    local trial_data="${TWIN_HOME}/trial_data"
     batch="$(yaml_get "${config}" per_device_train_batch_size)"
     accum="$(yaml_get "${config}" gradient_accumulation_steps)"
+    trap 'rm -rf "${TWIN_HOME}/trial_data"' EXIT
+    "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/make_trial_dataset.py" \
+        --data-dir "${TWIN_HOME}/data" --dataset "$(yaml_get "${config}" dataset)" \
+        --out-dir "${trial_data}" --count "${TRIAL_SAMPLES}" ||
+        die "the data of the trial step could not be prepared"
     while true; do
         cp "${config}" "${trial}"
         yaml_set "${trial}" per_device_train_batch_size "${batch}"
         yaml_set "${trial}" gradient_accumulation_steps "${accum}"
         yaml_set "${trial}" per_device_eval_batch_size "${batch}"
         yaml_set "${trial}" max_steps 1
-        yaml_set "${trial}" max_samples 64
+        yaml_set "${trial}" dataset twin_sft_trial
+        yaml_set "${trial}" dataset_dir "${trial_data}"
+        yaml_drop "${trial}" eval_dataset
+        yaml_drop "${trial}" max_samples
         yaml_set "${trial}" output_dir "${TWIN_HOME}/output/trial"
         yaml_set "${trial}" eval_strategy '"no"'
         yaml_set "${trial}" save_strategy '"no"'
@@ -167,7 +181,7 @@ run_trial_step() {
         yaml_set "${config}" "${key}" "${batch}"
     done
     yaml_set "${config}" gradient_accumulation_steps "${accum}"
-    rm -rf "${TWIN_HOME}/output/trial" "${trial}"
+    rm -rf "${TWIN_HOME}/output/trial" "${trial}" "${trial_data}"
     log "trial step succeeded; training will use batch ${batch} with accumulation ${accum}"
 }
 

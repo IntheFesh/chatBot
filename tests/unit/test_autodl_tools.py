@@ -48,6 +48,7 @@ check_remote_job = load_script("check_remote_job")
 remote_job = load_tool("remote_job")
 summarize_train = load_tool("summarize_train")
 make_eval = load_tool("make_eval_generations")
+make_trial = load_tool("make_trial_dataset")
 artifact_manifest = load_tool("artifact_manifest")
 verify_manifest = load_tool("verify_manifest")
 
@@ -372,6 +373,110 @@ def test_the_check_needs_the_minimum_to_be_written_down(tmp_path: Path) -> None:
     versions.write_text("TWIN_TORCH=2.9.1\n", encoding="utf-8")
     done = run_check(sys.executable, tmp_path)
     assert done.returncode == 1 and "TWIN_PYTHON_MIN" in done.stderr
+
+
+# ----------------------------------------------------------------- make_trial_dataset
+
+
+def sharegpt_row(name: str, system: str, *turns: str) -> dict[str, object]:
+    roles = ("human", "gpt")
+    return {
+        "id": name,
+        "system": system,
+        "conversations": [{"from": roles[i % 2], "value": text} for i, text in enumerate(turns)],
+    }
+
+
+def write_trial_source(directory: Path, rows: list[dict[str, object]]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    (directory / "sft_train.jsonl").write_text(text, encoding="utf-8")
+    info = {
+        "twin_sft_train": {
+            "file_name": "sft_train.jsonl",
+            "formatting": "sharegpt",
+            "columns": {"messages": "conversations", "system": "system"},
+            "tags": {"role_tag": "from", "content_tag": "value", "user_tag": "human"},
+        },
+        "twin_sft_val": {"file_name": "sft_val.jsonl", "formatting": "sharegpt"},
+    }
+    (directory / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")
+
+
+def test_the_trial_dataset_holds_the_longest_samples_unchanged(tmp_path: Path) -> None:
+    """R17-49c (D-633): longest first, rows copied as they are, the train entry reused."""
+    rows = [
+        sharegpt_row("a", "sys", "x" * 5, "y" * 5),  # 13
+        sharegpt_row("b", "sys", "x" * 50),  # 53
+        sharegpt_row("c", "", "x" * 20, "y" * 20, "z" * 20),  # 60
+        sharegpt_row("d", "sys", "x" * 8),  # 11
+        sharegpt_row("e", "s" * 30, "x" * 30),  # 60: ties with c, the earlier row goes first
+    ]
+    write_trial_source(tmp_path / "data", rows)
+    out = tmp_path / "trial"
+    arguments = ["--data-dir", str(tmp_path / "data"), "--dataset", "twin_sft_train"]
+    code = make_trial.main([*arguments, "--out-dir", str(out), "--count", "3"])
+    assert code == 0
+    written = (out / "sft_trial.jsonl").read_text("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in written] == ["c", "e", "b"]
+    source = (tmp_path / "data" / "sft_train.jsonl").read_text("utf-8").splitlines()
+    assert set(written) <= set(source)  # byte for byte what the exporter wrote
+    info = json.loads((out / "dataset_info.json").read_text("utf-8"))
+    assert list(info) == ["twin_sft_trial"]
+    expected = json.loads((tmp_path / "data" / "dataset_info.json").read_text("utf-8"))
+    assert info["twin_sft_trial"] == {**expected["twin_sft_train"], "file_name": "sft_trial.jsonl"}
+
+
+def test_a_training_set_with_fewer_samples_than_the_count_is_taken_whole(tmp_path: Path) -> None:
+    rows = [sharegpt_row(f"r{i}", "s", "x" * (i + 1)) for i in range(5)]
+    write_trial_source(tmp_path / "data", rows)
+    selected, total, shortest, longest = make_trial.build(
+        tmp_path / "data", "twin_sft_train", tmp_path / "trial", 64
+    )
+    assert (selected, total, shortest, longest) == (5, 5, 2, 6)
+
+
+@given(
+    lengths=st.lists(st.integers(min_value=0, max_value=200), min_size=1, max_size=40),
+    count=st.integers(min_value=0, max_value=50),
+)
+def test_the_selection_never_leaves_out_a_longer_sample_than_it_takes(
+    lengths: list[int], count: int
+) -> None:
+    """R17-49c (D-633): whatever the lengths, what is taken is at least as long as what is not."""
+    lines = [json.dumps(sharegpt_row(str(i), "", "x" * n)) for i, n in enumerate(lengths)]
+    chosen = make_trial.select_longest(lines, count)
+    assert len(chosen) == min(count, len(lines))
+    taken = {line for _, line in chosen}
+    assert len(taken) == len(chosen)
+    assert [length for length, _ in chosen] == sorted(
+        (length for length, _ in chosen), reverse=True
+    )
+    left = [n for line, n in zip(lines, lengths, strict=True) if line not in taken]
+    if chosen and left:
+        assert min(length for length, _ in chosen) >= max(left)
+
+
+def test_the_trial_dataset_refuses_data_it_cannot_use_and_never_prints_a_sample(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "a sentence of hers"
+    bad = tmp_path / "bad"
+    write_trial_source(bad, [{"id": "x", "system": secret, "conversations": [{"from": "human"}]}])
+    arguments = ["--dataset", "twin_sft_train", "--out-dir", str(tmp_path / "out")]
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert "line 1" in capsys.readouterr().err
+    (bad / "sft_train.jsonl").write_text(secret + "\n", encoding="utf-8")  # not JSON at all
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert secret not in capsys.readouterr().err
+    empty = tmp_path / "empty"
+    write_trial_source(empty, [])
+    assert make_trial.main(["--data-dir", str(empty), *arguments]) == 1
+    assert "no samples" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(empty), "--dataset", "nope", "--out-dir", "x"]) == 1
+    assert "no dataset 'nope'" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(tmp_path / "missing"), *arguments]) == 1
+    assert not (tmp_path / "out").exists()  # nothing is written when nothing was chosen
 
 
 # ------------------------------------------------------------------------- the others

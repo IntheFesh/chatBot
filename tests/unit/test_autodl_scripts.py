@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -32,6 +33,7 @@ from tests.support.autodl_scripts import (
     run_script,
     script_env,
     write_distribution,
+    yaml_value,
 )
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
@@ -501,6 +503,52 @@ def test_the_trial_step_gives_up_when_a_batch_of_one_does_not_fit(tmp_path: Path
     done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
     assert done.returncode == 1 and "even with a batch of 1" in done.stderr
     assert [call["batch"] for call in cli_calls(log)] == [2, 1]
+    assert not (workdir / "trial_data").exists()  # no copy of her messages is left behind
+
+
+def sample_length(row: dict[str, Any]) -> int:
+    return len(row["system"]) + sum(len(turn["value"]) for turn in row["conversations"])
+
+
+@posix_only
+def test_the_trial_step_trains_on_the_longest_samples_not_the_earliest(tmp_path: Path) -> None:
+    """R17-49c (D-633): the trial decides the batch size, and memory is decided by length.
+
+    ``max_samples: 64`` makes LLaMA-Factory take the first 64 rows of the file - the earliest
+    messages, whatever their length - so a batch that only fits short samples passed the trial and
+    ran out of memory hours into the training.
+    """
+    workdir = prepared_workdir(tmp_path, "5090-8b", train=100)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 0, done.stderr + done.stdout
+    trial = cli_calls(log)[0]
+    assert trial["config"] == "trial.yaml" and trial["batch"] is not None
+    train_lines = (workdir / "data" / "sft_train.jsonl").read_text("utf-8").splitlines()
+    lengths = {row["id"]: sample_length(row) for row in map(json.loads, train_lines)}
+    taken = trial["samples"]
+    assert len(taken) == 64 and len(set(taken)) == 64 and set(taken) <= set(lengths)
+    left = [name for name in lengths if name not in set(taken)]
+    assert min(lengths[name] for name in taken) >= max(lengths[name] for name in left)
+    assert trial["max_samples"] is None and trial["eval_dataset"] is None
+    assert trial["dataset"] == "twin_sft_trial" and trial["dataset_dir"] != str(workdir / "data")
+    # the real training set is what the layout of the batch is written back to, untouched
+    assert yaml_value(workdir / "config" / "sft.yaml", "dataset") == "twin_sft_train"
+    assert (
+        not (workdir / "trial_data").exists() and not (workdir / "config" / "trial.yaml").exists()
+    )
+
+
+@posix_only
+def test_a_training_set_smaller_than_the_trial_is_used_whole(tmp_path: Path) -> None:
+    """R17-49c (D-633): 40 samples are all 40 samples (the default synthetic set)."""
+    workdir = prepared_workdir(tmp_path, "5090-8b")
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 0, done.stderr
+    assert len(cli_calls(log)[0]["samples"]) == 40
 
 
 @posix_only
@@ -813,6 +861,7 @@ def populate_for_cleanup(workdir: Path, tmp_path: Path) -> None:
         "output/sft/checkpoint-4/optimizer.pt",
         ".unpack/data/x",
         "gguf/model-F16.gguf",
+        "trial_data/sft_trial.jsonl",
         "artifacts/gguf/m.gguf",
         "artifacts/manifest.json",
     ):
@@ -851,6 +900,7 @@ def test_cleanup_erases_the_data_and_keeps_the_artifacts_until_asked(tmp_path: P
         "config",
         "pylib",
         "gguf",
+        "trial_data",
     ):
         assert not (workdir / gone).exists(), gone
     assert not (tmp_path / "disk" / "cache" / "huggingface" / "datasets").exists()

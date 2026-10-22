@@ -195,10 +195,39 @@ import yaml
 LOG = Path(sys.argv[0]).with_name("cli_calls.log")
 mode, config_path = sys.argv[1], Path(sys.argv[2])
 config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+
+def rows_of(name):
+    """The rows of a dataset as LLaMA-Factory finds them: dataset_dir/dataset_info.json."""
+    directory = Path(config["dataset_dir"])
+    info = json.loads((directory / "dataset_info.json").read_text(encoding="utf-8"))
+    if name not in info:
+        sys.stderr.write(f"ValueError: Undefined dataset {name} in dataset_info.json.\n")
+        sys.exit(1)
+    lines = (directory / info[name]["file_name"]).read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+samples = None
+if config.get("dataset_dir"):
+    if config.get("dataset"):
+        rows = rows_of(config["dataset"])
+        if config.get("max_samples"):  # dataset.select(range(max_samples)): the first rows
+            rows = rows[: int(config["max_samples"])]
+        samples = [row.get("id") for row in rows]
+    if config.get("eval_dataset"):
+        rows_of(config["eval_dataset"])
 with LOG.open("a", encoding="utf-8") as log:
     log.write(json.dumps({"mode": mode, "config": config_path.name,
                           "batch": config.get("per_device_train_batch_size"),
-                          "adapter": config.get("adapter_name_or_path")}) + "\n")
+                          "adapter": config.get("adapter_name_or_path"),
+                          "dataset": config.get("dataset"),
+                          "dataset_dir": config.get("dataset_dir"),
+                          "eval_dataset": config.get("eval_dataset"),
+                          "max_samples": config.get("max_samples"),
+                          "export_device": config.get("export_device"),
+                          "quantization_bit": config.get("quantization_bit"),
+                          "samples": samples}) + "\n")
 if config.get("predict_with_generate"):
     # LLaMA-Factory 0.9.5 (hparams/parser.py): these three are mandatory to generate replies
     installed_file = Path(sys.argv[0]).with_name("installed.txt")
@@ -339,7 +368,12 @@ def cli_calls(log: Path) -> list[dict[str, Any]]:
 
 
 def prepared_workdir(
-    tmp_path: Path, profile: str = "5090-8b", *, pairs: int = 3, dpo_min_pairs: int = 200
+    tmp_path: Path,
+    profile: str = "5090-8b",
+    *,
+    pairs: int = 3,
+    dpo_min_pairs: int = 200,
+    train: int = 40,
 ) -> Path:
     """A work directory as it is after upload, setup and decrypt (data and config in place)."""
     from datetime import UTC, datetime
@@ -349,7 +383,7 @@ def prepared_workdir(
 
     workdir = tmp_path / "twin"
     install_scripts(workdir, profile, dpo_min_pairs=dpo_min_pairs)
-    dataset = write_synthetic_dataset(tmp_path / "ds", pairs=pairs)
+    dataset = write_synthetic_dataset(tmp_path / "ds", train=train, pairs=pairs)
     layout_dir = str(workdir)
 
     result = bundle.build_bundle(
