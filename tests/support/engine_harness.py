@@ -19,9 +19,10 @@ import random
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 from tests.support.clock import DEFAULT_START, ManualClock
 from tests.support.reply_view import StaticDataView, make_profile
@@ -329,6 +330,36 @@ class FixedDay:
         return self.her_state(moment)
 
 
+class ZonedDay:
+    """Her day by the clock of a time zone: deep sleep from 00:00 to ``wake_at``, free otherwise.
+
+    The zone is what ``/时区`` switches: ``day.zone = "Asia/Shanghai"`` moves her whole day at
+    once, as the real plan does after a switch (the engine hears of it as of any changed setting,
+    ``engine.on_state_change``).  At 16:00 UTC it is 11:00 in Chicago and midnight in Shanghai.
+    """
+
+    def __init__(self, zone: str, *, wake_at: time = time(7, 0)) -> None:
+        self.zone = zone
+        self.wake_at = wake_at
+        self.busy = None
+        self.unavailable = False
+
+    def her_state(self, at: datetime | None = None) -> HerState:
+        if self.unavailable or at is None:
+            raise PlanUnavailableError("no plan")
+        zone = ZoneInfo(self.zone)
+        local = at.astimezone(zone)
+        midnight = datetime.combine(local.date(), time(0, 0), tzinfo=zone)
+        up = datetime.combine(local.date(), self.wake_at, tzinfo=zone)
+        if local < up:
+            return HerState("deep_sleep", midnight.astimezone(UTC), up.astimezone(UTC), "plan1")
+        tomorrow = datetime.combine(local.date() + timedelta(days=1), time(0, 0), tzinfo=zone)
+        return HerState("free", up.astimezone(UTC), tomorrow.astimezone(UTC), "plan1")
+
+    def state_at(self, moment: datetime) -> HerState:
+        return self.her_state(moment)
+
+
 class ClockData:
     """A data source whose view follows the clock (the static view of the pipeline tests)."""
 
@@ -413,7 +444,7 @@ class Harness:
     engine: ConversationEngine
     channel: ScriptedChannel
     writer: ScriptedWriter
-    day: FixedDay
+    day: FixedDay | ZonedDay
     clock: ManualClock
     services: Services
     crisis: ScriptedCrisis
@@ -437,7 +468,7 @@ def build_harness(
     *,
     writer: ScriptedWriter | None = None,
     channel: ScriptedChannel | None = None,
-    day: FixedDay | None = None,
+    day: FixedDay | ZonedDay | None = None,
     pacing: PacingModel | None = None,
     crisis: ScriptedCrisis | None = None,
     commands: Any = None,

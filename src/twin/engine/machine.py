@@ -28,7 +28,9 @@ States
                 on disk.  A message that comes meanwhile joins the round; after 80 % of the wait a
                 short extra pause is added, before that the drawn time stands.  The pause setting
                 (``engine.paused_until``) holds the round back; after it she has "just seen" the
-                messages.
+                messages.  Her state is looked at again on every pass and before the generation
+                starts: a plan that changed under the queued reply (a time-zone switch) and put the
+                reply into her deep sleep makes it wait for her waking (D-722).
 ``GENERATING``  :class:`~twin.engine.pipeline.ReplyPipeline` writes the reply as an
                 ``asyncio`` task.  A message of the user cancels it (what was paid for stays in the
                 cost ledger, the cancellation is noted in the reply's actions) and the round goes
@@ -300,6 +302,7 @@ class ConversationEngine:
         )
         self._failures = 0
         self._gave_up_round: str | None = None  # the round that got the word of ``_give_up_round``
+        self._rejudged_for: datetime | None = None  # the planned time ``_rejudge`` last moved
         self._waiting_until: datetime | None = None
         self._driver: asyncio.Task[None] | None = None
         self._extractor: asyncio.Task[None] | None = None
@@ -859,6 +862,8 @@ class ConversationEngine:
         if decision.paused_until != pause:
             await self._decide(snap)  # the pause was set, changed or lifted
             return
+        if await self._rejudge(snap, decision, planned):
+            return
         if len(snap.pending) > data.decided_for:
             await self._merge(snap, data, decision, planned)
             return
@@ -906,7 +911,38 @@ class ConversationEngine:
 
         await self._apply(build)
 
+    async def _rejudge(
+        self, snap: ConversationSnapshot, decision: Decision, planned: datetime
+    ) -> bool:
+        """A reply that is due while she sleeps, by today's plan, waits for her waking (D-722).
+
+        The decision was made for the plan of that moment; the plan may have changed since (the
+        time zone was switched, ``/作息``, a new plan) and now put the reply into her deep sleep.
+        Then it is decided anew - queued to her waking plus the jitter (D-233 ①, R-ENG-003).
+        Only a decision that is not such a queue is looked at, and only deep sleep counts: the
+        dice of the edge of her sleep were thrown when the time was drawn and are not thrown
+        again.  Asked on every pass of DECIDING (the switch wakes the driver) and again before
+        the generation starts.  ``True``: the round was decided anew, the driver looks again.
+        """
+        if decision.woke_up or planned == self._rejudged_for:
+            return False  # a queue to her waking already, or this time was moved once already
+        moment = max(planned, self._clock.now_utc())
+        state = await asyncio.to_thread(self._decider.her_state, moment)
+        if state is None or state.kind != "deep_sleep":
+            return False
+        self._rejudged_for = planned
+        log.info("reply_decided_again_asleep", mode=decision.mode, her_state=state.kind)
+        await self._decide(snap)
+        return True
+
     async def _start_generating(self, snap: ConversationSnapshot) -> None:
+        decision = RoundData.of(snap).decision
+        if (
+            decision is not None
+            and snap.planned_send_at is not None
+            and await self._rejudge(snap, decision, snap.planned_send_at)
+        ):
+            return  # the plan changed since the pass of DECIDING: she sleeps when the reply is due
         pause = await self._active_pause()
         if pause is not None:  # paused after the time was drawn
             await self._edit(lambda d: replace(d, decision=None), planned_send_at=None)
