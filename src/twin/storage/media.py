@@ -443,13 +443,17 @@ class MediaStore:
         finally:
             _wipe(path, len(data))
 
-    def sweep_dir(self, directory: Path) -> int:
+    def sweep_dir(
+        self, directory: Path, on_error: Callable[[Path, OSError], None] | None = None
+    ) -> int:
         """Wipe and remove the files a crash left in ``directory``; returns how many.
 
         Only regular files directly inside it are touched (no subdirectory, no link), and never
         the directories the store itself uses (``root`` and ``tmp_dir``, which other parts of
         the program share): the directory must be one of its own, such as the one a viewer's
-        copies are made in.  A directory that is not there has nothing to sweep.
+        copies are made in.  A directory that is not there has nothing to sweep.  A file that
+        cannot be removed (on Windows, one a viewer still holds open) is reported to ``on_error``
+        and left for the next sweep; it does not stop the others.
         """
         if _same_place(directory, self.root) or _same_place(directory, self.tmp_dir):
             raise ValueError("the shared media directories are not swept")
@@ -459,7 +463,12 @@ class MediaStore:
         for entry in sorted(directory.iterdir()):
             if entry.is_symlink() or not entry.is_file():
                 continue
-            _wipe(entry, entry.stat().st_size)
+            try:
+                _wipe(entry, entry.stat().st_size)
+            except OSError as exc:
+                if on_error is not None:
+                    on_error(entry, exc)
+                continue
             swept += 1
         return swept
 

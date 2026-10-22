@@ -966,3 +966,32 @@ async def test_a_stopped_channel_can_be_started_and_show_the_same_picture_again(
     finally:
         await built.channel.stop()
     assert list(built.shown.iterdir()) == []
+
+
+async def test_a_copy_that_cannot_be_removed_does_not_stop_the_channel_and_is_swept_next_time(
+    db: Database, clock: ManualClock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from twin.storage import media
+
+    real = media._wipe
+
+    def stuck(path: Path, size: int) -> None:
+        raise PermissionError("a viewer holds it open")
+
+    built = build(db, clock, tmp_path)
+    built.input.feed("hi")
+    await built.channel.start()
+    try:
+        await built.receive()
+        await built.channel.send_image(STICKER, "image/gif")
+        monkeypatch.setattr(media, "_wipe", stuck)
+    finally:
+        await built.channel.stop()  # must come back, whatever the viewer holds
+    leftover = list(built.shown.iterdir())
+    assert len(leftover) == 1  # still there: the wipe failed
+    monkeypatch.setattr(media, "_wipe", real)
+    await built.channel.start()
+    try:
+        assert list(built.shown.iterdir()) == []  # the next start swept it
+    finally:
+        await built.channel.stop()

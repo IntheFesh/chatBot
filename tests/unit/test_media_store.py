@@ -392,3 +392,32 @@ def test_a_sweep_never_goes_into_the_shared_directories(store: MediaStore) -> No
         with pytest.raises(ValueError, match="shared"):
             store.sweep_dir(forbidden)
     assert keep.exists()
+
+
+def test_a_sweep_goes_on_past_a_file_it_cannot_remove_and_says_which(
+    store: MediaStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On Windows a viewer may hold a copy open; that must not stop the others being swept."""
+    from twin.storage import media
+
+    shown = tmp_path / "tmp" / "console-out"
+    shown.mkdir(parents=True)
+    names = ["a.png", "b.png", "c.png"]
+    for name in names:
+        (shown / name).write_bytes(b"x" * 30)
+    real = media._wipe
+
+    def stuck(path: Path, size: int) -> None:
+        if path.name == "b.png":
+            raise PermissionError("in use by another process")
+        real(path, size)
+
+    monkeypatch.setattr(media, "_wipe", stuck)
+    problems: list[tuple[str, str]] = []
+    swept = store.sweep_dir(
+        shown, lambda path, exc: problems.append((path.name, type(exc).__name__))
+    )
+    assert swept == 2 and problems == [("b.png", "PermissionError")]
+    assert sorted(p.name for p in shown.iterdir()) == ["b.png"]  # the one left for the next sweep
+    monkeypatch.setattr(media, "_wipe", real)
+    assert store.sweep_dir(shown) == 1 and list(shown.iterdir()) == []

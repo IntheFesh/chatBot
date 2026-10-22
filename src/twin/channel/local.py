@@ -230,7 +230,7 @@ class LocalConsoleChannel(Channel):
     async def start(self) -> None:
         if self._reader is None:
             # what an earlier session that crashed left in the directory of the copies
-            await asyncio.to_thread(self._media.sweep_dir, self._shown_dir)
+            await asyncio.to_thread(self._media.sweep_dir, self._shown_dir, self._not_swept)
             self._ended = False
             self._reader = asyncio.create_task(self._read_loop(), name="local-console-reader")
 
@@ -243,10 +243,21 @@ class LocalConsoleChannel(Channel):
         await asyncio.to_thread(self._wipe_copies)
 
     def _wipe_copies(self) -> None:
-        """Overwrite and delete every copy that was shown (their paths are no good afterwards)."""
+        """Overwrite and delete every copy that was shown (their paths are no good afterwards).
+
+        A copy that cannot be removed (on Windows, one a viewer still holds open) does not stop
+        the shutdown; the next start sweeps it.
+        """
         copies, self._copies = self._copies, contextlib.ExitStack()
         self._shown.clear()
-        copies.close()
+        try:
+            copies.close()
+        except OSError as exc:
+            self._not_swept(self._shown_dir, exc)
+
+    @staticmethod
+    def _not_swept(path: Path, exc: OSError) -> None:
+        log.warning("console_copy_not_removed", reason=type(exc).__name__, name=path.name)
 
     def _finish_input(self) -> None:
         if not self._ended:
