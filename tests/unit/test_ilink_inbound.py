@@ -564,6 +564,14 @@ async def test_the_degraded_form_numbers_several_items_like_the_normal_one(h: Ha
     assert [text for _, text in quotable] == ["一"]
 
 
+async def test_a_text_item_without_words_has_no_degraded_message_either(h: Harness) -> None:
+    """R17-47 (D-682): like ``convert``, an empty text item is not a message."""
+    wire = WireMessage.model_validate(
+        message(text_item(""), {"type": 1}, mid=6, created_ms=now_ms(h.clock))
+    )
+    assert h.channel._poller._converter.degraded(wire, "6").messages == []
+
+
 async def test_a_failing_degraded_conversion_still_delivers_an_unknown_message(
     api: respx.MockRouter, h: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:

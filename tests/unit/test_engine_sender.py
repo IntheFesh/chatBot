@@ -13,6 +13,7 @@ from tests.support.clock import ManualClock
 from tests.support.engine_extras import PICTURES, add_sticker
 from tests.support.engine_harness import Alerts, Out, ScriptedChannel, reference_pacing
 from twin.channel.base import (
+    PROBE_RUNNING,
     AuthState,
     CapabilityNotSupported,
     MediaNotAllowed,
@@ -217,6 +218,25 @@ async def test_a_refused_window_or_login_ends_the_reply(rig: Rig, kind: Outbound
         "channel_session_expired"
     ]
     assert len(rig.channel.results) == 0 and report.sent == []
+
+
+async def test_a_channel_that_holds_its_sends_for_a_probe_ends_the_reply_without_an_alert(
+    rig: Rig,
+) -> None:
+    """R17-4 (D-684): the platform said nothing, so no "session over" alert and no ``expired``."""
+    rig.channel.results.append(OutboundResult.failure(OutboundKind.WINDOW_REJECTED, PROBE_RUNNING))
+    report = await rig.send(text("一"), text("二"))
+    assert report.stop is StopReason.PROBE and rig.alerts.categories == []
+    assert report.sent == [] and [b.text for b in report.rest] == ["一", "二"]
+
+
+async def test_an_urgent_reply_goes_out_through_the_urgent_method_of_the_channel(rig: Rig) -> None:
+    """R17-4 (D-685): ``urgent=True`` (the crisis answer) is passed on for every text bubble."""
+    report = await rig.send(text("一"), text("二"), urgent=True, paced=False)
+    assert report.stop is None and rig.channel.urgent == ["一", "二"]
+    assert rig.channel.texts == ["一", "二"]
+    plain = await rig.send(text("三"))
+    assert plain.stop is None and rig.channel.urgent == ["一", "二"]  # an ordinary reply is not
 
 
 async def test_a_rejected_text_ends_the_reply_but_a_rejected_sticker_is_skipped(

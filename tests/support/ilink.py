@@ -260,6 +260,7 @@ def make_harness(
     poll: bool = True,
     jitter: Callable[[], float] = lambda: 1.0,
     client: httpx.AsyncClient | None = None,
+    session_expired_codes: Sequence[int] | None = None,
 ) -> Harness:
     media = MediaStore(tmp_path / "media", tmp_path / "tmp")
     banner = RecordingBanner()
@@ -275,6 +276,11 @@ def make_harness(
         jitter=jitter,
         poll=poll,
         http_client=client,
+        **(
+            {}
+            if session_expired_codes is None
+            else {"session_expired_codes": session_expired_codes}
+        ),
     )
     return Harness(
         channel=channel,

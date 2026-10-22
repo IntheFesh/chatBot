@@ -204,6 +204,7 @@ class ProactiveScheduler:
         silence_source: Callable[[], EmpiricalDistribution | None],
         budget_allowed: Callable[[], bool],
         rng: random.Random | None = None,
+        probe_active: Callable[[], bool] | None = None,
     ) -> None:
         self._clock = clock
         self._config = config
@@ -222,6 +223,7 @@ class ProactiveScheduler:
         self._model_source = model_source
         self._silence_source = silence_source
         self._budget_allowed = budget_allowed
+        self._probe_active = probe_active
         self._rng = rng or random.Random()  # noqa: S311 - a draw, not security
         self._lock = asyncio.Lock()
         self._epoch = 0
@@ -337,6 +339,7 @@ class ProactiveScheduler:
             min_spacing=timedelta(minutes=config.min_spacing_min),
             max_chase=config.max_chase,
             unanswered_after=timedelta(minutes=config.unanswered_after_min),
+            probe_running=self._probe_active() if self._probe_active is not None else False,
         )
         return Facts(
             now=now,
@@ -944,6 +947,8 @@ def _unsent_reason(outcome: SendOutcome) -> Reason:
         return Reason.QUOTA_EXHAUSTED
     if stop is StopReason.UNBOUND:
         return Reason.CHANNEL_UNAVAILABLE
+    if stop is StopReason.PROBE:
+        return Reason.PROBE_RUNNING
     return Reason.SEND_FAILED
 
 

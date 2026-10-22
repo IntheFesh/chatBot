@@ -46,6 +46,10 @@ probe_app = typer.Typer(
 )
 
 REPORT_NAME = "CHANNEL_REPORT.md"
+PAUSED_LINE = (
+    "bot PAUSED: no replies, no messages of her own and no answers to commands while the probe "
+    "runs (a crisis is still answered; that voids the attempt and the probe asks again)"
+)
 LATER_WORDS = {"q", "quit", "later", "skip"}
 
 
@@ -102,6 +106,8 @@ def status_lines(plan: ProbePlan | None, *, app_running: bool) -> list[str]:
         f"started {plan.created_at:%Y-%m-%d %H:%M:%S} UTC"
         + (f", ended {plan.finished_at:%Y-%m-%d %H:%M:%S} UTC" if plan.finished_at else ""),
     ]
+    if plan.status is PlanStatus.RUNNING:
+        lines.append(PAUSED_LINE)
     if plan.notice:
         lines.append(f">>> {plan.notice}")
         step = plan.active_step()
@@ -164,6 +170,10 @@ def probe_start(
             "Three measurements, each starting when YOU send the bot a fresh message: how many "
             "messages follow it, pictures/GIF/typing, and how long the bot can still write "
             f"(about {max(options.window_hours):g} hours of silence from you)."
+        )
+        typer.echo(
+            "While it runs the bot is PAUSED: it does not reply to you, does not write first and "
+            "does not answer commands (a crisis is still answered, and that voids the attempt)."
         )
         if not typer.confirm("Start the probe?"):
             raise typer.Exit(1)

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from twin.app import Application, ComponentHealth, TaskSupervisor
 from twin.channel.base import SessionState
+from twin.channel.probe.store import ProbeStore
 from twin.clock import Clock
 from twin.commands.rating import rating_command
 from twin.commands.status import ProactiveStatus
@@ -266,6 +267,7 @@ def build_scheduler(
         silence_source=silence_source or silence,
         budget_allowed=lambda: budget.limits().proactive_allowed,
         rng=rng,
+        probe_active=ProbeStore(services.db, clock).active,  # a running probe holds her back
     )
     scheduler_box.append(scheduler)
     return scheduler

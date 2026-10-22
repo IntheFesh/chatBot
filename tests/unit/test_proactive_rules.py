@@ -96,6 +96,32 @@ def test_switched_off_and_paused() -> None:
     assert reason_of(TriggerKind.MEAL, enabled=False, paused=True) is Reason.DISABLED
 
 
+def test_a_running_probe_holds_every_kind_back_right_after_the_switch_and_the_pause() -> None:
+    """R17-4 (D-684): the probe counts what the platform lets the bot send; nothing else may."""
+    for kind in TriggerKind:
+        state = "sleep_edge" if kind is TriggerKind.EDGE else "free"
+        assert reason_of(kind, state=state, probe_running=True) is Reason.PROBE_RUNNING, kind
+    assert reason_of(TriggerKind.MEAL, probe_running=True, enabled=False) is Reason.DISABLED
+    assert reason_of(TriggerKind.MEAL, probe_running=True, paused=True) is Reason.PAUSED
+    # it comes before everything the day and the platform decide
+    for before in (
+        {"state": None},
+        {"state": "deep_sleep"},
+        {"window": Reason.WINDOW_CLOSED},
+        {"sent_today": 6},
+    ):
+        assert reason_of(TriggerKind.MEAL, probe_running=True, **before) is Reason.PROBE_RUNNING
+    assert reason_of(TriggerKind.MEAL, probe_running=False) is None
+
+
+def test_the_probe_reason_has_a_label_and_counts_as_a_reason_the_schedule_cannot_help() -> None:
+    assert REASON_LABELS[Reason.PROBE_RUNNING] == "通道探针运行中"
+    assert (
+        Reason.PROBE_RUNNING in OUTSIDE_REASONS
+    )  # a day short of its range is excused (R-EVAL-005)
+    assert Reason.PROBE_RUNNING not in WINDOW_REASONS  # but it is not the platform window
+
+
 def test_the_budget_pauses_proactive_messages_and_is_asked_only_when_it_matters() -> None:
     asked: list[int] = []
 

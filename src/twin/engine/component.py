@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 
 from twin.app import Application, ComponentHealth, TaskSupervisor
 from twin.channel.base import Channel
+from twin.channel.probe.store import ProbeStore
 from twin.commands import texts
 from twin.commands.import_report import ImportReportComponent
 from twin.commands.router import CommandRouter
@@ -214,6 +215,7 @@ def build_engine(
         commands=commands,
         backends=styled.selector,
         queue_extraction=queue,
+        probe_active=ProbeStore(services.db, clock).active,  # a running probe holds the engine
     )
     engine.kit = EngineKit(
         llm=llm,

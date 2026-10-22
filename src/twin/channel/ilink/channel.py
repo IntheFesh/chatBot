@@ -14,7 +14,7 @@ with a running application for the poll cursor.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Collection
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,13 +41,15 @@ from twin.channel.ilink.media import CdnClient
 from twin.channel.ilink.outbound import IlinkSender
 from twin.channel.ilink.poller import IlinkPoller, PollOutcome, system_jitter
 from twin.channel.ilink.store import IlinkStore
-from twin.channel.ilink.wire import TEXT_CHUNK_LIMIT
+from twin.channel.ilink.wire import ERR_SEND_REJECTED, TEXT_CHUNK_LIMIT
 from twin.channel.policy import (
     CompositeMediaPolicy,
     OutboundMediaPolicy,
     ProbeImageManifest,
     StickerAllowList,
 )
+from twin.channel.probe.hold import ProbeHold
+from twin.channel.probe.store import ProbeStore
 from twin.channel.probe.summary import load_channel_probe_summary, measured_capabilities
 from twin.channel.state import ChannelStateStore
 from twin.channel.window import SessionWindow
@@ -91,6 +93,7 @@ class IlinkChannel(Channel):
         measured_window_h: float | None = None,
         measured_quota: int | None = None,
         gif_animated: bool | None = None,
+        session_expired_codes: Collection[int] = (ERR_SEND_REJECTED,),
     ) -> None:
         self._db = db
         self._clock = clock
@@ -122,6 +125,8 @@ class IlinkChannel(Channel):
             media_policy=self._media_policy,
             window_h=window_h,
             quota=quota,
+            session_expired_codes=session_expired_codes,
+            probe=ProbeHold(ProbeStore(db, clock)),  # a running probe has the channel to itself
         )
         self._inbox_event = asyncio.Event()
         self._stop_event = asyncio.Event()
@@ -177,6 +182,7 @@ class IlinkChannel(Channel):
             measured_window_h=window_h,
             measured_quota=quota,
             gif_animated=gif,
+            session_expired_codes=config.session_expired_codes,
         )
 
     # ----------------------------------------------------------- lifecycle
@@ -292,6 +298,14 @@ class IlinkChannel(Channel):
         if quote is not None:
             raise CapabilityNotSupported(NOT_SUPPORTED_QUOTE)
         return await self._sender.send_text(text, recipient=recipient, bypass=bypass)
+
+    async def send_urgent_text(
+        self, text: str, quote: QuoteTarget | None = None, *, recipient: str | None = None
+    ) -> OutboundResult:
+        """The crisis answer: not held back by a running probe, which it voids (D-685)."""
+        if quote is not None:
+            raise CapabilityNotSupported(NOT_SUPPORTED_QUOTE)
+        return await self._sender.send_text(text, recipient=recipient, urgent=True)
 
     async def send_image(
         self,

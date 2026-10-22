@@ -12,6 +12,8 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from tests.support.proactive_world import World
+from twin.channel.probe.model import PlanStatus
+from twin.channel.probe.store import ProbeStore
 from twin.config.runtime import (
     ENGINE_PAUSED_UNTIL,
     PAUSED,
@@ -151,6 +153,21 @@ async def test_a_pause_stops_everything(calm: World) -> None:
     calm.user_writes(at=calm.at(20, 0, day=8))
     calm.services.runtime.set(ENGINE_PAUSED_UNTIL, calm.at(18, 0), by="test")
     await refused(calm, TriggerKind.SHARE, calm.at(10, 0), Reason.PAUSED)
+
+
+async def test_a_running_channel_probe_stops_everything_and_the_end_of_it_lets_her_write(
+    calm: World,
+) -> None:
+    """R17-4 (D-684): the probe counts what the platform lets the bot send; she writes nothing."""
+    store = ProbeStore(calm.services.db, calm.clock)
+    calm.user_writes(at=calm.at(20, 0, day=8))
+    store.create()
+    report = await refused(calm, TriggerKind.SHARE, calm.at(10, 0), Reason.PROBE_RUNNING)
+    assert report.reason == "probe_running"
+    assert REASON_LABELS[Reason.PROBE_RUNNING] == "通道探针运行中"
+    store.finish(PlanStatus.STOPPED, "done")
+    again = await calm.tick_at(calm.at(10, 0) + timedelta(minutes=10))
+    assert again.outcome == "sent", again  # the candidate was kept and goes out now
 
 
 async def test_the_pause_switch_stops_everything_too(calm: World) -> None:

@@ -196,6 +196,7 @@ def test_start_explains_and_asks_first(svc: Services) -> None:
     declined = invoke("start", input="n\n")
     assert declined.exit_code == 1 and "[测试]" in declined.output
     assert "25 hours of silence" in declined.output
+    assert "the bot is PAUSED" in declined.output  # R17-4 (D-684): said before it is started
     assert probe_store(svc).load() is None
     accepted = invoke("start", input="y\n")
     assert accepted.exit_code == 0 and probe_store(svc).load() is not None
@@ -234,6 +235,45 @@ def test_status_shows_the_plan_the_notice_the_steps_and_what_waits_for_you(svc: 
     assert state_version(svc) == before  # a READ command writes nothing
 
 
+def test_status_of_a_running_plan_says_that_the_bot_is_paused(svc: Services) -> None:
+    """R17-4 (D-684): the person at the keyboard is told what the probe does to the bot."""
+    probe_store(svc).create()
+    out = invoke("status").output
+    assert "bot PAUSED: no replies, no messages of her own and no answers to commands" in out
+    assert "a crisis is still answered" in out
+
+
+def test_status_of_an_ended_plan_does_not_say_that_the_bot_is_paused(svc: Services) -> None:
+    store = probe_store(svc)
+    store.create()
+    store.finish(PlanStatus.STOPPED, "stopped by the user")
+    assert "bot PAUSED" not in invoke("status").output
+
+
+def test_status_shows_the_attempt_that_a_safety_message_voided(svc: Services) -> None:
+    """R17-4 (D4): a crisis answer went out during the probe: the attempt is redone, and the
+    status says so (the event line has the reason, the step line counts the void attempt)."""
+    store = probe_store(svc)
+    store.create()
+    put_question(store, Question("count-1-count", QuestionKind.COUNT, "how many?", maximum=8))
+    assert store.void_current_attempt("the bot sent a safety message during the attempt")
+    out = invoke("status").output
+    assert "void: the bot sent a safety message during the attempt" in out
+    assert "(1 void)" in out
+
+
+def test_a_test_message_during_a_probe_says_why_it_is_not_sent(
+    svc: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-4: ``twin channel send-test`` is not the probe's own send: the hint names the cure."""
+    logged_in(svc)
+    probe_store(svc).create()
+    result = runner.invoke(app, ["channel", "send-test", "hello"])
+    assert result.exit_code == 1
+    assert "window_rejected: probe_running" in result.output
+    assert "`twin channel probe stop` ends it" in result.output
+
+
 def test_status_says_when_the_wechat_reminder_could_not_be_sent(svc: Services) -> None:
     store = probe_store(svc)
     store.create()
@@ -266,6 +306,9 @@ def test_the_channel_status_mentions_the_probe_when_there_is_one(svc: Services) 
     after = runner.invoke(app, ["channel", "status"])
     assert after.exit_code == 0, after.output
     assert f"probe: {plan.run_id} running - Send the bot ONE message" in after.output
+    assert "the bot is paused while it runs" in after.output  # R17-4 (D-684)
+    store.finish(PlanStatus.STOPPED, "done")
+    assert "the bot is paused" not in runner.invoke(app, ["channel", "status"]).output
 
 
 def test_status_shows_what_each_finished_step_found(svc: Services) -> None:

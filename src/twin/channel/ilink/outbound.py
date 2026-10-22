@@ -4,11 +4,15 @@ Every send passes the same checks in the same order:
 
 1. the recipient must be the bound user (otherwise :class:`RecipientNotAllowed`);
 2. an image must be on the allow list (otherwise :class:`MediaNotAllowed`);
-3. there must be a login and a ``context_token`` (otherwise a failed result, nothing is sent);
-4. the safe window and quota must have room, unless a :class:`SendBypass` (the probe) allows
+3. while a channel probe runs only the probe's own sends (and the urgent crisis answer) go out:
+   anything else is refused with ``probe_running`` and written to the probe's audit trail
+   (D-684, D-685);
+4. there must be a login and a ``context_token`` (otherwise a failed result, nothing is sent);
+5. the safe window and quota must have room, unless a :class:`SendBypass` (the probe) allows
    the send; a window the platform already refused stays closed until the user writes again;
-5. one request, one item, no automatic retry.  A refused or unknown outcome is reported, never
-   repeated: a doubled bubble hurts more than a missing one.
+6. one request, one item, no automatic retry.  A refused or unknown outcome is reported, never
+   repeated: a doubled bubble hurts more than a missing one.  The answers that mean "the session
+   is over" are the ``channel.session_expired_codes`` of the configuration (D-683).
 
 Sends are serialised so bubbles keep their order and the quota is counted exactly.
 """
@@ -17,11 +21,14 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Collection
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from twin.channel.base import (
+    PROBE_RUNNING,
     AuthState,
     BypassGrant,
     BypassRequest,
@@ -76,6 +83,16 @@ TICKET_TTL_S = 600.0
 ERRMSG_LIMIT = 200
 
 
+class ProbeGate(Protocol):
+    """What the sender asks of the channel probe: :class:`~twin.channel.probe.hold.ProbeHold`."""
+
+    def active(self) -> bool: ...
+
+    def refused(self, kind: str, text: str | None, now: datetime) -> None: ...
+
+    def urgent_sent(self, kind: str, text: str | None, now: datetime) -> None: ...
+
+
 @dataclass(frozen=True)
 class _Ready:
     """A send that passed the local checks."""
@@ -100,6 +117,8 @@ class IlinkSender:
         media_policy: OutboundMediaPolicy,
         window_h: float,
         quota: int,
+        session_expired_codes: Collection[int] = (ERR_SEND_REJECTED,),
+        probe: ProbeGate | None = None,
     ) -> None:
         self._http = http
         self._cdn = cdn
@@ -110,6 +129,8 @@ class IlinkSender:
         self._media_policy = media_policy
         self._window_h = window_h
         self._quota = quota
+        self._session_expired = frozenset(session_expired_codes)
+        self._probe = probe
         self._lock = asyncio.Lock()
         self._tickets: dict[str, tuple[str, float]] = {}
         self._typing_task: asyncio.Task[None] | None = None
@@ -117,15 +138,21 @@ class IlinkSender:
     # ---------------------------------------------------------------- text
 
     async def send_text(
-        self, text: str, *, recipient: str | None = None, bypass: SendBypass | None = None
+        self,
+        text: str,
+        *,
+        recipient: str | None = None,
+        bypass: SendBypass | None = None,
+        urgent: bool = False,
     ) -> OutboundResult:
+        """One text bubble; ``urgent`` (the crisis answer) is not held back by a running probe."""
         user = self._recipients.resolve(recipient)
         if not text.strip():
             return OutboundResult.failure(OutboundKind.REJECTED, "empty_text")
         if len(text) > TEXT_CHUNK_LIMIT:
             return OutboundResult.failure(OutboundKind.REJECTED, "text_too_long")
         async with self._lock:
-            ready = await self._prepare(user, "text", text, bypass)
+            ready = await self._prepare(user, "text", text, bypass, urgent)
             if isinstance(ready, OutboundResult):
                 return ready
             item = {"type": ITEM_TEXT, "text_item": {"text": text}}
@@ -150,7 +177,7 @@ class IlinkSender:
             raise MediaNotAllowed("the bytes are not an image of the declared type")
         await asyncio.to_thread(ensure_media_allowed, self._media_policy, raw)
         async with self._lock:
-            ready = await self._prepare(user, "image", None, bypass)
+            ready = await self._prepare(user, "image", None, bypass, False)
             if isinstance(ready, OutboundResult):
                 return ready
             try:
@@ -181,8 +208,20 @@ class IlinkSender:
     # ------------------------------------------------------------ the gate
 
     async def _prepare(
-        self, user: str, kind: Literal["text", "image"], text: str | None, bypass: SendBypass | None
+        self,
+        user: str,
+        kind: Literal["text", "image"],
+        text: str | None,
+        bypass: SendBypass | None,
+        urgent: bool,
     ) -> _Ready | OutboundResult:
+        probe = self._probe
+        held = (
+            probe is not None and bypass is None and await asyncio.to_thread(probe.active)
+        )  # a running probe has the channel to itself (its own sends carry a bypass)
+        if probe is not None and held and not urgent:
+            await asyncio.to_thread(probe.refused, kind, text, self._clock.now_utc())
+            return OutboundResult.failure(OutboundKind.WINDOW_REJECTED, PROBE_RUNNING)
         credentials = await asyncio.to_thread(self._store.credentials)
         if credentials is None:
             return OutboundResult.failure(OutboundKind.AUTH_EXPIRED, "not_logged_in")
@@ -212,6 +251,8 @@ class IlinkSender:
             return OutboundResult.failure(OutboundKind.WINDOW_REJECTED, refusal)
         if grant is not None and grant.empty_context_token:  # the probe's optional experiment
             context = ContextToken("", context.received_at)
+        if probe is not None and held:  # urgent: it goes out, and the attempt it disturbed is void
+            await asyncio.to_thread(probe.urgent_sent, kind, text, now)
         return _Ready(user, ApiAuth(credentials.api_base_url, credentials.bot_token), context)
 
     # ---------------------------------------------------------- the request
@@ -266,7 +307,7 @@ class IlinkSender:
                 errcode=response.errcode,
             )
         code = response.error_code
-        if code == ERR_SEND_REJECTED:
+        if code is not None and code in self._session_expired:
             return await self._window_rejected(
                 code, response.errmsg, client_id, ret=response.ret, errcode=response.errcode
             )

@@ -113,7 +113,8 @@ proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
 schedule: { plan_minute: 5, tick_s: 30, greeting_min_gap_h: 18, greeting_window_min: [5, 40],
             min_awake_h: 6, meal_jitter_min: 15, summary_lead_min: 60,
             summary_latest_after_wake_h: 2, power_tick_s: 5, power_jump_ticks: 2 }   # 第 08 轮新增：schedule 的 10 个键
-channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
+channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2,
+           session_expired_codes: [-2] }   # 第 17 轮新增：sendmessage 的哪些 ret 表示会话过期（M0 实测后再填）
 retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10,
              context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,
              slot_sigma_slots: 8, recency_weight: 0.04, recency_half_life_days: 180,
@@ -192,8 +193,8 @@ safety:
 - **R-CH-005** 入站解析：文字；图片（下载、解密、加密入库）；语音（微信云端已转文字则取文字，否则标注未转写）；视频（取封面）；文件（取文件名）；表情包（若可识别 md5）。统一成 `InboundMessage{id, at, kind, text, media_ref, quote}`。
 - **R-CH-006** 出站：文字、图片（只允许表情包库中的表情包，GIF/PNG/JPEG/WebP 原样，以及第 02 轮探针程序生成的测试图；见 R-SAFE-006）、正在输入、引用（若协议支持）。媒体发送需要非空 `context_token` 时按源码规则获取。
 - **R-CH-007** 收件人绑定：登录后第一个入站消息的发送者经 CLI 确认后绑定为唯一用户；之后只处理该用户的入站消息；出站 API 只接受该用户，传入其他 id 直接抛异常（有测试）。
-- **R-CH-008** 会话窗口跟踪：记录 `last_inbound_at`、`outbound_since_inbound`，提供 `remaining_quota() = outbound_quota_safe − outbound_since_inbound`；主动发送前检查 `now - last_inbound_at < proactive_window_safe_h` 且剩余配额足够；回复与主动消息的气泡数都受剩余配额约束（R-ENG-009、R-PRO-003）；收到协议表示会话过期的错误（社区报告为 `ret:-2`，以源码与实测为准）时标记过期，停止主动直到下一条入站；不得对该错误循环重试。
-- **R-CH-009** 实测探针 `twin channel probe`（M0）：在用户自己的 ClawBot 会话中，以"[测试]"前缀按顺序实测并记录（每一步开始前都要求用户先发一条新的入站，使窗口与计数复位）：① **条数**：入站后每 2 分钟主动发一条，直到首次失败或 15 条，得到 N；② **媒体与交互**：新入站后发送 JPG、PNG、GIF（程序生成的合成图片），CLI 询问用户 GIF 是否为动图；发送正在输入并询问是否可见；若协议支持则发送一条引用并让用户确认显示效果（本步总条数 ≤ N−1，不够时分两次入站）；③ **窗口**：新入站后约 25 小时内用户不要给机器人发任何消息（开始前和过程中在终端与微信里提醒；期间收到入站则本步作废重做），探针在该入站后 1/6/12/20/23/25 小时各发一条文字（总条数 ≤ N−1，不够时减少测量点并在报告中说明）；④ 回复类出站与主动出站是否消耗同一配额（以源码与①的结果判断）。探针发送绕过 `proactive_window_safe_h` 与 `outbound_quota_safe` 两个安全阈值：只允许在探针计划激活期间、只允许带"[测试]"前缀的消息、每次绕过写审计；遇到协议失败（含会话过期）立即停止该步，不重试。结果写入 `docs/CHANNEL_REPORT.md` 和数据库，并据此更新 `channel.*` 默认值。探针是可长期运行的计划任务，不是一次性脚本。
+- **R-CH-008** 会话窗口跟踪：记录 `last_inbound_at`、`outbound_since_inbound`，提供 `remaining_quota() = outbound_quota_safe − outbound_since_inbound`；主动发送前检查 `now - last_inbound_at < proactive_window_safe_h` 且剩余配额足够；回复与主动消息的气泡数都受剩余配额约束（R-ENG-009、R-PRO-003）；收到协议表示会话过期的错误（社区报告为 `ret:-2`，以源码与实测为准；哪些 `ret`/`errcode` 算会话过期由 `channel.session_expired_codes` 决定，默认 `[-2]`，M0 实测后填写）时标记过期，停止主动直到下一条入站；不得对该错误循环重试。
+- **R-CH-009** 实测探针 `twin channel probe`（M0）：在用户自己的 ClawBot 会话中，以"[测试]"前缀按顺序实测并记录（每一步开始前都要求用户先发一条新的入站，使窗口与计数复位）：① **条数**：入站后每 2 分钟主动发一条，直到首次失败或 15 条，得到 N；② **媒体与交互**：新入站后发送 JPG、PNG、GIF（程序生成的合成图片），CLI 询问用户 GIF 是否为动图；发送正在输入并询问是否可见；若协议支持则发送一条引用并让用户确认显示效果（本步总条数 ≤ N−1，不够时分两次入站）；③ **窗口**：新入站后约 25 小时内用户不要给机器人发任何消息（开始前和过程中在终端与微信里提醒；期间收到入站则本步作废重做），探针在该入站后 1/6/12/20/23/25 小时各发一条文字（总条数 ≤ N−1，不够时减少测量点并在报告中说明）；④ 回复类出站与主动出站是否消耗同一配额（以源码与①的结果判断）。探针发送绕过 `proactive_window_safe_h` 与 `outbound_quota_safe` 两个安全阈值：只允许在探针计划激活期间、只允许带"[测试]"前缀的消息、每次绕过写审计；遇到协议失败（含会话过期）立即停止该步，不重试。结果写入 `docs/CHANNEL_REPORT.md` 和数据库，并据此更新 `channel.*` 默认值。探针是可长期运行的计划任务，不是一次性脚本。探针运行期间机器人暂停：不回复、不主动发、不执行指令，发送层拒绝探针以外的发送（危机回复除外，R-SAFE-001：发出后本次尝试作废，探针要求用户重发一条新消息重测）。
 - **R-CH-010** 若实测证明主动发送不可行（窗口过短或条数不足以满足 R-PRO），必须停止并向用户报告；企业微信通道不在本规格范围，需用户确认后另开一轮。
 - **R-CH-011** `LocalConsoleChannel`：终端双向聊天，支持文字、发送图片路径、显示表情包为文件路径与标签、模拟正在输入；可配置模拟窗口与条数限制以便测试主动逻辑。
 
@@ -327,7 +328,7 @@ safety:
 
 - **R-PRO-001** 调度器每 `tick_minutes`（5 分钟）评估一次，采用非齐次泊松稀释：按她的"先开口率"曲线 λ(当地钟点) 缩放到当天配额，决定本 tick 是否产生候选。
 - **R-PRO-002** 每天主动次数在 `[daily_min, daily_max]`（默认 1–6，均值贴近她真实的约 3.6 次/天，均值随全量数据重算）内随机；`/主动 2-5` 修改范围，`/主动 关|开` 开关。
-- **R-PRO-003** 硬约束：深睡核心时段 0 次；两次主动间隔 ≥ `min_spacing_min`；用户没回上一条主动消息时最多再追 `max_chase` 条；`/暂停` 期间不发；平台窗口与条数（R-CH-008）不满足时不发并记录"被窗口抑制"；规划的多条超过剩余配额时截短，剩余配额为 0 时不发并记录。
+- **R-PRO-003** 硬约束：深睡核心时段 0 次；两次主动间隔 ≥ `min_spacing_min`；用户没回上一条主动消息时最多再追 `max_chase` 条；`/暂停` 期间与 M0 探针运行期间（R-CH-009）不发；平台窗口与条数（R-CH-008）不满足时不发并记录"被窗口抑制"；规划的多条超过剩余配额时截短，剩余配额为 0 时不发并记录。
 - **R-PRO-004** 触发类型与优先级：跟进型（待跟进到期）> 作息型（起床问候在起床后 5–40 分钟、饭点、睡前晚安）> 沉默型（距上次互动超过她真实"沉默后先开口"间隔的抽样值）> 分享型（生活线片段）。
 - **R-PRO-005** 入睡/将醒边缘：允许偶发"睡不着""刚醒"类消息，概率按她真实深夜消息频率，每周不超过 `edge_of_sleep_weekly_max`（默认 2）。
 - **R-PRO-006** 两步决定：规则与概率命中后，调用 DeepSeek 规划（`thinking.proactive_planner`，默认开）返回 JSON `{send: bool, kind, messages[], sticker_hint, reason}`；`send=false` 时记录原因并按策略重新安排。内容必须与生活线、记忆一致，发出后写入生活线与 `bot_turns`。

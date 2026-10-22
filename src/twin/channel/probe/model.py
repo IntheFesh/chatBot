@@ -258,6 +258,29 @@ def end_plan(plan: ProbePlan, status: PlanStatus, reason: str | None, now: datet
     plan.add_event(now, f"probe {status.value}" + (f": {reason}" if reason else ""))
 
 
+def void_attempt(
+    plan: ProbePlan, step: StepState, attempt: Attempt, reason: str, now: datetime
+) -> bool:
+    """Void ``attempt`` (redone from the start): its sends that are still to come are skipped.
+
+    Returns ``False`` when the attempt was judged already.  The one place that does it: the runner
+    voids an attempt the user disturbed, and the channel voids the one a safety message disturbed
+    (:meth:`~twin.channel.probe.store.ProbeStore.void_current_attempt`).
+    """
+    if attempt.outcome is not None:
+        return False
+    attempt.outcome = "void"
+    attempt.void_reason = reason
+    attempt.phase = AttemptPhase.FINISHED
+    attempt.finished_at = ensure_aware(now)
+    plan.notice = None
+    for action in attempt.actions:
+        if action.status in (ActionStatus.PENDING, ActionStatus.ACTIVE):
+            action.status = ActionStatus.SKIPPED
+    plan.add_event(now, f"step {step.id.value} attempt {attempt.n} void: {reason}")
+    return True
+
+
 def new_plan(run_id: str, now: datetime, options: ProbeOptions) -> ProbePlan:
     """A plan with its steps in the order of :data:`STEP_ORDER`."""
     ids = [StepId.COUNT, StepId.MEDIA, StepId.WINDOW]

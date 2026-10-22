@@ -289,6 +289,42 @@ def test_within_the_channel_package_only_the_probe_and_the_channels_use_bypass()
     assert users <= allowed, sorted(str(p) for p in users - allowed)
 
 
+def test_only_the_crisis_answer_sends_urgent() -> None:
+    """R17-4 (D-685): the one exception to the probe's hold is the engine's crisis answer.
+
+    The engine may not hold a ``SendBypass`` (the scans above).  What it may hold is the narrower
+    thing: :meth:`Channel.send_urgent_text`, reached through ``BubbleSender.send(urgent=True)``
+    and set at exactly one place, ``ConversationEngine._answer_crisis``.  This scan keeps the
+    list of callers that short."""
+    calls: dict[str, list[str]] = {"send_urgent_text": [], "urgent=True": []}
+    for path in sorted(SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        where = str(path.relative_to(SRC))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "send_urgent_text"
+            ):
+                calls["send_urgent_text"].append(where)
+            if (
+                isinstance(node, ast.keyword)
+                and node.arg == "urgent"
+                and isinstance(node.value, ast.Constant)
+                and node.value.value is True
+            ):
+                calls["urgent=True"].append(where)
+    assert sorted(set(calls["send_urgent_text"])) == ["engine/sender.py"]  # the channel method
+    assert sorted(set(calls["urgent=True"])) == [
+        "channel/ilink/channel.py",  # the channel hands it to its sender
+        "engine/machine.py",  # the crisis answer
+    ]
+    machine = (SRC / "engine" / "machine.py").read_text(encoding="utf-8")
+    assert machine.count("urgent=True") == 1
+    assert machine.index("urgent=True") > machine.index("async def _answer_crisis(")
+    assert machine.index("urgent=True") < machine.index("async def _sending(")
+
+
 def test_the_normal_send_methods_default_to_no_bypass() -> None:
     from twin.channel.local import LocalConsoleChannel
 
@@ -319,14 +355,22 @@ async def h(db: Database, clock: ManualClock, tmp_path: Path) -> AsyncIterator[H
 async def test_the_real_channel_sends_past_the_safe_thresholds_only_with_the_policy(
     api: respx.MockRouter, h: Harness, db: Database, clock: ManualClock
 ) -> None:
+    """R-CH-009, changed in round 17 (R17-4, D-684): while the plan runs, a send *without* the
+    policy is not merely held to the safe thresholds, it is refused (``probe_running``): the
+    probe counts what the platform lets the bot send and nothing else may be sent meanwhile.  The
+    threshold part of the story is therefore told before the plan runs; the probe's sends are
+    unchanged."""
     route = api.post(SEND).respond(200, json={})
     store = ProbeStore(db, clock)
-    open_attempt(store)
-    policy = ProbeSendPolicy(store)
-    assert (await h.channel.send_text(f"{TEST_PREFIX} 1")).ok
+    assert (await h.channel.send_text(f"{TEST_PREFIX} 1")).ok  # no probe yet: an ordinary send
     assert (await h.channel.send_text(f"{TEST_PREFIX} 2")).ok
     refused = await h.channel.send_text(f"{TEST_PREFIX} 3")  # past the safe count: refused
     assert refused.kind is OutboundKind.WINDOW_REJECTED and refused.reason == "quota_exhausted"
+    assert route.call_count == 2
+    open_attempt(store)
+    policy = ProbeSendPolicy(store)
+    held = await h.channel.send_text(f"{TEST_PREFIX} 4")  # the plan runs: only the probe may send
+    assert held.kind is OutboundKind.WINDOW_REJECTED and held.reason == "probe_running"
     assert route.call_count == 2
     for number in range(3, 6):  # the probe goes past the count with its policy
         assert (await h.channel.send_text(f"{TEST_PREFIX} {number}", bypass=policy)).ok
@@ -334,7 +378,7 @@ async def test_the_real_channel_sends_past_the_safe_thresholds_only_with_the_pol
     assert (await h.channel.send_text(f"{TEST_PREFIX} late", bypass=policy)).ok
     assert route.call_count == 6
     assert request_json(route.calls.last.request)["msg"]["context_token"] == CTX
-    assert [e["decision"] for e in store.audit()] == ["allowed"] * 4
+    assert [e["decision"] for e in store.audit()] == ["refused"] + ["allowed"] * 4
 
 
 async def test_a_text_without_the_prefix_never_leaves_the_machine_even_with_the_policy(
@@ -393,5 +437,8 @@ async def test_an_empty_context_token_is_sent_only_with_the_grant(
     )
     assert (await h.channel.send_text(f"{TEST_PREFIX} t", bypass=ProbeSendPolicy(store))).ok
     assert request_json(route.calls.last.request)["msg"]["context_token"] == ""
+
+    # an ordinary send after the probe (round 17: while the plan runs it is held, D-684) keeps it
+    store.finish(PlanStatus.STOPPED, "done")
     assert (await h.channel.send_text(f"{TEST_PREFIX} u")).ok
     assert request_json(route.calls.last.request)["msg"]["context_token"] == CTX

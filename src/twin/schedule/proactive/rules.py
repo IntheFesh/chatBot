@@ -6,7 +6,8 @@ messages went unanswered).  It is called when a candidate is considered **and ag
 the first bubble goes out** (after the planner and the writing have taken their time), and it is
 the only place the constraints live.  The order is the order of the reasons in the log:
 
-1. proactive messages are off (``/主动 关``) or paused (``/暂停``);
+1. proactive messages are off (``/主动 关``), paused (``/暂停``) or held for a running channel probe
+   (the probe counts what the platform lets the bot send; D-684);
 2. no day plan - nobody can tell whether she is asleep;
 3. **deep sleep: never** (no setting reaches this line, R-PRO-003);
 4. the edge of her sleep: only the edge message, and only ``edge_of_sleep_weekly_max`` a week;
@@ -56,6 +57,7 @@ class Situation:
     max_chase: int
     unanswered_after: timedelta
     need: int = 1  # bubbles the platform must still have room for
+    probe_running: bool = False  # a channel probe is measuring: nothing else may be sent
 
 
 def window_refusal(state: SessionState, need: int = 1) -> tuple[Reason, str] | None:
@@ -87,6 +89,8 @@ def check(kind: TriggerKind, situation: Situation) -> Refusal | None:
         return Refusal(Reason.DISABLED)
     if s.paused:
         return Refusal(Reason.PAUSED)
+    if s.probe_running:
+        return Refusal(Reason.PROBE_RUNNING)
     if s.state is None:
         return Refusal(Reason.NO_PLAN)
     if s.state == "deep_sleep":

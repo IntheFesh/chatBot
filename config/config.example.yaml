@@ -56,7 +56,8 @@ proactive: { daily_min: 1, daily_max: 6, min_spacing_min: 60, max_chase: 1,
 schedule: { plan_minute: 5, tick_s: 30, greeting_min_gap_h: 18, greeting_window_min: [5, 40],
             min_awake_h: 6, meal_jitter_min: 15, summary_lead_min: 60,
             summary_latest_after_wake_h: 2, power_tick_s: 5, power_jump_ticks: 2 }   # 第 08 轮新增：schedule 的 10 个键
-channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2 }
+channel: { kind: "ilink", proactive_window_safe_h: 22, outbound_quota_safe: 8, proactive_reserve: 2,
+           session_expired_codes: [-2] }   # 第 17 轮新增：sendmessage 的哪些 ret 表示会话过期（M0 实测后再填）
 retrieval: { model: "BAAI/bge-small-zh-v1.5", device: "auto", holdout_ratio: 0.10,
              context_turns: 6, candidates: 50, mmr_lambda: 0.7, slot_weight: 0.06,
              slot_sigma_slots: 8, recency_weight: 0.04, recency_half_life_days: 180,

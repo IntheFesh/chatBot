@@ -102,6 +102,21 @@ def test_invalid_values_report_the_key_path(tmp_path: Path) -> None:
     assert "backend.active" in message and "budget.daily_usd" in message
 
 
+def test_the_codes_that_end_the_session_are_configurable_and_never_success_or_the_login_code(
+    tmp_path: Path,
+) -> None:
+    """R17-48 (D-683): ``channel.session_expired_codes`` defaults to ``[-2]``."""
+    assert load_settings().channel.session_expired_codes == [-2]
+    config = write_yaml(tmp_path / "config.yaml", "channel: { session_expired_codes: [-2, -7] }\n")
+    assert load_settings(config).channel.session_expired_codes == [-2, -7]
+    empty = write_yaml(tmp_path / "empty.yaml", "channel: { session_expired_codes: [] }\n")
+    assert load_settings(empty).channel.session_expired_codes == []  # no code ends the session
+    for bad, words in (("[0]", "success"), ("[-2, -14]", "login code"), ("[1.5]", "integer")):
+        path = write_yaml(tmp_path / "bad.yaml", f"channel: {{ session_expired_codes: {bad} }}\n")
+        with pytest.raises(ConfigError, match=f"session_expired_codes.*{words}"):
+            load_settings(path)
+
+
 def test_explicit_missing_config_file_is_an_error(tmp_path: Path) -> None:
     with pytest.raises(ConfigError, match="not found"):
         load_settings(tmp_path / "nope.yaml")

@@ -25,6 +25,7 @@ from twin.channel.ilink.status import status_lines
 from twin.channel.ilink.store import IlinkStore
 from twin.channel.local import StreamInput, StreamOutput
 from twin.channel.probe.cli import probe_app
+from twin.channel.probe.model import PlanStatus
 from twin.channel.probe.store import ProbeStore
 from twin.channel.state import ChannelStateStore
 from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR
@@ -46,6 +47,8 @@ _HINTS = {
     "session_expired": "the platform refused earlier; send the bot a message from your phone first",
     "needs_relogin": "run `twin channel login --force`",
     "not_logged_in": "run `twin channel login`",
+    "probe_running": "a channel probe is running and keeps the channel to itself; "
+    "`twin channel probe stop` ends it",
 }
 
 
@@ -102,7 +105,10 @@ def channel_status() -> None:
     plan = ProbeStore(services.db, services.clock).load()
     if plan is not None:
         notice = f" - {plan.notice}" if plan.notice else ""
-        typer.echo(f"probe: {plan.run_id} {plan.status.value}{notice} (twin channel probe status)")
+        paused = " - the bot is paused while it runs" if plan.status is PlanStatus.RUNNING else ""
+        typer.echo(
+            f"probe: {plan.run_id} {plan.status.value}{notice} (twin channel probe status){paused}"
+        )
 
 
 def describe_failure(result: OutboundResult) -> str:
