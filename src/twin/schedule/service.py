@@ -9,6 +9,9 @@ the same object everywhere:
   ranges set by hand) that the schedule component drops when the state watcher reports a change,
   together with the plans read from the database, within two seconds;
 * the :class:`~twin.schedule.time_service.BotTimeService` the budget, the memory and the engine ask;
+* the bot's zone timeline (:class:`~twin.schedule.zone_timeline.BotZoneTimeline`, a ``Cached``
+  value read from ``timezone_history``), which the memory dates the bot's conversation by (D-732)
+  and which is dropped together with the other caches when a switch is made;
 * the :class:`~twin.schedule.planner.DailyPlanner` behind ``her_state``;
 * the :class:`~twin.schedule.events.ScheduleEvents` bus rounds 09 and 10 subscribe to.
 
@@ -38,7 +41,9 @@ from twin.schedule.daytype import DayTypeCalendar
 from twin.schedule.events import ScheduleEvents
 from twin.schedule.plan_builder import QuotaRange
 from twin.schedule.planner import DailyPlanner
+from twin.schedule.store import TimezoneHistory
 from twin.schedule.time_service import BotTimeService, Cached
+from twin.schedule.zone_timeline import BotZoneTimeline
 
 if TYPE_CHECKING:
     from twin.services import Services
@@ -55,9 +60,14 @@ class ScheduleKit:
     time: BotTimeService
     planner: DailyPlanner
     events: ScheduleEvents
+    zones: Cached[BotZoneTimeline]
 
     def drop_caches(self) -> None:
-        """Forget what was read from the database (the state watcher calls this on a change)."""
+        """Forget what was read from the database (the state watcher calls this on a change).
+
+        The planner's own caches go, and with them - it holds the list - the calendar and the bot's
+        zone timeline.
+        """
         self.planner.invalidate()
 
 
@@ -86,6 +96,22 @@ def peak_calendar_for(services: Services) -> PeakCalendar:
     return calendar
 
 
+def day_type_calendar_for(services: Services) -> DayTypeCalendar:
+    """The container's day-type calendar: what the time service, the profile and the windows use.
+
+    It is made of the configured zone-to-country table, the holiday ranges set by hand
+    (``twin routine add holiday``) and the one holiday calendar of the container
+    (:func:`peak_calendar_for`), so ``pricing.extra_peak_dates`` / ``extra_offpeak_dates`` change
+    the day type everywhere the same way (D-733).  A new calendar is made on every call and holds
+    the holiday ranges as they are now; the kit's own one is the cached one (``kit.calendar``).
+    """
+    return DayTypeCalendar(
+        zone_countries=services.settings.safety.timezone_country,
+        holiday_ranges=RoutineOverrides(services.db, services.clock).holiday_ranges(),
+        peak_calendar=peak_calendar_for(services),
+    )
+
+
 def build_kit(
     services: Services,
     *,
@@ -95,13 +121,6 @@ def build_kit(
     """Create the schedule objects of ``services`` (see :func:`schedule_kit` for the shared set)."""
     runtime = services.runtime
     settings = services.settings
-
-    def day_calendar() -> DayTypeCalendar:
-        return DayTypeCalendar(
-            zone_countries=settings.safety.timezone_country,
-            holiday_ranges=RoutineOverrides(services.db, services.clock).holiday_ranges(),
-            peak_calendar=peak_calendar_for(services),
-        )
 
     def proactive_range() -> QuotaRange:
         return QuotaRange(
@@ -116,8 +135,12 @@ def build_kit(
     def zone_name() -> str:
         return runtime.get(BOT_TIMEZONE)
 
-    calendar: Cached[DayTypeCalendar] = Cached(day_calendar)
+    calendar: Cached[DayTypeCalendar] = Cached(lambda: day_type_calendar_for(services))
     time = BotTimeService(services.clock, zone_name, calendar=calendar)
+    history = TimezoneHistory(services.db, services.clock)
+    zones: Cached[BotZoneTimeline] = Cached(
+        lambda: BotZoneTimeline.from_history(history, zone_name)
+    )
     planner = DailyPlanner(
         db=services.db,
         clock=services.clock,
@@ -126,10 +149,11 @@ def build_kit(
         model_source=model_source or (lambda: load_activity_model(services, "live")),
         quota_source=quota_source or proactive_range,
         set_timezone=switch,
-        drop_caches=(calendar.invalidate,),
+        drop_caches=(calendar.invalidate, zones.invalidate),
+        history=history,
     )
     time.attach_states(planner)
-    return ScheduleKit(calendar, time, planner, ScheduleEvents())
+    return ScheduleKit(calendar, time, planner, ScheduleEvents(), zones)
 
 
 def schedule_kit(services: Services) -> ScheduleKit:

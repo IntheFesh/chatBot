@@ -351,7 +351,6 @@ class DailyPlanner:
         now = self._clock.now_utc()
         last_greeting = self.greetings.last()
         self._set_timezone(new_zone.key, source)
-        self.invalidate()
         record = self.history.add(
             at=now,
             old=old_zone.key,
@@ -360,6 +359,8 @@ class DailyPlanner:
             plan_id=None,
             last_greeting_at=last_greeting,
         )
+        # after the row is written, not before: the bot's zone timeline is read from it (D-732)
+        self.invalidate()
         outcome = self._create(
             self._time.local_date(now), reason="timezone_switch", effective_from=now, same_day=None
         )

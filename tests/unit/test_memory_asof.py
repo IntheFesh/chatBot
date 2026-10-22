@@ -165,6 +165,7 @@ MEMORY_VIEW_API = {
     "search_facts",
     "search_summaries",
     "render",
+    "vectors_degraded",  # R17-35 (D-731): a flag, true on a live view whose vector search failed
 }
 
 

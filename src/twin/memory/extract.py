@@ -229,7 +229,7 @@ class FactExtractor:
         return out
 
     def _zone_of(self, mode: Mode, moment: datetime) -> ZoneInfo:
-        return self._clock.real_zone(moment) if mode == "real" else self._clock.bot_zone()
+        return self._clock.zone_of(mode, moment)
 
     @staticmethod
     def _render_dialogue(lines: Sequence[DialogueLine], zone: ZoneInfo) -> str:
