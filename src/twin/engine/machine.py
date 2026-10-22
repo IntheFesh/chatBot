@@ -50,6 +50,10 @@ A step of the driver that fails is tried again after a few seconds (alert ``engi
 five failures in a row the round is given up: one short answer of hers goes out first, once per
 round (D-720), then the state is reset.
 
+A stop (:meth:`ConversationEngine.stop`) first lets the bubble that is being handed to the channel
+finish and be written down - for at most ``stop_grace_s`` real seconds - and starts nothing new;
+what is unsent stays in the state for the next start (D-721).
+
 Commands (:class:`~twin.engine.command_port.CommandPort`) are answered the moment they arrive,
 without a delay, outside the round, and are marked ``is_command`` (never memory or training data).
 ``/重来`` (``redo``) writes the reply to the thrown-away round again: from IDLE at once (no quiet
@@ -140,6 +144,7 @@ MERGE_SHARE = 0.8  # past this share of the wait, a message that joins adds a sh
 STEP_FAILURE_PAUSE_S = 5.0
 PROBE_RECHECK_S = 60.0  # while a probe holds the round: look again at least this often
 STEP_FAILURES_BEFORE_RESET = 5
+STOP_GRACE_S = 10.0  # real seconds a stop waits for a bubble that is being handed over (D-721)
 SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
 CORRECTION_TIMEOUT_S = 30.0  # the question after a correction in plain words may not hold her up
@@ -245,6 +250,7 @@ class ConversationEngine:
         queue_extraction: ExtractionQueue | None = None,
         corrections: CorrectionPort | None = None,
         probe_active: Callable[[], bool] | None = None,
+        stop_grace_s: float = STOP_GRACE_S,
     ) -> None:
         self._channel = channel
         self._store = store
@@ -270,6 +276,11 @@ class ConversationEngine:
         self._queue_extraction = queue_extraction
         self._probe_active = probe_active
         self._probe_held = False  # held for a probe: re-timed when it ends
+        self._stop_grace_s = stop_grace_s
+        self._stopping = False  # ``stop`` was called: nothing new is started, a send is let finish
+        # clear while a bubble is being handed to the channel (and while the crisis answer goes out)
+        self._safe_to_cancel = asyncio.Event()
+        self._safe_to_cancel.set()
         low, high = settings.schedule.greeting_window_min
         self._decider = Decider(time, rng, wake_window_min=(float(low), float(high)))
         self._sender = BubbleSender(channel, stickers, lookup, clock, alerts, rng)
@@ -301,6 +312,7 @@ class ConversationEngine:
         """Make the stored state fit the moment and start the driver (see "Recovery")."""
         if self._driver is not None:
             return
+        self._stopping = False
         await self._recover(await self._load())
         self._driver = asyncio.create_task(self._drive(), name="engine-driver")
         self._extractor = asyncio.create_task(self._extraction_loop(), name="engine-extraction")
@@ -328,9 +340,20 @@ class ConversationEngine:
         await self._say_system(text if text.startswith(SYSTEM_PREFIX) else SYSTEM_PREFIX + text)
 
     async def stop(self) -> None:
-        """Stop the driver; whatever state is stored stays and is resumed by the next start."""
+        """Stop the driver; whatever state is stored stays and is resumed by the next start.
+
+        A bubble that is being handed to the channel is let finish (and is noted) before the
+        driver is cancelled, for at most ``stop_grace_s`` real seconds: it is out on the user's
+        phone as soon as the channel has it, and a cancel in that moment would leave it
+        "in doubt" for the next start (D-721).  Everything else is cancelled at once; the sender
+        starts nothing new once the stop is asked for.
+        """
         tasks = [t for t in (self._driver, self._extractor) if t is not None]
         self._driver = self._extractor = None
+        self._stopping = True
+        self._wake.set()  # a driver that waits looks again at once
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._safe_to_cancel.wait(), self._stop_grace_s)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -622,8 +645,8 @@ class ConversationEngine:
     # ================================================================ the driver
 
     async def _drive(self) -> None:
-        """The loop of the state machine: one step per state, forever (R-ARCH-004)."""
-        while True:
+        """The loop of the state machine: one step per state, until stopped (R-ARCH-004)."""
+        while not self._stopping:
             try:
                 if self._resume_pending:
                     self._resume_pending = False
@@ -1248,15 +1271,20 @@ class ConversationEngine:
         async def keep(sent: SentBubble) -> None:
             await _written(note(sent))
 
-        await self._sender.send(
-            bubbles,
-            pacing=PacingModel(),
-            wait=uninterruptible_pause(self._clock),
-            on_sent=keep,
-            paced=False,
-            urgent=True,  # safety wins over a running probe (D-685); no other send sets this
-        )
-        await self._complete(snap.pending)
+        # a stop lets the whole answer go out and the round end: nothing else may be cut short
+        self._safe_to_cancel.clear()
+        try:
+            await self._sender.send(
+                bubbles,
+                pacing=PacingModel(),
+                wait=uninterruptible_pause(self._clock),
+                on_sent=keep,
+                paced=False,
+                urgent=True,  # safety wins over a running probe (D-685); no other send sets this
+            )
+            await self._complete(snap.pending)
+        finally:
+            self._safe_to_cancel.set()
 
     # ----------------------------------------------------------------------- SENDING
 
@@ -1304,20 +1332,31 @@ class ConversationEngine:
             await self._after_bubble(sent, recorder.reply_id, data.answering)
 
         async def keep(sent: SentBubble) -> None:
-            await _written(note(sent))
+            try:
+                await _written(note(sent))
+            finally:
+                self._safe_to_cancel.set()  # the bubble is out and written down: a stop may go on
 
         async def about_to_send(bubble: OutBubble) -> None:
-            await self._edit(lambda d: _with_in_flight(d, bubble, self._clock.now_utc()))
+            self._safe_to_cancel.clear()  # from here until ``keep``: a stop lets the send finish
+            try:
+                await self._edit(lambda d: _with_in_flight(d, bubble, self._clock.now_utc()))
+            except BaseException:
+                self._safe_to_cancel.set()  # nothing was handed over
+                raise
 
-        report = await self._sender.send(
-            outgoing.unsent,
-            pacing=pacing,
-            wait=wait,
-            on_sent=keep,
-            on_sending=about_to_send,
-            first_of_reply=outgoing.reply_id is None,
-            quote=quote if outgoing.reply_id is None else None,
-        )
+        try:
+            report = await self._sender.send(
+                outgoing.unsent,
+                pacing=pacing,
+                wait=wait,
+                on_sent=keep,
+                on_sending=about_to_send,
+                first_of_reply=outgoing.reply_id is None,
+                quote=quote if outgoing.reply_id is None else None,
+            )
+        finally:
+            self._safe_to_cancel.set()  # a send that ended without a bubble: nothing to wait for
         thrown = self._thrown_away
         if thrown is not None and recorder.reply_id == thrown:
             self._thrown_away = None  # a ``/重来`` ended this reply (see ``_drop_unsent``)
@@ -1398,8 +1437,9 @@ class ConversationEngine:
         if report.stop is None:
             await self._finish_reply(RoundData.of(await self._load()))
         elif report.stop is StopReason.INTERRUPTED:
-            if self._resume_pending:
-                return  # the machine woke up: the driver fits the state to the moment first
+            if self._resume_pending or self._stopping:
+                return  # the machine woke up (the driver fits the state to the moment first), or
+                # the engine is being stopped: what is unsent stays for the next start
             current = await self._load()
             data = RoundData.of(current)
             if data.outgoing is not None:
@@ -1470,16 +1510,16 @@ class ConversationEngine:
             await self._say_system(THINKING_PREFIX + shown[:THINKING_MAX_CHARS])
 
     async def _interruptible(self, seconds: float, seq: int) -> bool:
-        """Sleep ``seconds``; ``True`` if the user wrote or the machine woke up meanwhile."""
+        """Sleep ``seconds``; ``True`` if the user wrote, the machine woke or a stop was asked."""
         end = self._clock.monotonic() + seconds
         while True:
-            if self._arrival_seq != seq or self._resume_pending:
+            if self._arrival_seq != seq or self._resume_pending or self._stopping:
                 return True
             remaining = end - self._clock.monotonic()
             if remaining <= 0:
                 return False
             self._wake.clear()
-            if self._arrival_seq != seq or self._resume_pending:
+            if self._arrival_seq != seq or self._resume_pending or self._stopping:
                 return True
             await self._wait_wake(remaining)
 

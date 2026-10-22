@@ -447,8 +447,14 @@ def build_harness(
     short_answers: ShortAnswers | None = None,
     renderer: InboundRenderer | None = None,
     probe_active: Callable[[], bool] | None = None,
+    stop_grace_s: float | None = None,
 ) -> Harness:
-    """Wire an engine the way ``build_engine`` does, with the doubles of this module."""
+    """Wire an engine the way ``build_engine`` does, with the doubles of this module.
+
+    ``stop_grace_s``: how many real seconds ``engine.stop()`` waits for a bubble that is being
+    handed to the channel (the engine's own default when not given); a test whose channel never
+    answers passes a very small one.
+    """
     chosen_channel = channel or ScriptedChannel(clock)
     chosen_writer = writer or ScriptedWriter()
     chosen_day = day or FixedDay((START - timedelta(days=1), "free"))
@@ -495,6 +501,7 @@ def build_harness(
         pacing=lambda view: chosen_pacing,
         queue_extraction=queue,
         probe_active=probe_active,
+        **({} if stop_grace_s is None else {"stop_grace_s": stop_grace_s}),
     )
     return Harness(
         engine,
