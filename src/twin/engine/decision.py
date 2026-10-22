@@ -182,9 +182,13 @@ class Decider:
             delay = pacing.short_pause(rng, situation.chars)
             mode = "continuation"
         elif mode == "busy" and state is not None:
-            delay = pacing.busy_latency(state.busy, situation.hour, situation.slot).sample(rng)
+            delay = pacing.busy_latency(
+                state.busy, situation.hour, situation.slot, situation.day_type
+            ).sample(rng)
         else:
-            delay = pacing.first_delay(rng, situation.hour, situation.slot, situation.chars)
+            delay = pacing.first_delay(
+                rng, situation.hour, situation.slot, situation.chars, situation.day_type
+            )
         send_at = max(situation.now, situation.anchor + timedelta(seconds=delay))
         later = self.her_state(send_at)
         if later is not None and later.kind == "deep_sleep":

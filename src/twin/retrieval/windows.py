@@ -51,10 +51,10 @@ from twin.ingest.events import is_reproducible
 from twin.ingest.times import SourceTime
 from twin.profile.holdout import holdout_cutoff
 from twin.profile.localtime import LocalClock, LocalStamp
-from twin.profile.overrides import RoutineOverrides
 from twin.profile.units import BurstSegmenter
 from twin.retrieval.records import NotHerMessageError, require_message
 from twin.schedule.daytype import DayTypeCalendar
+from twin.schedule.service import day_type_calendar_for
 from twin.storage.chat_models import Message
 from twin.storage.retrieval_models import WINDOW_ID_LENGTH, ExampleWindow
 
@@ -283,13 +283,9 @@ class LocalPlace:
 
     @classmethod
     def create(cls, services: Services) -> LocalPlace:
-        settings = services.settings
-        holidays = RoutineOverrides(services.db, services.clock).holiday_ranges()
         return cls(
-            LocalClock(SourceTime.from_config(settings.time)),
-            DayTypeCalendar(
-                zone_countries=settings.safety.timezone_country, holiday_ranges=holidays
-            ),
+            LocalClock(SourceTime.from_config(services.settings.time)),
+            day_type_calendar_for(services),
         )
 
     def of(self, moment: datetime) -> tuple[int, str]:

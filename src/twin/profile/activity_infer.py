@@ -406,6 +406,12 @@ def build_activity_model(
     latency_workday = BucketedDistribution.from_counters(
         raw.latency_workday, sizes=(1, 4), min_samples=LATENCY_MIN_SAMPLES, discrete=True
     )
+    latency_weekend = BucketedDistribution.from_counters(
+        raw.latency_weekend, sizes=(1, 4), min_samples=LATENCY_MIN_SAMPLES, discrete=True
+    )
+    latency_holiday = BucketedDistribution.from_counters(
+        raw.latency_holiday, sizes=(1, 4), min_samples=LATENCY_MIN_SAMPLES, discrete=True
+    )
     days_total = max(1, raw.days.get(ALL, 0))
     extra: dict[str, object] = {
         "first_day": raw.first_day.isoformat() if raw.first_day else None,
@@ -429,6 +435,8 @@ def build_activity_model(
         initiation_raw=init_raw,
         latency=latency,
         latency_workday=latency_workday,
+        latency_weekend=latency_weekend,
+        latency_holiday=latency_holiday,
         sleep=sleep,
         busy=busy,
         her_messages=raw.her_messages,

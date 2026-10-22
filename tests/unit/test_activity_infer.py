@@ -367,3 +367,53 @@ def test_holidays_set_by_hand_are_learnt_as_holidays(services: Services) -> None
     after = load_activity_model(services, "live", apply_overrides=False)
     assert after is not None and after.days["holiday"] == before.days["holiday"] + 5
     assert after.days["workday"] == before.days["workday"] - 5
+
+
+# ----------------------------------------------- the latency by kind of day (R17-40b, D-734)
+
+
+def test_the_latency_of_a_weekend_afternoon_is_not_that_of_a_workday_afternoon(
+    services: Services,
+) -> None:
+    """R17-40b: she is slow only on workday afternoons (busy 13:00-17:00); weekends are not."""
+    model = learn(services, days=240)
+    quarter = 4 * 15 + 1  # 15:15
+    workday = model.latency_distribution(quarter, "workday")
+    weekend = model.latency_distribution(quarter, "weekend")
+    assert workday.median() > 600  # a workday afternoon: tens of minutes
+    assert weekend.median() < 120  # a weekend afternoon: she answers at once
+    # the all-day distribution is the mixture (what every day type got before): far from the weekend
+    assert model.latency_distribution(quarter).median() > 600
+    assert model.latency_distribution(quarter, "weekend") is not model.latency.get(quarter)
+    evening = 4 * 21 + 1  # no busy time: the kinds of day do not differ much
+    ratio = model.latency_distribution(evening, "weekend").median() / (
+        model.latency_distribution(evening, "workday").median()
+    )
+    assert 0.3 < ratio < 3.0
+
+
+def test_a_kind_of_day_with_few_days_answers_with_the_all_day_latency(services: Services) -> None:
+    model = learn(services, days=240)
+    assert model.days["holiday"] < 10  # a handful of public holidays in eight months
+    assert model.latency_holiday is not None and model.latency_holiday.overall.n > 0
+    quarter = 4 * 15 + 1
+    assert model.latency_for_day_type(quarter, "holiday") is None  # too few samples in the slot
+    assert model.latency_distribution(quarter, "holiday") is model.latency.get(quarter)
+
+
+def test_the_split_is_stored_with_the_version_and_a_version_without_it_still_loads(
+    services: Services,
+) -> None:
+    """R17-40b: the stored model has the new fields; one stored before them loads as it did."""
+    model = learn(services, days=240)
+    assert model.latency_weekend is not None
+    stored = model.to_json()
+    assert {"latency_weekend", "latency_holiday"} <= set(stored)
+    old = {k: v for k, v in stored.items() if k not in ("latency_weekend", "latency_holiday")}
+    loaded = ActivityModel.from_json(old)
+    quarter = 4 * 15 + 1
+    assert loaded.latency_distribution(quarter, "weekend") is loaded.latency.get(quarter)
+    assert loaded.latency_distribution(quarter, "workday").median() > 600  # it always had this
+    again = load_activity_model(services, "live", apply_overrides=False)
+    assert again is not None and again.latency_weekend is not None
+    assert again.latency_distribution(quarter, "weekend").median() < 120

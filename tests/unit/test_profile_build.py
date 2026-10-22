@@ -466,3 +466,24 @@ def test_nothing_is_stored_without_messages(services: Services) -> None:
 def test_a_scope_must_be_named_correctly(services: Services) -> None:
     with pytest.raises(ValueError, match="scope must be"):
         rebuild(services, "yesterday")
+
+
+def test_the_latency_by_kind_of_day_of_the_pre_holdout_model_comes_only_from_before_the_cutoff(
+    services: Services,
+) -> None:
+    """R17-40b, iron rule 13: the new counters are fed by the same scope pass as the old ones."""
+    built(services, days=120)
+    pre = load_activity_model(services, "pre_holdout")
+    live = load_activity_model(services, "live")
+    assert pre is not None and live is not None
+    for scope_model in (pre, live):
+        assert scope_model.latency_weekend is not None and scope_model.latency_holiday is not None
+        kinds = (
+            scope_model.latency_workday.overall.n
+            + scope_model.latency_weekend.overall.n
+            + scope_model.latency_holiday.overall.n
+        )
+        assert kinds == scope_model.latency.overall.n  # every reply has exactly one kind of day
+    assert pre.latency.overall.n < live.latency.overall.n  # the held-out weeks are only in live
+    assert pre.latency_weekend.overall.n < live.latency_weekend.overall.n  # type: ignore[union-attr]
+    assert pre.latency_workday.overall.n < live.latency_workday.overall.n

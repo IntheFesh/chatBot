@@ -33,6 +33,7 @@ from twin.ops.logging import get_logger
 from twin.profile.api import load_activity_model
 from twin.profile.localtime import format_minute
 from twin.schedule.daytype import DayTypeCalendar
+from twin.schedule.service import day_type_calendar_for
 from twin.schedule.time_service import PlanUnavailableError, TimeService
 
 log = get_logger("twin.memory.lifeline")
@@ -325,9 +326,7 @@ class LifelineStore:
         return calendar.day_type(day, key), calendar.day_type(day + timedelta(days=1), key)
 
     def _calendar(self) -> DayTypeCalendar:
-        return DayTypeCalendar(
-            zone_countries=self._memory.services.settings.safety.timezone_country
-        )
+        return day_type_calendar_for(self._memory.services)
 
     def context_for(self, day: date, *, days: int = 3) -> LifelineContext:
         """What the plan of ``day`` must respect: recent days, real facts, her usual sleep."""
