@@ -136,6 +136,25 @@ def test_switching_the_new_adapter_off_gives_the_sft_model_and_not_the_base(
     assert largest_difference(logits_of(policy), sft_logits) > 1e-2
 
 
+def test_the_earlier_setup_that_continued_the_sft_adapter_had_the_bare_base_as_its_reference(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-650): what D-252 did - the failing case this round fixes, shown on the model.
+
+    ``adapter_name_or_path`` without ``create_new_adapter`` *continues* the SFT adapter
+    (``PeftModel.from_pretrained(..., is_trainable=True)``); with no ``ref_model`` the reference
+    pass switches that very adapter off - and what is left is the base, not SFT.
+    """
+    make_sft(tmp_path / "sft")
+    continued = PeftModel.from_pretrained(base_model(), str(tmp_path / "sft"), is_trainable=True)
+    continued.eval()
+    sft_logits = logits_of(continued)
+    with continued.disable_adapter():
+        reference = logits_of(continued)
+    assert largest_difference(reference, logits_of(base_model())) < 1e-5  # the base ...
+    assert largest_difference(reference, sft_logits) > 1e-2  # ... and not SFT
+
+
 def test_the_reference_is_still_sft_when_the_policy_has_trained_away_from_it(
     tmp_path: Path,
 ) -> None:

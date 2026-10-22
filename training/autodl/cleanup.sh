@@ -5,8 +5,8 @@
 #
 # Overwrites and deletes the decrypted dataset, the unpack directory, the encrypted package, the
 # logs and job logs (they contain training samples), the processed-dataset caches, the
-# checkpoints, the copy of the longest samples that the trial run of setup.sh verify trains on
-# and the rendered configuration.  artifacts/ is kept until the download has been confirmed;
+# checkpoints, the copies of the longest samples that the trial runs of setup.sh verify and of
+# dpo.sh train on and the rendered configuration.  artifacts/ is kept until the download has been confirmed;
 # --all removes it as well.  Run it again at any time: it only removes what is still there.  The
 # data disk is reclaimed when the instance is released in the AutoDL console.
 set -euo pipefail
@@ -39,6 +39,7 @@ TARGETS=(
     "${TWIN_HOME}/manifest.json"
     "${TWIN_HOME}/gguf"
     "${TWIN_HOME}/trial_data"
+    "${TWIN_HOME}/trial_data_dpo"
     "${TWIN_DISK_ROOT}/cache/huggingface/datasets"
     "${TWIN_DISK_ROOT}/cache/modelscope/datasets"
     "${TWIN_DISK_ROOT}/tmp"

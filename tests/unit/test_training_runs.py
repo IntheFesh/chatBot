@@ -53,6 +53,10 @@ def test_the_hyperparameters_record_the_settings_of_the_profile() -> None:
     assert values["template"] == "qwen3_nothink" and values["lora_rank"] == 32
     assert values["train_samples"] == 25_000 and values["cutoff_len"] == 2048
     assert hyperparameters(PROFILES["5090-8b"], 100)["epochs"] == 3
+    # R17-49d (D-650): how this profile's preference run gets its reference model
+    assert (values["dpo_mode"], values["dpo_reference_quantization_bit"]) == ("continued", 4)
+    bf16 = hyperparameters(PROFILES["pro6000-14b"], 100)
+    assert (bf16["dpo_mode"], bf16["dpo_reference_quantization_bit"]) == ("layered", None)
 
 
 def test_a_dataset_version_is_recorded_once_and_names_exactly_one_content(

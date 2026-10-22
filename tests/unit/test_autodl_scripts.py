@@ -919,6 +919,8 @@ def populate_for_cleanup(workdir: Path, tmp_path: Path) -> None:
         ".unpack/data/x",
         "gguf/model-F16.gguf",
         "trial_data/sft_trial.jsonl",
+        "trial_data_dpo/dpo_trial.jsonl",  # R17-49d (D-651): the pairs of the DPO trial step
+        "output/eval_generate_dpo/generated_predictions.jsonl",  # R17-49d: per-stack evaluation
         "artifacts/gguf/m.gguf",
         "artifacts/manifest.json",
     ):
@@ -958,6 +960,7 @@ def test_cleanup_erases_the_data_and_keeps_the_artifacts_until_asked(tmp_path: P
         "pylib",
         "gguf",
         "trial_data",
+        "trial_data_dpo",
     ):
         assert not (workdir / gone).exists(), gone
     assert not (tmp_path / "disk" / "cache" / "huggingface" / "datasets").exists()
