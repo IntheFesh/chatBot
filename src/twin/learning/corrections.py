@@ -61,7 +61,6 @@ from twin.memory.manage import MemoryManager
 from twin.ops.logging import get_logger
 from twin.profile.prompt_templates import CORRECTION_CHECK, CORRECTION_FACT_CHECK, TemplateStore
 from twin.services import Services
-from twin.storage.engine_models import BotTurn
 from twin.storage.settings_store import delete_setting, get_setting, put_setting
 
 log = get_logger("twin.learning.corrections")
@@ -301,10 +300,8 @@ class CorrectionService:
 
     def _said_no(self, turn_id: str) -> bool:
         """Is the message of the row ``turn_id`` a "no"?  (A row that is not there is a yes.)"""
-        with self._services.db.session() as session:
-            row = session.get(BotTurn, turn_id)
-            text = row.text if row is not None else None
-        return bool(text) and is_rejection_word(text or "")
+        row = self._turns.get(turn_id)
+        return row is not None and is_rejection_word(row.text)
 
     async def _remember(self, pending: PendingCorrection) -> CommandOutcome:
         """The yes to a fact question: the wording becomes a fact of the memory (once)."""

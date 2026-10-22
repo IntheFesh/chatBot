@@ -346,7 +346,7 @@ async def test_an_ordinary_message_goes_the_normal_way_beside_the_commands(world
     assert out[0].timings["delay"] > 0  # her own delay, which a command never has
 
 
-@pytest.mark.parametrize("text", ["/::)", "/:8-)", "/home/user", "/ 思考", "/"])
+@pytest.mark.parametrize("text", ["/::)", "/:8-)", "/home/user", "/"])
 async def test_a_slash_that_is_not_a_command_is_just_a_message(world: World, text: str) -> None:
     world.replies.append("哈哈")
     await world.chat(text, 1)
@@ -354,6 +354,14 @@ async def test_a_slash_that_is_not_a_command_is_just_a_message(world: World, tex
     assert world.bot_lines == ["bot: 哈哈"]
     rows = world.rows()
     assert [(r.direction, r.is_command) for r in rows] == [("in", False), ("out", False)]
+
+
+async def test_a_space_after_the_slash_still_names_a_registered_command(world: World) -> None:
+    """R17-24 (D-672): R-CMD-003 reads "多余空格…都能识别", so ``/ 思考 开`` is ``/思考 开``."""
+    spaced = await world.command("/ 思考 开", count=1, answers=1)
+    assert spaced == PREFIX + texts.THINK_SET.format(mode="开")
+    rows = world.rows()
+    assert [(r.direction, r.is_command) for r in rows] == [("in", True), ("out", True)]
 
 
 # ---------------------------------------------------------------- /状态 and /思考
