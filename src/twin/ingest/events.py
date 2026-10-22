@@ -261,8 +261,8 @@ def _normalise(text: str) -> str:
 def fold_event_text(text: str) -> str:
     """``text`` as the detector reads it: NFKC, without any whitespace or format (Cf) character.
 
-    ``［ 语​音　８ 秒］`` becomes ``[语音8秒]``, so a model (or a chat export) that spaces
-    out or decorates a placeholder cannot slip it past the literal search.
+    A full-width, spaced-out or zero-width-decorated marker folds to the plain one
+    (``[语音8秒]``), so a model (or a chat export) cannot slip it past the literal search.
     """
     return "".join(
         char
@@ -333,7 +333,7 @@ class EventTextDetector:
         return self._names
 
     def match(self, line: str) -> str | None:
-        """Name of the template family whose placeholder ``line`` holds, else ``None``."""
+        """Name of the template family whose event text ``line`` holds, else ``None``."""
         if self._search is None:
             return None
         found = self._search.search(fold_event_text(line))

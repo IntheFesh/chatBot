@@ -141,7 +141,7 @@ KNOWN = {name: name for name in TABLE}.get
     [
         ("/ 状态", "状态", ""),
         ("／ 状态", "状态", ""),
-        ("/　状态", "状态", ""),
+        ("/\u3000状态", "状态", ""),
         ("/   思考   开", "思考", "开"),
         ("/ 记住 她的生日是 3月3日", "记住", "她的生日是 3月3日"),
         ("/ Status", "status", ""),
@@ -232,8 +232,8 @@ def test_the_strict_reading_without_a_table_is_what_it_was() -> None:
 @given(
     st.sampled_from(TABLE),
     st.sampled_from(["/", "／"]),
-    st.sampled_from(["", " ", "　", "  ", "\t"]),
-    st.sampled_from([" ", "　", ":", "：", "，", ",", "、", "。", "；", "！", "？", "…"]),
+    st.sampled_from(["", " ", "\u3000", "  ", "\t"]),
+    st.sampled_from([" ", "\u3000", ":", "：", "，", ",", "、", "。", "；", "！", "？", "…"]),
     st.text(alphabet="开关自动嗯哦abc123", min_size=1, max_size=8),
 )
 def test_any_slash_padding_and_separator_gives_the_same_command_and_argument(
@@ -415,13 +415,13 @@ async def test_the_router_runs_the_tolerant_spellings_of_a_registered_command(
         ("／ 思考：自动", "auto"),
         ("/思考。关", "off"),
         ("/Think，ON", "on"),
-        ("/　思考　自动", "auto"),
+        ("/\u3000思考\u3000自动", "auto"),
     ):
         outcome = await world.say(text)
         assert world.setting(THINKING_CHAT) == mode, text
         assert "思考模式已设为" in outcome.reply, text
     status = (await world.say("/状态")).reply
-    for text in ("/ 状态", "／ 状态", "/　状态", "/状态，", "/ 状态！"):
+    for text in ("/ 状态", "／ 状态", "/\u3000状态", "/状态，", "/ 状态！"):
         assert (await world.say(text)).reply == status, text
     stored = (await world.say("/ 记住 她最喜欢的颜色是蓝色")).reply
     assert "她最喜欢的颜色是蓝色" in stored and "没有这个指令" not in stored

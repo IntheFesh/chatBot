@@ -270,14 +270,14 @@ REVIEWER_LINES = [
     "[ 图片 ]",
     "[语音 8 秒",  # the output was cut off before the closing bracket
     "【语音 8 秒：好的我马上到",
-    "[图​片]",  # a zero-width space inside the key
+    "[图\u200b片]",  # a zero-width space inside the key
     "[撤回了一条消息]",  # neutral wording of the two revoke templates
     "[对方撤回了一条消息]",
     "哈哈哈[拍一拍]哈哈",
     "[红包]恭喜发财",
     "[未接通话",
     "[聊天记录] 看一下",
-    "　　[其他消息]",
+    "\u3000\u3000[其他消息]",
     "好[系统消息]吧",
 ]
 
@@ -292,7 +292,7 @@ def test_event_text_anywhere_in_a_line_is_detected(line: str) -> None:
 WORDS = ["图片", "语音", "视频", "通话", "转账", "红包", "链接", "文件", "位置", "拍一拍"]
 OPENINGS = ["[", "［", "【"]
 CLOSINGS = ["]", "］", "】", ""]  # "" = the output was cut off
-PADDING = ["", "", " ", "　", " ", "​", "﻿", "⁠"]
+PADDING = ["", "", " ", "\u3000", "\u00a0", "\u200b", "\ufeff", "\u2060"]
 
 
 def _scatter(text: str, rng: random.Random) -> str:
@@ -399,8 +399,8 @@ def test_match_names_the_family_of_the_longest_key_in_the_line() -> None:
 
 
 def test_the_fold_removes_whitespace_format_characters_and_full_width_forms() -> None:
-    assert fold_event_text("［ 语​音　８ 秒］") == "[语音8秒]"
-    assert fold_event_text("【图 片】") == "【图片】"
+    assert fold_event_text("［ 语\u200b音\u3000８ 秒］") == "[语音8秒]"
+    assert fold_event_text("【图\u00a0片】") == "【图片】"
     assert fold_event_text("") == ""
 
 
