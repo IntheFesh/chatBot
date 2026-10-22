@@ -505,7 +505,8 @@ class DeepSeekClient:
                 "one process shares one client on one loop"
             )
         if previous is not None:
-            self._conn = None  # its connections died with the old loop
+            self._conn = None  # its connections died with the old loop,
+            self._closing.clear()  # and so did the tasks that were closing the retired ones
         self._loop = loop
         self._semaphore = asyncio.Semaphore(self._config.max_concurrency)
         self._offline_semaphore = asyncio.Semaphore(self._offline_slots)
