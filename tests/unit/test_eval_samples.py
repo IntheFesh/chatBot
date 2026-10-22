@@ -224,6 +224,23 @@ def test_a_real_reply_with_an_undescribed_sticker_is_not_drawn(services: Service
     assert plain not in {m for s in drawn.samples for m in s.real.stickers}
 
 
+def test_a_reply_with_a_placeholder_inside_a_line_is_never_drawn(services: Services) -> None:
+    """R17-3 (D-670): ``[图片：自拍] 好看吗`` is as good as a picture; the sample is excluded."""
+    services.settings.retrieval.holdout_ratio = 0.9
+    episodes = [(day(n, 3 + n % 20), episode(n)) for n in range(40)]
+    selfie = [U("看看"), H("[图片：自拍] 好看吗")]
+    where = [U("你在哪"), H("我把[位置]发你")]
+    voice = [U("说话"), H("给你听[语音 8 秒]")]
+    for index, messages in enumerate((selfie, where, voice)):
+        episodes.append((day(40 + index, 12), messages))
+    write_dialogue(services, episodes)
+    drawn = SampleDrawer(services).draw(500, seed=1)
+    texts = {line.text for s in drawn.samples for line in s.real.lines}
+    assert not {"[图片：自拍] 好看吗", "我把[位置]发你", "给你听[语音 8 秒]"} & texts
+    assert drawn.excluded["reply_has_event_text"] >= 3
+    assert len(drawn.samples) >= 20
+
+
 def test_a_context_that_does_not_end_with_the_user_is_not_drawn(services: Services) -> None:
     """She wrote twice in a row (two bursts): the second reply answers nobody."""
     services.settings.retrieval.holdout_ratio = 0.9

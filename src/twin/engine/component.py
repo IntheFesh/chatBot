@@ -72,6 +72,7 @@ from twin.learning.pairs import PreferencePairStore
 from twin.learning.sample import SampleBuilder
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
 from twin.memory.jobs import queue_bot_extraction
+from twin.memory.manage import MemoryManager
 from twin.memory.memory import Memory
 from twin.memory.recent import BotMessage, HistoryWindow
 from twin.ops.logging import get_logger
@@ -249,7 +250,14 @@ def build_engine(
             )
         )
     engine.attach_corrections(
-        CorrectionService(services, llm.client, recorder, turn_store, RoundStore(services.db))
+        CorrectionService(
+            services,
+            llm.client,
+            recorder,
+            turn_store,
+            RoundStore(services.db),
+            memory=MemoryManager(source.memory, llm.client),
+        )
     )
     return engine
 

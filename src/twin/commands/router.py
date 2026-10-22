@@ -3,7 +3,8 @@
 :class:`CommandRouter` implements the engine's :class:`~twin.engine.command_port.CommandPort`:
 
 * a message that is **not** a command - it does not start with a slash and a name, see
-  :mod:`twin.commands.parse` - returns ``None`` and goes through the normal chat path;
+  :mod:`twin.commands.parse` (which also reads ``/ 状态``, ``/思考，开`` and ``/思考开`` with the
+  table) - returns ``None`` and goes through the normal chat path;
 * a command that is in the table runs its handler; an argument the handler does not accept is
   answered with the command's syntax and example (R-CMD-003);
 * a slash command that is **not** in the table is answered with a summary of the commands that
@@ -45,6 +46,7 @@ from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
 from twin.engine.dataview import LiveDataSource
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnMessages, BotTurnStore
+from twin.learning.corrections import FactProposer, PendingStore
 from twin.learning.dislike import NotLikeRecorder
 from twin.learning.pairs import PreferencePairStore
 from twin.learning.sample import LazyViewSource, SampleBuilder, ViewSource
@@ -87,7 +89,8 @@ class CommandRouter:
         return is_command_text(text)
 
     async def handle(self, text: str, context: CommandContext) -> CommandOutcome | None:
-        parsed = parse_command(text)
+        # with the table at hand the parser also reads "/ 状态", "/思考，开" and "/思考开" (D-672)
+        parsed = parse_command(text, self._registry.find)
         if parsed is None:
             return None
         spec = self._registry.find(parsed.name)
@@ -187,7 +190,10 @@ class CommandRouter:
                 ),
                 memory=MemoryCommands(MemoryManager(known_memory, llm.client)),
                 learn=LearnCommands(
-                    learner, services.alerts, lambda: services.settings.training.dpo_min_pairs
+                    learner,
+                    services.alerts,
+                    lambda: services.settings.training.dpo_min_pairs,
+                    FactProposer(services, llm.client, turn_store, PendingStore(services)),
                 ),
                 cost=CostCommands(sources),
                 imports=ImportCommands(services, import_notes or ImportNotifyStore(services)),

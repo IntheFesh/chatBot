@@ -8,20 +8,29 @@ rendered string.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
+from typing import Any
 
+import httpx
 import pytest
+import respx
 from sqlalchemy import select
 
 from tests.support.clock import ManualClock
 from tests.support.commands_world import CommandWorld, open_world
+from tests.support.deepseek import API, TEST_KEY, error, ok, request_json
 from tests.support.embedding import HashingBackend
 from twin.commands import texts
 from twin.engine.style_prompt import StylePromptBuilder, StyleTurn
+from twin.learning import corrections as corrections_module
+from twin.learning.corrections import KIND_FACT, FactProposer, PendingStore
 from twin.learning.pairs import PreferencePairStore, PromptSample
+from twin.llm.runtime import DEEPSEEK_SECRET
 from twin.services import Services
 from twin.storage.learning_models import PreferencePair
 from twin.storage.models import Alert
@@ -297,7 +306,6 @@ async def test_not_like_is_listed_in_the_help_and_answers_in_system_voice(
 
 
 def test_the_lazy_view_source_makes_the_real_one_on_first_use_and_only_once() -> None:
-    from typing import Any
 
     from twin.learning.sample import LazyViewSource
 
@@ -319,3 +327,182 @@ def test_the_lazy_view_source_makes_the_real_one_on_first_use_and_only_once() ->
     moment = datetime(2026, 10, 9, tzinfo=UTC)
     assert lazy.view(moment) is marker and lazy.view() is marker
     assert made == [1] and asked == [moment, None]
+
+
+# ------------------------------------------- R17-11 (D-674): a fact in the wording of a /不像
+
+FACT = "我们是在上海认识的"
+ASK = "要把这条记为事实吗？回复“是”确认。"  # the user-facing words are pinned here on purpose
+
+
+@dataclass
+class FactJudge:
+    """The model that judges a wording: what it answers and what it was asked."""
+
+    answer: Callable[[], httpx.Response]
+    asked: list[dict[str, Any]]
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.asked.append(request_json(request))
+        return self.answer()
+
+
+def a_fact() -> httpx.Response:
+    return ok(content=json.dumps({"is_fact": True}))
+
+
+def not_a_fact() -> httpx.Response:
+    return ok(content=json.dumps({"is_fact": False}))
+
+
+@pytest.fixture
+def fact_judge() -> FactJudge:
+    return FactJudge(a_fact, [])
+
+
+@pytest.fixture
+async def fact_world(
+    services: Services, clock: ManualClock, embedder: HashingBackend, fact_judge: FactJudge
+) -> AsyncIterator[CommandWorld]:
+    services.secrets.set(DEEPSEEK_SECRET, TEST_KEY)
+    with respx.mock(assert_all_called=False) as router:
+        router.post(API).mock(side_effect=fact_judge)
+        async with open_world(services, clock, start=START) as built:
+            yield built
+
+
+def open_question(world: CommandWorld) -> Any:
+    return PendingStore(world.services).get()
+
+
+async def test_a_wording_that_states_a_fact_ends_the_answer_with_the_question(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    """R17-11: before the fix the wording was only a preference pair; nobody asked about it."""
+    reply_id = fact_world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+    reply = await fact_world.reply("/不像 " + FACT)
+    lines = reply.split("\n")
+    assert lines[0] == texts.NOT_LIKE_DONE and lines[-1] == ASK
+    assert any("已存为一对对照" in line for line in lines)  # what it did before, still done
+    pending = open_question(fact_world)
+    assert (pending.kind, pending.text, pending.reply_id) == (KIND_FACT, FACT, reply_id)
+    (asked,) = fact_judge.asked
+    prompt = asked["messages"][1]["content"]
+    assert "我们是在北京认识的呀" in prompt and FACT in prompt and "/不像" not in prompt
+    assert fact_world.turns.latest_reply()[0].reply_id == reply_id  # the question is no turn
+
+
+async def test_a_wording_with_a_date_or_an_event_needs_no_model_to_be_asked_about(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    fact_world.chat("你们什么时候认识的", ["去年夏天吧"])
+    reply = await fact_world.reply("/不像 我们是2019年认识的")
+    assert reply.endswith(ASK) and fact_judge.asked == []  # the local rule of the persona card
+    pending = open_question(fact_world)
+    assert pending.kind == KIND_FACT and pending.text == "我们是2019年认识的"
+
+
+async def test_a_wording_that_is_only_something_she_would_say_asks_nothing(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    fact_judge.answer = not_a_fact
+    fact_world.chat("今天好累呀", ["哈哈 辛苦啦"])
+    reply = await fact_world.reply("/不像 哎呀抱抱你 早点睡哦")
+    assert ASK not in reply and len(fact_judge.asked) == 1 and open_question(fact_world) is None
+    assert reply.split("\n")[0] == texts.NOT_LIKE_DONE
+
+
+async def test_the_command_answers_as_before_when_the_model_cannot_judge(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    fact_world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+    fact_judge.answer = lambda: error(400, "boom")
+    broken = await fact_world.reply("/不像 " + FACT)
+    fact_judge.answer = lambda: ok(content="not json")
+    garbage = await fact_world.reply("／不像 我们是在上海认识的呀")
+    for reply in (broken, garbage):
+        assert ASK not in reply and reply.startswith(texts.NOT_LIKE_DONE)
+    assert open_question(fact_world) is None and len(fact_judge.asked) >= 2
+
+
+async def test_without_a_key_the_wording_is_recorded_and_nothing_is_asked(
+    world: CommandWorld,
+) -> None:
+    world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+    reply = await world.reply("/不像 " + FACT)
+    assert reply.startswith(texts.NOT_LIKE_DONE) and ASK not in reply
+    assert open_question(world) is None
+
+
+async def test_the_question_can_be_switched_off_with_the_detection(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    fact_world.services.settings.learning.detect_corrections = False
+    fact_world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+    reply = await fact_world.reply("/不像 我们是2019年认识的")
+    assert ASK not in reply and fact_judge.asked == [] and open_question(fact_world) is None
+
+
+async def test_no_wording_no_question(fact_world: CommandWorld, fact_judge: FactJudge) -> None:
+    fact_world.chat("今天好累呀", ["哈哈 辛苦啦"])
+    reply = await fact_world.reply("/不像")
+    assert ASK not in reply and fact_judge.asked == [] and open_question(fact_world) is None
+
+
+async def test_nothing_is_asked_when_there_was_no_reply_to_mark(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    assert await fact_world.reply("/不像 " + FACT) == texts.NOT_LIKE_NOTHING
+    fact_world.chat("我不想活了", ["我想先停一下，你现在还好吗"], backend="safety")
+    assert await fact_world.reply("/不像 " + FACT) == texts.NOT_LIKE_NOT_HERS
+    assert fact_judge.asked == [] and open_question(fact_world) is None
+
+
+async def test_a_second_fact_replaces_the_first_question(
+    fact_world: CommandWorld, fact_judge: FactJudge
+) -> None:
+    fact_world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+    await fact_world.reply("/不像 " + FACT)
+    await fact_world.reply("/不像 她是学设计的")
+    assert open_question(fact_world).text == "她是学设计的"
+
+
+async def test_a_model_that_never_answers_does_not_hold_the_command_up(
+    services: Services,
+    clock: ManualClock,
+    embedder: HashingBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The question is optional: past the engine's correction timeout there is none."""
+
+    class StuckClient:
+        async def chat_json(self, *args: object, **kwargs: object) -> None:
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(corrections_module, "CORRECTION_TIMEOUT_S", 0.05)
+    async with open_world(services, clock, start=START) as world:
+        world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+        reply_id = world.turns.latest_reply()[0].reply_id
+        proposer = FactProposer(
+            services,
+            StuckClient(),  # type: ignore[arg-type]
+            world.turns,
+            PendingStore(services),
+        )
+        assert await proposer.propose(FACT, reply_id) is None
+        assert open_question(world) is None
+
+
+async def test_without_any_client_only_the_local_rule_can_ask(
+    services: Services, clock: ManualClock, embedder: HashingBackend
+) -> None:
+    async with open_world(services, clock, start=START) as world:
+        world.chat("你们怎么认识的", ["我们是在北京认识的呀"])
+        reply_id = world.turns.latest_reply()[0].reply_id
+        pending = PendingStore(services)
+        proposer = FactProposer(services, None, world.turns, pending)
+        assert await proposer.propose(FACT, reply_id) is None and pending.get() is None
+        assert await proposer.propose("  ", reply_id) is None
+        assert await proposer.propose("她是2020年毕业的", reply_id) == texts.FACT_ASK
+        stored = pending.get()
+        assert stored is not None and (stored.kind, stored.text) == (KIND_FACT, "她是2020年毕业的")

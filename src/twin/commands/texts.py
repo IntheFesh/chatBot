@@ -226,6 +226,11 @@ NOT_LIKE_NO_TEXT = "上一轮她没有说话，没有可以标记的内容。"
 CORRECTION_ASK = "要把这次记为“不像”吗？回复“是”确认。"
 CORRECTION_DONE = "好的，上一轮已记为“不像”。"
 CORRECTION_CONFIRM_WORDS = ("是", "是的", "确认")
+# "no" to an open question (a "不是" while she has not spoken since is the answer to it) (D-674)
+CORRECTION_REJECT_WORDS = ("不用", "不用了", "算了", "不是", "不要", "否")
+CORRECTION_REJECTED = "好的，不记了。"
+# a ``/不像 <说法>`` whose wording states a fact: the question is added to the command's answer
+FACT_ASK = "要把这条记为事实吗？回复“是”确认。"
 
 # ------------------------------------------------------------------------------ /费用
 COST_TITLE_DAY = "今天（{date}）的费用"

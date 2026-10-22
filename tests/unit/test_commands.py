@@ -11,6 +11,8 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
@@ -97,7 +99,6 @@ def test_a_command_is_recognised_with_full_width_marks_colons_and_spaces(
         "你好",
         "/",
         "//",
-        "/ 思考",
         "/::)",
         "/:8-)",
         "/home/user/x",
@@ -106,6 +107,13 @@ def test_a_command_is_recognised_with_full_width_marks_colons_and_spaces(
     ],
 )
 def test_chat_is_not_a_command(text: str) -> None:
+    """Strict reading (no table): ``is_command_text`` and ``parse_command`` without ``known``.
+
+    R17-24 (D-672): ``"/ 思考"`` used to be listed here.  R-CMD-003 says extra spaces are
+    recognised, so with the table in hand it is the command 思考 (see
+    ``test_the_parser_reads_a_space_after_the_slash_and_any_punctuation_with_the_table``); the
+    strict reading stays as it was (``test_the_strict_reading_without_a_table_is_what_it_was``).
+    """
     assert parse_command(text) is None and not is_command_text(text)
 
 
@@ -114,8 +122,126 @@ def test_names_and_choices_are_compared_without_case_and_width() -> None:
 
 
 def test_a_slash_command_that_is_not_in_the_table_is_still_a_command() -> None:
-    parsed = parse_command("/思考开")  # no space between name and argument: one unknown name
+    """Without a table (``known=None``) ``/思考开`` is one name that nobody knows.
+
+    R17-24 (D-672): with the table, ``parse_command("/思考开", known)`` splits it into 思考 and 开
+    (``test_the_parser_splits_a_name_glued_to_its_argument_by_the_longest_registered_prefix``).
+    """
+    parsed = parse_command("/思考开")
     assert parsed is not None and parsed.name == "思考开"
+
+
+# R17-24 (D-672): with the table the parser is as tolerant as R-CMD-003 says
+TABLE = ("状态", "思考", "帮助", "记住", "status", "think", "help")
+KNOWN = {name: name for name in TABLE}.get
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "args"),
+    [
+        ("/ 状态", "状态", ""),
+        ("／ 状态", "状态", ""),
+        ("/\u3000状态", "状态", ""),
+        ("/   思考   开", "思考", "开"),
+        ("/ 记住 她的生日是 3月3日", "记住", "她的生日是 3月3日"),
+        ("/ Status", "status", ""),
+        ("／ ＳＴＡＴＵＳ", "status", ""),
+        ("/思考，开", "思考", "开"),
+        ("/思考,开", "思考", "开"),
+        ("/思考、开", "思考", "开"),
+        ("/思考。开", "思考", "开"),
+        ("/思考, 开", "思考", "开"),
+        ("/思考！", "思考", ""),
+        ("/ 思考，开", "思考", "开"),
+        ("/记住，她喜欢吃芒果", "记住", "她喜欢吃芒果"),
+        ("/记住 “她喜欢吃芒果”", "记住", "“她喜欢吃芒果”"),  # a quote is part of the argument
+        ("/Think，ON", "think", "ON"),
+        ("/思考 开", "思考", "开"),  # the strict spellings are unchanged
+        ("/思考：开", "思考", "开"),
+        ("/zzz 开", "zzz", "开"),  # an unknown name is still a command (the help summary)
+    ],
+)
+def test_the_parser_reads_a_space_after_the_slash_and_any_punctuation_with_the_table(
+    text: str, name: str, args: str
+) -> None:
+    """R17-24: fails before the fix (these were chat or one odd name)."""
+    parsed = parse_command(text, KNOWN)
+    assert parsed is not None and (parsed.name, parsed.args) == (name, args), text
+
+
+@pytest.mark.parametrize(
+    ("text", "name", "args"),
+    [
+        ("/思考开", "思考", "开"),
+        ("/思考ON", "思考", "ON"),
+        ("/记住她喜欢芒果", "记住", "她喜欢芒果"),
+        ("/状态栏", "状态", "栏"),  # the price of the prefix rule: a mistyped word is swallowed
+        ("／思考开", "思考", "开"),
+    ],
+)
+def test_the_parser_splits_a_name_glued_to_its_argument_by_the_longest_registered_prefix(
+    text: str, name: str, args: str
+) -> None:
+    parsed = parse_command(text, KNOWN)
+    assert parsed is not None and (parsed.name, parsed.args) == (name, args), text
+    longer = {**{n: n for n in TABLE}, "思考开": "思考开"}.get  # the longest name wins
+    both = parse_command("/思考开关", longer)
+    assert both is not None and (both.name, both.args) == ("思考开", "关")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/ 吃饭",
+        "/ 吃饭了吗",
+        "/ 随便",
+        "/::)",
+        "/:8-)",
+        "/home/user/x",
+        "/s/foo/bar/",
+        "/status.txt",
+        "/status/x",
+        "/ 思考开",  # "/ " and then a glued name: the user spaced it, so it is chat
+        "/ 状态栏好看",
+        "/",
+        "//",
+        "/ ",
+        "/，思考",
+        "/。",
+        "a /思考",
+        "思考",
+    ],
+)
+def test_chat_stays_chat_with_the_table_too(text: str) -> None:
+    assert parse_command(text, KNOWN) is None, text
+
+
+def test_an_ascii_name_needs_a_separator_and_an_unknown_name_stays_a_command() -> None:
+    odd = parse_command("/Statusbar", KNOWN)
+    assert odd is not None and (odd.name, odd.args) == ("statusbar", "")
+    assert parse_command("/zzz", KNOWN) is not None and parse_command("/ zzz", KNOWN) is None
+
+
+def test_the_strict_reading_without_a_table_is_what_it_was() -> None:
+    """``is_command_text`` and ``parse_command(text)`` do not know the table (R17-24)."""
+    for text in ("/ 状态", "／ 状态", "/思考，开", "/ 吃饭", "/::)", "/home/user"):
+        assert parse_command(text) is None and not is_command_text(text), text
+    assert is_command_text("/状态") and is_command_text("/思考开")  # one odd name, still a command
+
+
+@given(
+    st.sampled_from(TABLE),
+    st.sampled_from(["/", "／"]),
+    st.sampled_from(["", " ", "\u3000", "  ", "\t"]),
+    st.sampled_from([" ", "\u3000", ":", "：", "，", ",", "、", "。", "；", "！", "？", "…"]),
+    st.text(alphabet="开关自动嗯哦abc123", min_size=1, max_size=8),
+)
+def test_any_slash_padding_and_separator_gives_the_same_command_and_argument(
+    name: str, slash: str, pad: str, separator: str, args: str
+) -> None:
+    """R17-24 hypothesis: ``/`` or ``／``, spaces after it, one separator, then the argument."""
+    parsed = parse_command(f"{slash}{pad}{name}{separator}{args}", KNOWN)
+    assert parsed is not None and (parsed.name, parsed.args) == (fold(name), args)
 
 
 # --------------------------------------------------------------------------- registry
@@ -268,12 +394,47 @@ async def test_a_command_of_another_round_is_unknown_until_it_registers_and_then
 
 
 async def test_an_unknown_command_gets_the_help_summary_and_is_not_chat(world: World) -> None:
-    for text in ("/评分 5", "/zzz", "/思考开", "/随叫随到"):
+    # "/思考开" is not here any more: the router reads it as 思考 + 开 (R17-24, D-672);
+    # "/Statusbar" is: an ASCII name must be followed by a separator
+    for text in ("/评分 5", "/zzz", "/Statusbar", "/随叫随到"):
         outcome = await world.say(text)
         assert outcome.reply.startswith(PREFIX + "没有这个指令：/")
         assert "可用的指令：/帮助 /状态 /思考 /显示思考 /后端 /重来 /时区" in outcome.reply
         assert "/不像 /费用 /导入" in outcome.reply
         assert "发 /帮助 看每个指令的用法和例子。" in outcome.reply and not outcome.redo
+
+
+async def test_the_router_runs_the_tolerant_spellings_of_a_registered_command(
+    world: World,
+) -> None:
+    """R17-24 (D-672): "/ 状态", "/思考，开" and "/思考开" are commands for the router."""
+    for text, mode in (
+        ("/思考，开", "on"),
+        ("/ 思考 关", "off"),
+        ("/思考开", "on"),
+        ("／ 思考：自动", "auto"),
+        ("/思考。关", "off"),
+        ("/Think，ON", "on"),
+        ("/\u3000思考\u3000自动", "auto"),
+    ):
+        outcome = await world.say(text)
+        assert world.setting(THINKING_CHAT) == mode, text
+        assert "思考模式已设为" in outcome.reply, text
+    status = (await world.say("/状态")).reply
+    for text in ("/ 状态", "／ 状态", "/\u3000状态", "/状态，", "/ 状态！"):
+        assert (await world.say(text)).reply == status, text
+    stored = (await world.say("/ 记住 她最喜欢的颜色是蓝色")).reply
+    assert "她最喜欢的颜色是蓝色" in stored and "没有这个指令" not in stored
+
+
+async def test_a_slash_then_a_space_names_a_command_only_when_the_table_has_it(
+    world: World,
+) -> None:
+    """R17-24: "/ 随便", a path and an emoticon stay chat; "/ 思考开" is spaced and glued: chat."""
+    context = CommandContext(world.clock.now_utc(), "in-1")
+    for chat in ("/ 随便", "/ 吃饭了吗", "/::)", "/home/user/x", "/ 思考开", "/status.txt"):
+        assert await world.router.handle(chat, context) is None, chat
+    assert world.router.is_command("/ 状态") is False  # the strict reading marks no rows
 
 
 async def test_help_lists_the_commands_that_exist_by_group_and_only_those(world: World) -> None:

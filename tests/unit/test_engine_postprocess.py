@@ -231,6 +231,24 @@ def test_nothing_left_after_event_text_is_a_violation() -> None:
     assert w.lines == [] and kinds(w) == ["event_text_only"]
 
 
+def test_event_text_in_the_middle_of_a_line_deletes_the_line() -> None:
+    """R17-3 (D-670): a media placeholder is found anywhere in the line, not only as the line.
+
+    Before the fix ``给你听[语音 8 秒]`` and the like were sent as they were.
+    """
+    w = work("好呀\n给你听[语音 8 秒]\n我把[位置]发你\n【图片】好看吧\n[视频：操场\n哈哈")
+    step_module.event_text(w, context())
+    assert texts(w) == ["好呀", "哈哈"] and actions(w) == {"event_text_removed": 4}
+    assert not w.violations
+
+
+def test_a_reply_of_nothing_but_lines_with_event_text_asks_for_a_new_one() -> None:
+    """R17-3: all lines deleted -> ``event_text_only`` (the pipeline regenerates with a note)."""
+    result = run("给你听[语音 8 秒]\n看这个[链接：周末去哪里玩]")
+    assert not result.ok and [v.kind for v in result.violations] == ["event_text_only"]
+    assert result.bubbles == ()
+
+
 def test_a_sticker_line_is_not_event_text() -> None:
     w = work("[表情包:开心]\n[拥抱]")
     step_module.event_text(w, context())

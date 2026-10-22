@@ -8,7 +8,9 @@ The command is the chat side of :class:`~twin.learning.dislike.NotLikeRecorder`:
   (R-LRN-002): the wording is ``chosen``, the reply is ``rejected``, the situation is the
   structured prompt sample.  Pairs are only ever used for DPO (R-LRN-004).
 
-The answer says what was stored and, when there are enough pairs, that DPO can be done.
+The answer says what was stored and, when there are enough pairs, that DPO can be done.  When the
+wording states a fact ("我们是在上海认识的") the answer ends with the question whether to remember
+it as one; the user's "是" does (:class:`~twin.learning.corrections.FactProposer`, D-674).
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from collections.abc import Callable
 
 from twin.commands import texts
 from twin.commands.registry import CommandCall
+from twin.learning.corrections import FactProposer
 from twin.learning.dislike import NotLikeRecorder, NotLikeResult
 from twin.learning.pairs import dpo_hint
 from twin.ops.alerts import AlertSink
@@ -26,16 +29,26 @@ class LearnCommands:
     """The handler of ``/不像``."""
 
     def __init__(
-        self, recorder: NotLikeRecorder, alerts: AlertSink, dpo_min_pairs: Callable[[], int]
+        self,
+        recorder: NotLikeRecorder,
+        alerts: AlertSink,
+        dpo_min_pairs: Callable[[], int],
+        facts: FactProposer | None = None,
     ) -> None:
         self._recorder = recorder
         self._alerts = alerts
         self._min_pairs = dpo_min_pairs
+        self._facts = facts
 
     async def not_like(self, call: CommandCall) -> str:
         wording = call.args.strip()
         result = await self._recorder.arecord(wording or None)
-        return self.render(result, wording=bool(wording))
+        reply = self.render(result, wording=bool(wording))
+        if wording and result.status == "recorded" and self._facts is not None:
+            question = await self._facts.propose(wording, result.reply_id)
+            if question:
+                reply = f"{reply}\n{question}"
+        return reply
 
     def render(self, result: NotLikeResult, *, wording: bool) -> str:
         """The answer to a verdict."""

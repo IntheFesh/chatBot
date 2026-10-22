@@ -5,10 +5,11 @@ One template table (:data:`EVENT_TEMPLATES`) drives everything:
 * :func:`render_event_text` turns a stored message into its bracketed event text
   (``[通话 37 分钟]``, ``[语音 5 秒，未转写]``, ...).  The persona prompts (round 09) and the
   training set (round 13) both call this single function;
-* :class:`EventTextDetector` is derived *from the same table* and recognises such a line
-  (R-SAFE-006): a line the bot is about to send that looks like an event text is removed,
-  and training targets / retrieval examples are filtered with it.  Because it is derived,
-  adding or changing a template changes the detector too;
+* :class:`EventTextDetector` is derived *from the same table* and recognises a line that holds
+  such a text anywhere (R-SAFE-006, D-670): a line the bot is about to send that carries an
+  event text is removed, and training targets / retrieval examples are filtered with it.  The
+  rule is the literal prefix of each template (``[图片`` / ``【语音`` ...), searched in folded
+  text; because it is derived, adding or changing a template changes the detector too;
 * :func:`is_reproducible` tells which kinds the bot could itself have sent.
 
 Fields are written ``{name}``; the literal parts must not contain braces.
@@ -239,42 +240,104 @@ def is_reproducible(message: object) -> bool:
 # ------------------------------------------------------------------- detector
 
 
+#: Neutral wordings a model may write for a template whose own wording names a person
+#: (``[她撤回了一条消息]`` / ``[你撤回了一条消息]``): extra literal prefix keys per template name.
+#: They only apply to a detector whose table has that template.
+EVENT_KEY_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "revoke_her": ("撤回了一条消息", "对方撤回了一条消息"),
+    "revoke_user": ("我撤回了一条消息",),
+}
+
+# After NFKC the full-width "［" is "[", but "【" is not folded, so both openings are listed.
+_OPENING = r"[\[【]"
+# where the literal prefix of a template ends: a field, a space, a separator or a closing bracket
+_KEY_END = re.compile(r"[{\s:,\]】]")
+
+
 def _normalise(text: str) -> str:
     return unicodedata.normalize("NFKC", text).strip()
 
 
-def pattern_for_template(template: str) -> re.Pattern[str]:
-    """Regular expression that matches every rendering of ``template`` (whole line)."""
+def fold_event_text(text: str) -> str:
+    """``text`` as the detector reads it: NFKC, without any whitespace or format (Cf) character.
+
+    A full-width, spaced-out or zero-width-decorated marker folds to the plain one
+    (``[语音8秒]``), so a model (or a chat export) cannot slip it past the literal search.
+    """
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKC", text)
+        if not (char.isspace() or unicodedata.category(char) == "Cf")
+    )
+
+
+def key_for_template(template: str) -> str | None:
+    """The literal a rendering of ``template`` starts with after its opening bracket.
+
+    ``[语音 {seconds} 秒：{transcript}]`` -> ``语音``; ``[通话已在其它设备接听]`` is its own key.
+    ``None`` when the template does not open with ``[`` or ``【`` and a literal.
+    """
     normalised = _normalise(template)
-    parts: list[str] = []
-    position = 0
-    for match in _FIELD.finditer(normalised):
-        parts.append(re.escape(normalised[position : match.start()]))
-        parts.append(".*?")
-        position = match.end()
-    parts.append(re.escape(normalised[position:]))
-    return re.compile("^" + "".join(parts) + "$")
+    if not normalised or normalised[0] not in "[【":
+        return None
+    literal = normalised[1:]
+    end = _KEY_END.search(literal)
+    key = fold_event_text(literal[: end.start()] if end else literal)
+    return key or None
+
+
+def pattern_for_template(template: str) -> re.Pattern[str]:
+    """Regular expression that finds ``template`` in a folded line (see :func:`fold_event_text`).
+
+    It looks for the bracketed literal prefix (:func:`key_for_template`) anywhere in the line;
+    the closing bracket and the fields are not required, so a cut-off output is found too.
+    Raises ``ValueError`` for a template without a bracketed literal prefix.
+    """
+    key = key_for_template(template)
+    if key is None:
+        raise ValueError(f"template has no bracketed literal prefix: {template!r}")
+    return re.compile(_OPENING + re.escape(key))
 
 
 class EventTextDetector:
-    """Recognises event text lines; the rules are derived from the template table."""
+    """Recognises lines that hold event text; the rules are derived from the template table.
 
-    def __init__(self, templates: Mapping[str, str] = EVENT_TEMPLATES) -> None:
-        self._patterns = {name: pattern_for_template(text) for name, text in templates.items()}
+    A line is event text when, once folded (:func:`fold_event_text`), it contains ``[`` or
+    ``【`` right before the literal prefix of a template, anywhere in the line, with or without
+    the closing bracket (R-SAFE-006, D-670).  Templates that share a prefix (``[图片]`` and
+    ``[图片：…]``) are one family and are named by the first of them in table order.
+    """
+
+    def __init__(
+        self,
+        templates: Mapping[str, str] = EVENT_TEMPLATES,
+        aliases: Mapping[str, tuple[str, ...]] = EVENT_KEY_ALIASES,
+    ) -> None:
+        self._names = tuple(templates)
+        owners: dict[str, str] = {}
+        for name, text in templates.items():
+            keys = (key_for_template(text), *(fold_event_text(a) for a in aliases.get(name, ())))
+            for key in keys:
+                if key:
+                    owners.setdefault(key, name)
+        self._owners = owners
+        longest_first = sorted(owners, key=lambda key: (-len(key), key))
+        self._search = (
+            re.compile(_OPENING + "(" + "|".join(re.escape(key) for key in longest_first) + ")")
+            if longest_first
+            else None
+        )
 
     @property
     def names(self) -> tuple[str, ...]:
-        return tuple(self._patterns)
+        return self._names
 
     def match(self, line: str) -> str | None:
-        """Name of the first template ``line`` is a rendering of, else ``None``."""
-        candidate = _normalise(line)
-        if not candidate.startswith("["):
+        """Name of the template family whose event text ``line`` holds, else ``None``."""
+        if self._search is None:
             return None
-        for name, pattern in self._patterns.items():
-            if pattern.match(candidate):
-                return name
-        return None
+        found = self._search.search(fold_event_text(line))
+        return self._owners[found.group(1)] if found else None
 
     def is_event_text(self, line: str) -> bool:
         return self.match(line) is not None
