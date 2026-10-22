@@ -89,6 +89,11 @@ class MemoryAssembler:
         self._estimator = estimator or TokenEstimator()
         self._limits = limits
 
+    @property
+    def estimator(self) -> TokenEstimator:
+        """What the block is trimmed with (the calibrated one in the live view, D-703)."""
+        return self._estimator
+
     # ------------------------------------------------------------------ entry points
 
     def view(

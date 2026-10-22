@@ -250,7 +250,7 @@ class IlinkChannel(Channel):
                 timeout_s=TIMEOUT_QUICK_S,
             )
         except IlinkError as exc:
-            log.warning("lifecycle_notice_failed", endpoint=endpoint, error=str(exc))
+            log.warning("lifecycle_notice_failed", endpoint=endpoint, error=type(exc).__name__)
 
     def health(self) -> ComponentHealth:
         supervised = self._supervisor.health()

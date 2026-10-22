@@ -178,7 +178,7 @@ flowchart LR
   q -. "Worker 执行" .-> run
 ```
 
-- 两把独立的单实例锁：`run` 由 `twin run` 持有，`supervisor` 由 `twin supervise` 持有，互不冲突；独占命令（恢复备份、一键删除、密钥轮换、数据库迁移）发现任何一把被持有就拒绝（退出码 4）。D-108、D-109、D-126。
+- 两把独立的单实例锁：`run` 由 `twin run` 持有，`supervisor` 由 `twin supervise` 持有，互不冲突；独占命令（恢复备份、一键删除、密钥轮换、数据库迁移）取得这两把锁并持有到命令完成，任何一把被别的进程持有就拒绝（退出码 4）。D-108、D-109、D-126、D-710。
 - 轻量修改命令写库后递增 `settings.state_version`；运行中的应用每 2 秒检查，变化时使相关缓存失效并调和（重读人设卡、重建今天的计划、按新后端启停 llama-server）。
 - 多进程访问 SQLite：WAL + `busy_timeout`，写事务短小（读用延迟 `BEGIN`，写一律 `BEGIN IMMEDIATE`，D-103）。
 

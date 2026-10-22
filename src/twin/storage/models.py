@@ -34,6 +34,7 @@ from twin.storage.types import (
     UTCDateTime,
     encrypted_column,
     sealed_json,
+    sealed_optional_text,
 )
 
 NAMING_CONVENTION = {
@@ -112,7 +113,13 @@ class Job(TimestampMixin, Base):
     run_after: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=now_utc)
     offpeak_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     deadline: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    # plain: the type of the exception, structured facts and the stack - never its message (D-714)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # sealed: the redacted message of the exception (``twin jobs show <id> --detail``)
+    last_error_detail_ct: Mapped[SealedBlob | None] = encrypted_column(
+        "last_error_detail", nullable=True
+    )
+    last_error_detail = sealed_optional_text()
     # one-time batch concept (R-LLM-014); estimation logic belongs to the business rounds
     batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     estimated_cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)

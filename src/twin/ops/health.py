@@ -356,7 +356,6 @@ class HealthCollector:
         self._config: HealthConfig = services.settings.ops.health
         self._started_at = started_at or services.clock.now_utc()
         self._live = live
-        self._budget: Any = None
         self._probes: list[tuple[str, Callable[[], Awaitable[HealthCheck]]]] = []
 
     # -- database readings (blocking) ------------------------------------------------
@@ -425,9 +424,8 @@ class HealthCollector:
     def _budget_check(self) -> HealthCheck:
         from twin.llm.runtime import build_llm_runtime
 
-        if self._budget is None:
-            self._budget = build_llm_runtime(self._services).budget
-        status = self._budget.compute()
+        # the budget of the one runtime of the process, the one the engine and the jobs spend on
+        status = build_llm_runtime(self._services).budget.compute()
         return check_budget(status.level, status.daily_ratio, status.monthly_ratio)
 
     def _disk(self) -> HealthCheck:

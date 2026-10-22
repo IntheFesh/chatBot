@@ -8,11 +8,17 @@
 * :class:`Worker` runs handlers with bounded concurrency, retries failures with
   exponential backoff, marks a job ``failed`` and raises an alert once its
   attempts are used up, and after a restart returns ``running`` jobs to
-  ``pending`` (:meth:`Worker.recover`).
+  ``pending`` (:meth:`Worker.recover`) - except a job whose worker is still alive in another
+  process (:mod:`twin.ops.liveness`, D-712).
 * Off-peak scheduling is decided by an injected :class:`OffPeakPolicy`.  The
   production policy is registered by round 01 (R-LLM-007); until then
   :class:`DeferredOffPeakPolicy` is in force, under which ``offpeak_only`` jobs
   wait for their ``deadline``.  This dependency is recorded in TRACEABILITY.
+* A failure is recorded in two places (round 17 item 44, D-714): ``jobs.last_error`` (plain; shown
+  by ``twin jobs list|show``, logged, put in the alert) holds the **type** of the exception, a few
+  structured facts (an HTTP status, an error code) and the stack locations - never its message,
+  which can quote a sentence of the conversation; ``jobs.last_error_detail`` (sealed) holds the
+  redacted message and is shown only by ``twin jobs show <id> --detail``.
 * One-time batches (R-LLM-014): jobs may carry ``batch_id``,
   ``estimated_cost_usd`` and ``requires_approval``; an unapproved job is never
   claimed.  ``twin jobs approve`` records the approval.  Estimation logic is
@@ -34,9 +40,14 @@ from typing import TYPE_CHECKING, Any, Protocol
 from sqlalchemy import and_, func, or_, select
 
 from twin.clock import Clock
-from twin.llm.redaction import redact_text
 from twin.ops.alerts import AlertSink
-from twin.ops.logging import get_logger
+from twin.ops.liveness import ProcessProbe
+from twin.ops.logging import (
+    describe_exception,
+    exception_detail,
+    exception_summary,
+    get_logger,
+)
 from twin.storage.db import Database
 from twin.storage.models import JOB_STATUSES, Job
 
@@ -46,7 +57,8 @@ if TYPE_CHECKING:
 log = get_logger("twin.jobs")
 
 DEFAULT_PRIORITY = 100
-MAX_ERROR_CHARS = 500
+MAX_ERROR_CHARS = 500  # of ``jobs.last_error``: the type, its facts and the stack
+MAX_ERROR_DETAIL_CHARS = 2000  # of ``jobs.last_error_detail``: the sealed, redacted message
 
 
 class JobError(RuntimeError):
@@ -187,12 +199,22 @@ def _view(job: Job) -> JobView:
 # -------------------------------------------------------------------- queue
 
 
-class JobQueue:
-    """Repository over the ``jobs`` table."""
+OwnerAlive = Callable[[str | None, datetime | None], bool]
 
-    def __init__(self, db: Database, clock: Clock) -> None:
+
+class JobQueue:
+    """Repository over the ``jobs`` table.
+
+    ``owner_alive(worker_id, claimed_at)`` tells :meth:`recover_running` whether the worker that
+    claimed a ``running`` job is still working (default: :meth:`ProcessProbe.owner_alive`).
+    """
+
+    def __init__(
+        self, db: Database, clock: Clock, *, owner_alive: OwnerAlive | None = None
+    ) -> None:
         self._db = db
         self._clock = clock
+        self._owner_alive: OwnerAlive = owner_alive or ProcessProbe().owner_alive
 
     def enqueue(
         self,
@@ -310,6 +332,7 @@ class JobQueue:
         status: str,
         error: str | None,
         retry_at: datetime | None,
+        detail: str | None = None,
     ) -> str | None:
         now = self._clock.now_utc()
         with self._db.transaction(bump_state=False) as session:
@@ -320,6 +343,7 @@ class JobQueue:
             job.locked_by = None
             if error is not None:
                 job.last_error = error
+                job.last_error_detail = detail
             if retry_at is not None:
                 job.run_after = retry_at
             else:
@@ -330,11 +354,29 @@ class JobQueue:
         return self._finish(job_id, worker_id, status="done", error=None, retry_at=None) is not None
 
     def fail(
-        self, job_id: str, worker_id: str, error: str, *, retry_at: datetime | None
+        self,
+        job_id: str,
+        worker_id: str,
+        error: str,
+        *,
+        retry_at: datetime | None,
+        detail: str | None = None,
     ) -> str | None:
-        """Record a failure: retry at ``retry_at`` or, if ``None``, mark ``failed``."""
+        """Record a failure: retry at ``retry_at`` or, if ``None``, mark ``failed``.
+
+        ``error`` goes into the plain column and must hold no message; ``detail`` (the redacted
+        message) is sealed.
+        """
         status = "pending" if retry_at is not None else "failed"
-        return self._finish(job_id, worker_id, status=status, error=error, retry_at=retry_at)
+        return self._finish(
+            job_id, worker_id, status=status, error=error, retry_at=retry_at, detail=detail
+        )
+
+    def error_detail(self, job_id: str) -> str | None:
+        """The sealed message of the exception that failed the job last (``jobs show --detail``)."""
+        with self._db.session() as session:
+            job = session.get(Job, job_id)
+            return job.last_error_detail if job is not None else None
 
     def release(self, job_id: str, worker_id: str, *, run_after: datetime | None = None) -> bool:
         """Give back a job without counting the attempt (shutdown, or ``JobDeferred``)."""
@@ -352,18 +394,22 @@ class JobQueue:
     def recover_running(self) -> tuple[int, list[JobView]]:
         """After a restart: ``running`` -> ``pending`` (or ``failed`` if attempts are used up).
 
-        Returns ``(requeued_count, newly_failed_jobs)``.
+        A job whose worker is still alive in another process stays ``running`` (D-712): taking
+        it over would execute it twice.  Returns ``(requeued_count, newly_failed_jobs)``.
         """
         requeued = 0
         failed: list[JobView] = []
         now = self._clock.now_utc()
         with self._db.transaction(bump_state=False) as session:
             for job in session.execute(select(Job).where(Job.status == "running")).scalars():
+                if self._owner_alive(job.locked_by, job.started_at):
+                    continue
                 job.locked_by = None
                 if job.attempts >= job.max_attempts:
                     job.status = "failed"
                     job.finished_at = now
                     job.last_error = "process stopped while the job was running; attempts exhausted"
+                    job.last_error_detail = None
                     failed.append(_view(job))
                 else:
                     job.status = "pending"
@@ -384,6 +430,7 @@ class JobQueue:
             job.run_after = now
             job.finished_at = None
             job.last_error = None
+            job.last_error_detail = None
             return True
 
     def cancel(self, job_id: str) -> bool:
@@ -564,8 +611,19 @@ def backoff_delay(attempts: int, base_s: float, cap_s: float) -> float:
 
 
 def describe_failure(exc: BaseException) -> str:
-    """Redacted, truncated error text safe to store and show (no chat content)."""
-    return f"{type(exc).__name__}: {redact_text(str(exc))}"[:MAX_ERROR_CHARS]
+    """What a failure may say in a plain column, a log and an alert: no message (D-714).
+
+    The type of the exception and of its causes, a few structured facts (status, error code,
+    retry flag) and the stack locations: ``ApiError status=503 @ deepseek.py:612:_call <- ...``.
+    The message - which can quote a sentence of the conversation - is :func:`describe_detail`.
+    """
+    summary, stack = describe_exception((type(exc), exc, exc.__traceback__))
+    return (f"{summary} @ {stack}" if stack else summary)[:MAX_ERROR_CHARS]
+
+
+def describe_detail(exc: BaseException) -> str | None:
+    """The redacted, shortened message of ``exc`` for the sealed column; ``None`` if it has none."""
+    return exception_detail(exc, MAX_ERROR_DETAIL_CHARS) or None
 
 
 class Worker:
@@ -669,7 +727,13 @@ class Worker:
                 partial(self._queue.release, job.id, self._worker_id, run_after=retry_at)
             )
             self._summary.deferred += 1
-            log.info("job_deferred", job_id=job.id, job_type=job.type, reason=str(deferred)[:200])
+            log.info(
+                "job_deferred",
+                job_id=job.id,
+                job_type=job.type,
+                reason=exception_summary(deferred.__cause__ or deferred),
+                retry_in_s=deferred.retry_in_s,
+            )
         except Exception as exc:
             await self._record_failure(job, exc)
         else:
@@ -682,10 +746,18 @@ class Worker:
 
     async def _record_failure(self, job: JobView, exc: Exception) -> None:
         error = describe_failure(exc)
+        detail = describe_detail(exc)
         if job.attempts < job.max_attempts:
             retry_at = self._clock.now_utc() + timedelta(seconds=self.retry_delay(job.attempts))
             outcome = await asyncio.to_thread(
-                self._queue.fail, job.id, self._worker_id, error, retry_at=retry_at
+                partial(
+                    self._queue.fail,
+                    job.id,
+                    self._worker_id,
+                    error,
+                    retry_at=retry_at,
+                    detail=detail,
+                )
             )
             if outcome is not None:
                 self._summary.retried += 1
@@ -699,7 +771,7 @@ class Worker:
                 )
             return
         outcome = await asyncio.to_thread(
-            self._queue.fail, job.id, self._worker_id, error, retry_at=None
+            partial(self._queue.fail, job.id, self._worker_id, error, retry_at=None, detail=detail)
         )
         if outcome is not None:
             self._summary.failed += 1

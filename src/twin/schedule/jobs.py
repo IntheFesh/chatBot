@@ -67,8 +67,6 @@ async def handle_lifeline_generate(ctx: JobContext) -> None:
         raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
     except CircuitOpenError as exc:
         raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
-    finally:
-        await runtime.client.aclose()
     await asyncio.to_thread(store.mark_lifeline_done, plan.id, services.clock.now_utc())
     log.info(
         "lifeline_job_done",

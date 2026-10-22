@@ -26,6 +26,7 @@ class SimulatedDeepSeek:
     json_valid_with_thinking: bool = True
     json_valid_without_thinking: bool = True
     json_server_error: int | None = None
+    json_thinking_error: int | None = None  # the same, but only for requests with thinking on
     detail_server_error: int | None = None
     reasoning_when_thinking: bool = True
     reasoning_when_not_thinking: bool = False
@@ -76,6 +77,8 @@ class SimulatedDeepSeek:
         if "response_format" in body:
             if self.json_server_error is not None:
                 return error(self.json_server_error, "temporary trouble")
+            if thinking and self.json_thinking_error is not None:
+                return error(self.json_thinking_error, "json is not available with thinking")
             valid = self.json_valid_with_thinking if thinking else self.json_valid_without_thinking
             text = '{"city": "Paris", "population_millions": 2.1}' if valid else "Paris!"
         elif image_tokens:

@@ -188,7 +188,7 @@ def test_encrypted_tables_are_discovered_from_the_schema() -> None:
     assert names == {
         "alerts": {"detail"},
         "channel_state": {"value"},
-        "jobs": {"payload"},
+        "jobs": {"payload", "last_error_detail"},  # round 17 item 44: the sealed error message
         "settings": {"value", "history"},
         # round 03: the import tables join the rotation automatically
         "conversations": {"username", "display_name"},
@@ -273,6 +273,31 @@ def test_rotation_reencrypts_everything_and_retires_the_old_key(
     for sha in hashes.values():
         assert media.key_id_of(sha) == 2
         assert media.verify(sha)
+
+
+def test_the_sealed_error_message_of_a_failed_job_is_rotated_like_every_other_value(
+    rotation_env: tuple[Database, KeyRing, MediaStore], keystore: KeyStore
+) -> None:
+    """R17-44 (D-714): ``jobs.last_error_detail`` is found by the schema and re-encrypted."""
+    db, ring, media = rotation_env
+    with db.transaction() as session:
+        failed = Job(type="boom", payload={"n": 1}, status="failed", attempts=1)
+        session.add(failed)
+        session.flush()
+        failed.last_error_detail = "cannot parse: 一句聊天"
+        job_id = failed.id
+        clean = Job(type="boom", payload={"n": 2})  # a job that never failed: NULL stays NULL
+        session.add(clean)
+        session.flush()
+        clean_id = clean.id
+    rotate_db_key(db, keystore, ring, db.clock, media)
+    with db.session() as session:
+        found = session.get(Job, job_id)
+        assert found is not None and found.last_error_detail == "cannot parse: 一句聊天"
+        assert found.last_error_detail_ct is not None
+        assert blob_key_id(bytes(found.last_error_detail_ct)) == 2
+        untouched = session.get(Job, clean_id)
+        assert untouched is not None and untouched.last_error_detail is None
 
 
 def test_old_ciphertext_and_backups_remain_readable_with_the_retired_key(

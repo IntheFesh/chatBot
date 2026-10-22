@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
-from datetime import timedelta
+import subprocess
+import sys
+from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -12,8 +17,12 @@ import pytest
 from tests.support.clock import ManualClock
 from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
+from tests.support.win32 import FakeWin32
+from twin.clock import SystemClock
+from twin.llm.errors import ApiError, BudgetDeniedError
 from twin.ops.alerts import AlertService
 from twin.ops.jobs import (
+    MAX_ERROR_DETAIL_CHARS,
     BatchNotFoundError,
     BatchTooLargeError,
     DeferredOffPeakPolicy,
@@ -24,16 +33,20 @@ from twin.ops.jobs import (
     Worker,
     backoff_delay,
     default_registry,
+    describe_detail,
     describe_failure,
     get_offpeak_policy,
     job_handler,
     load_handlers,
     set_offpeak_policy,
 )
+from twin.ops.liveness import ProcessProbe
+from twin.ops.logging import configure_logging, shutdown_logging
 from twin.storage.db import Database
 from twin.storage.models import Alert, Job
 
 PHONE = mobile()
+BODY = "这是一句绝对不能出现在明文里的聊天内容"
 
 
 class AlwaysOffPeak:
@@ -187,9 +200,12 @@ async def test_failed_jobs_retry_with_exponential_backoff_then_fail_with_an_aler
     assert (first.retried, first.failed) == (1, 0)
     assert job.status == "pending" and job.attempts == 1
     assert job.run_after == clock.now_utc() + timedelta(seconds=30)
-    assert (
-        job.last_error is not None and PHONE not in job.last_error and "[手机号]" in job.last_error
-    )
+    # the plain column says what failed and where - not what the exception said (D-714) ...
+    assert job.last_error is not None and job.last_error.startswith("RuntimeError @ ")
+    assert PHONE not in job.last_error and "[手机号]" not in job.last_error
+    assert "upstream refused" not in job.last_error and "flaky" in job.last_error
+    # ... the message is sealed, redacted
+    assert queue.error_detail(job_id) == "upstream refused [手机号]"
 
     assert (await worker.run_until_idle()).retried == 0  # not due yet
     clock.tick(30)
@@ -244,9 +260,139 @@ async def test_handler_exception_does_not_stop_other_jobs(
     assert seen == ["ok:1", "ok:2"]
 
 
-def test_describe_failure_redacts_and_truncates() -> None:
-    text = describe_failure(RuntimeError(f"{PHONE} " + "x" * 2000))
-    assert text.startswith("RuntimeError: [手机号]") and len(text) <= 500
+def caught(exc: BaseException) -> BaseException:
+    try:
+        raise exc
+    except BaseException as found:
+        return found
+
+
+def test_describe_failure_is_the_type_the_facts_and_the_stack_but_not_the_message() -> None:
+    found = caught(RuntimeError(f"{PHONE} {BODY} " + "x" * 2000))
+    text = describe_failure(found)
+    assert text.startswith("RuntimeError @ ") and "caught" in text and len(text) <= 500
+    for private in (PHONE, "[手机号]", BODY, "xxx"):
+        assert private not in text
+    structured = describe_failure(caught(ApiError(BODY, status=503, retryable=True)))
+    assert structured.startswith("ApiError status=503 retryable=true @ ")
+    assert describe_failure(RuntimeError("never raised")) == "RuntimeError"  # no stack to show
+
+
+def test_describe_detail_is_the_redacted_message_and_nothing_when_there_is_none() -> None:
+    detail = describe_detail(RuntimeError(f"{PHONE} {BODY} " + "x" * 5000))
+    assert detail is not None and detail.startswith(f"[手机号] {BODY} xxx")
+    assert len(detail) == MAX_ERROR_DETAIL_CHARS and PHONE not in detail
+    assert describe_detail(RuntimeError()) is None
+
+
+async def test_a_failure_keeps_its_message_sealed_and_out_of_every_plain_place(
+    queue: JobQueue,
+    registry: HandlerRegistry,
+    db: Database,
+    clock: ManualClock,
+    tmp_path: Path,
+) -> None:
+    """R17-44 (D-714): a sentence of the conversation in an exception is in the sealed column only.
+
+    Not in ``last_error``, not in the alert, not in the log at any level above DEBUG, and not
+    anywhere in the bytes of the database file (the sealed column is ciphertext).
+    """
+    log_path = configure_logging(tmp_path / "logs", level="DEBUG", console=False)
+
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(f"cannot parse: {BODY}")
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=2)
+    worker = make_worker(queue, registry, db, clock)
+    try:
+        await worker.run_until_idle()  # the first attempt: a retry is scheduled
+        clock.tick(3600)
+        summary = await worker.run_until_idle()  # the second: the job fails for good
+        written = log_path.read_text(encoding="utf-8")
+    finally:
+        shutdown_logging()
+    assert summary.failed == 1
+    job = queue.get(job_id)
+    assert job is not None and job.status == "failed"
+    assert job.last_error is not None and BODY not in job.last_error
+    assert job.last_error.startswith("ValueError @ ")
+    assert queue.error_detail(job_id) == f"cannot parse: {BODY}"  # visible where it is sealed
+    with db.session() as session:
+        [alert] = session.query(Alert).all()
+        assert BODY not in str(alert.detail) and BODY not in alert.title
+    entries = [json.loads(line) for line in written.splitlines() if line]
+    assert {e["event"] for e in entries} >= {"job_retry_scheduled", "job_failed"}
+    for entry in entries:
+        if entry["level"] != "DEBUG":
+            assert BODY not in json.dumps(entry, ensure_ascii=False), entry["event"]
+    db.dispose()
+    raw = b"".join(path.read_bytes() for path in db.path.parent.glob(f"{db.path.name}*"))
+    assert BODY.encode("utf-8") not in raw and b"cannot parse" not in raw
+
+
+async def test_the_identifier_of_a_message_is_masked_in_the_sealed_detail(
+    queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
+) -> None:
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(f"cannot send {PHONE}")
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=1)
+    await make_worker(queue, registry, db, clock).run_until_idle()
+    job = queue.get(job_id)
+    assert job is not None and job.last_error is not None and PHONE not in job.last_error
+    assert queue.error_detail(job_id) == "cannot send [手机号]"
+
+
+async def test_retrying_and_recovering_clear_or_leave_the_detail_consistently(
+    queue: JobQueue, registry: HandlerRegistry, db: Database, clock: ManualClock
+) -> None:
+    async def boom(ctx: JobContext) -> None:
+        raise ValueError(BODY)
+
+    registry.register("boom", boom)
+    job_id = queue.enqueue("boom", {}, max_attempts=1)
+    await make_worker(queue, registry, db, clock).run_until_idle()
+    assert queue.error_detail(job_id) == BODY
+    assert queue.retry(job_id)  # a fresh start: neither error is left
+    job = queue.get(job_id)
+    assert job is not None and job.last_error is None
+    assert queue.error_detail(job_id) is None
+    assert queue.error_detail("no-such-job") is None
+    # a job that used its last attempt and died with its process: a fixed text, no old message
+    queue.claim_next({"boom"}, offpeak_allowed=True, worker_id="dead-process")
+    assert queue.recover_running()[1][0].last_error == (
+        "process stopped while the job was running; attempts exhausted"
+    )
+    assert queue.error_detail(job_id) is None
+
+
+async def test_a_deferral_is_logged_with_the_type_of_its_cause_not_its_words(
+    queue: JobQueue,
+    registry: HandlerRegistry,
+    db: Database,
+    clock: ManualClock,
+    tmp_path: Path,
+) -> None:
+    log_path = configure_logging(tmp_path / "logs", level="INFO", console=False)
+
+    async def handler(ctx: JobContext) -> None:
+        try:
+            raise BudgetDeniedError("reply", 3)
+        except BudgetDeniedError as exc:
+            raise JobDeferred(f"{BODY} {exc}", retry_in_s=120) from exc
+
+    registry.register("held", handler)
+    queue.enqueue("held", {})
+    try:
+        await make_worker(queue, registry, db, clock).run_until_idle()
+        entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    finally:
+        shutdown_logging()
+    [deferred] = [e for e in entries if e["event"] == "job_deferred"]
+    assert deferred["reason"] == "BudgetDeniedError level=3 purpose=reply"
+    assert deferred["retry_in_s"] == 120 and BODY not in json.dumps(deferred, ensure_ascii=False)
 
 
 # ------------------------------------------------------ restart and recovery
@@ -281,6 +427,113 @@ async def test_recovery_fails_jobs_that_already_used_all_attempts(
     assert job.last_error is not None and "attempts exhausted" in job.last_error
     with db.session() as session:
         assert session.query(Alert).count() == 1
+
+
+# ---------------------------------------------- a worker that is still alive (round 17 item 27)
+
+
+def claim_as(queue: JobQueue, job_type: str, worker_id: str) -> str:
+    job_id = queue.enqueue(job_type, {"n": 1}, max_attempts=3)
+    claimed = queue.claim_next({job_type}, offpeak_allowed=True, worker_id=worker_id)
+    assert claimed is not None and claimed.id == job_id and claimed.status == "running"
+    return job_id
+
+
+async def test_a_job_whose_worker_is_alive_in_another_process_is_not_taken_over(
+    db: Database, registry: HandlerRegistry, clock: ManualClock
+) -> None:
+    """R17-27 (D-712): a restart returns the dead worker's jobs, not the living one's.
+
+    Before: ``recover_running`` flipped every ``running`` row, so a ``--force`` worker's job (or a
+    foreground import's) went back to ``pending`` the moment an application started, and ran twice.
+    """
+    api = FakeWin32()
+    api.processes = {4242: clock.now_utc().timestamp() - 3600}  # alive, started an hour before
+    probe = ProcessProbe(platform="win32", win32=api, own_pid=1)
+    queue = JobQueue(db, clock, owner_alive=probe.owner_alive)
+    alive = claim_as(queue, "t", "4242-livingone")
+    dead = claim_as(queue, "t", "4243-deadone")  # no such process any more
+    no_pid = claim_as(queue, "t", "dead-process")
+    worker = make_worker(queue, registry, db, clock)
+    assert await worker.recover() == 2
+    kept = queue.get(alive)
+    assert kept is not None and (kept.status, kept.attempts) == ("running", 1)
+    for job_id in (dead, no_pid):
+        gone = queue.get(job_id)
+        assert gone is not None and (gone.status, gone.attempts) == ("pending", 1)
+    with db.session() as session:
+        assert session.get(Job, alive).locked_by == "4242-livingone"  # type: ignore[union-attr]
+        assert session.query(Alert).count() == 0
+    assert queue.cancel(alive)  # and the user can still end it
+
+
+async def test_a_living_worker_keeps_a_job_even_when_its_attempts_are_used_up(
+    db: Database, registry: HandlerRegistry, clock: ManualClock
+) -> None:
+    """The "attempts exhausted" ending is for a worker that died while running the last attempt."""
+    api = FakeWin32()
+    api.processes = {4242: clock.now_utc().timestamp() - 10}
+    queue = JobQueue(
+        db,
+        clock,
+        owner_alive=ProcessProbe(platform="win32", win32=api, own_pid=1).owner_alive,
+    )
+    job_id = queue.enqueue("t", {}, max_attempts=1)
+    queue.claim_next({"t"}, offpeak_allowed=True, worker_id="4242-livingone")
+    assert queue.recover_running() == (0, [])
+    job = queue.get(job_id)
+    assert job is not None and job.status == "running"
+    api.processes.clear()  # it died
+    requeued, failed = queue.recover_running()
+    assert requeued == 0 and [j.id for j in failed] == [job_id]
+
+
+async def test_the_claim_time_is_what_the_check_is_given(db: Database, clock: ManualClock) -> None:
+    asked: list[tuple[str | None, datetime | None]] = []
+
+    def owner_alive(worker_id: str | None, claimed_at: datetime | None) -> bool:
+        asked.append((worker_id, claimed_at))
+        return False
+
+    queue = JobQueue(db, clock, owner_alive=owner_alive)
+    claim_as(queue, "t", "4242-livingone")
+    assert queue.recover_running()[0] == 1
+    assert asked == [("4242-livingone", clock.now_utc())]
+
+
+@pytest.fixture
+def sleeper() -> Iterator[subprocess.Popen[bytes]]:
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        yield process
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_recovery_with_the_real_check_leaves_a_live_process_alone_and_takes_a_dead_ones(
+    db: Database, sleeper: subprocess.Popen[bytes]
+) -> None:
+    queue = JobQueue(db, SystemClock())  # the default check, on a claim made just now
+    alive = claim_as(queue, "t", f"{sleeper.pid}-aaaa")
+    assert queue.recover_running() == (0, [])
+    sleeper.kill()
+    sleeper.wait()
+    assert queue.recover_running()[0] == 1
+    job = queue.get(alive)
+    assert job is not None and job.status == "pending"
+
+
+def test_recovery_with_the_real_check_does_not_trust_a_pid_that_is_younger_than_the_claim(
+    db: Database, sleeper: subprocess.Popen[bytes], clock: ManualClock
+) -> None:
+    """After a power loss the pid of the dead worker belongs to some other program."""
+    clock.set_time(datetime.now(UTC) - timedelta(hours=2))
+    queue = JobQueue(db, clock)
+    reused = claim_as(queue, "t", f"{sleeper.pid}-aaaa")  # claimed two hours ago
+    assert queue.recover_running()[0] == 1
+    job = queue.get(reused)
+    assert job is not None and job.status == "pending"
 
 
 async def test_cancelled_while_running_discards_the_result(
