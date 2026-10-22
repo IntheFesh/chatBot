@@ -1,6 +1,7 @@
 ### LLaMA-Factory {{ llamafactory_version }} - one generated reply for every context of the test set ({{ profile.name }})
 ### rendered by twin.training.yaml_render; do not edit by hand
-### eval.sh points adapter_name_or_path at the best adapter (output/dpo when it exists)
+### eval.sh sets adapter_name_or_path to the adapter stack under evaluation: output/sft, or with DPO
+### output/sft,output/dpo (layered profiles) / output/dpo (the 4-bit profile continues the SFT adapter)
 
 ### model
 model_name_or_path: {{ model_path }}
