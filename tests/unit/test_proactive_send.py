@@ -176,3 +176,12 @@ async def test_a_bubble_that_is_out_is_written_down_even_if_the_task_is_cancelle
 def test_the_outcome_knows_whether_anything_went_out() -> None:
     assert not SendOutcome().started
     assert SendOutcome(sent=1).started
+
+
+def test_a_message_the_channel_held_back_for_a_probe_is_logged_as_that() -> None:
+    """R17-4 (D-684): the pre-send check catches a probe that starts, this catches the race."""
+    from twin.schedule.proactive.scheduler import _unsent_reason
+    from twin.schedule.proactive.types import Reason
+
+    assert _unsent_reason(SendOutcome(stop=StopReason.PROBE)) is Reason.PROBE_RUNNING
+    assert _unsent_reason(SendOutcome(stop=StopReason.EXPIRED)) is Reason.WINDOW_CLOSED

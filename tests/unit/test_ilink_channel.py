@@ -36,6 +36,7 @@ from twin.channel.base import AuthState, Channel, InboundMessage
 from twin.channel.component import register_channel
 from twin.channel.ilink.channel import IlinkChannel
 from twin.channel.ilink.store import QUOTE_INDEX_MAX, Credentials, IlinkStore
+from twin.channel.state import ChannelStateStore
 from twin.config.loader import load_settings
 from twin.services import Services
 from twin.storage.db import Database
@@ -215,6 +216,25 @@ async def test_the_channel_takes_its_limits_from_the_configuration(services: Ser
         window = channel.window()
         assert window.window_h == services.settings.channel.proactive_window_safe_h == 22
         assert window.quota == services.settings.channel.outbound_quota_safe == 8
+    finally:
+        await channel.stop()
+
+
+async def test_the_channel_takes_the_codes_that_end_a_session_from_the_configuration(
+    api: respx.MockRouter, services: Services
+) -> None:
+    """R17-48 (D-683): ``from_services`` passes ``channel.session_expired_codes`` to the sender."""
+    services.settings.channel.session_expired_codes = [-2, -7]
+    harness_store = IlinkStore(ChannelStateStore(services.db), services.clock)
+    harness_store.save_credentials(
+        Credentials(TOKEN, BOT, USER, API, services.clock.now_utc().isoformat())
+    )
+    harness_store.bind(USER, context_token=CTX)
+    api.post(f"{API}/ilink/bot/sendmessage").respond(200, json={"ret": -7, "errmsg": "over"})
+    channel = IlinkChannel.from_services(services, poll=False)
+    try:
+        result = await channel.send_text("嗨")
+        assert result.session_expired and result.code == -7
     finally:
         await channel.stop()
 

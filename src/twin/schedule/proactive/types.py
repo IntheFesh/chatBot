@@ -71,6 +71,9 @@ class Reason(StrEnum):
     AWAITING_REPLY = "awaiting_reply"  # the last message is too recent to count as unanswered
     CHASE_LIMIT = "chase_limit"
     PAUSED = "paused"
+    PROBE_RUNNING = (
+        "probe_running"  # a channel probe is measuring: nothing else may be sent (D-684)
+    )
     DISABLED = "disabled"
     WINDOW_CLOSED = "window_closed"  # the platform window is over (or never began)
     QUOTA_EXHAUSTED = "quota_exhausted"  # no message is left in the platform's count
@@ -103,14 +106,15 @@ OUTSIDE_REASONS = frozenset(
         Reason.CHANNEL_UNAVAILABLE,
         Reason.CHASE_LIMIT,
         Reason.PAUSED,
+        Reason.PROBE_RUNNING,
         Reason.DISABLED,
         Reason.BUDGET,
     }
 )
 """Reasons the schedule cannot help: a day short of its range is excused by them (R-EVAL-005).
 
-The platform window and count, the login, a pause or the switch, the budget, and a user who
-does not answer (the chase limit stops her from writing again and again)."""
+The platform window and count, the login, a pause or the switch, a running channel probe, the
+budget, and a user who does not answer (the chase limit stops her from writing again and again)."""
 
 REASON_LABELS: Mapping[str, str] = {
     Reason.DEEP_SLEEP: "她在深睡",
@@ -122,6 +126,7 @@ REASON_LABELS: Mapping[str, str] = {
     Reason.AWAITING_REPLY: "上一条主动消息刚发出，还不算没回",
     Reason.CHASE_LIMIT: "已追发到上限",
     Reason.PAUSED: "暂停中",
+    Reason.PROBE_RUNNING: "通道探针运行中",
     Reason.DISABLED: "主动消息已关闭",
     Reason.WINDOW_CLOSED: "被窗口抑制",
     Reason.QUOTA_EXHAUSTED: "平台条数用完",

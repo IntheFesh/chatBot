@@ -44,6 +44,7 @@ FLAG_VOICE_UNTRANSCRIBED = "voice_untranscribed"
 FLAG_VIDEO_NO_COVER = "video_no_cover"
 FLAG_MEDIA_UNAVAILABLE = "media_unavailable"
 FLAG_UNKNOWN_ITEM_TYPE = "unknown_item_type"
+FLAG_CONVERT_FAILED = "convert_failed"  # the conversion crashed: what is certain was kept (D-682)
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,14 @@ class QuoteTarget:
 
 TEST_PREFIX = "[测试]"  # every message the diagnostics and the probe send starts with this
 
+PROBE_RUNNING = "probe_running"
+"""The ``reason`` of a send that the channel held back because a probe is running (D-684).
+
+While the M0 probe measures what the platform lets the bot send, every other message would be
+counted with it.  The refusal is an :attr:`OutboundKind.WINDOW_REJECTED` result (so the engine
+stores no phantom bubble) with this reason, and ``session_expired`` stays false: the platform did
+not say anything.  Only :meth:`Channel.send_urgent_text` (the crisis answer, R-SAFE-001) passes."""
+
 
 @dataclass(frozen=True)
 class BypassRequest:
@@ -349,6 +358,19 @@ class Channel(ABC):
         bypass: SendBypass | None = None,
     ) -> OutboundResult:
         """Send one image whose bytes are on the outbound allow list."""
+
+    async def send_urgent_text(
+        self, text: str, quote: QuoteTarget | None = None, *, recipient: str | None = None
+    ) -> OutboundResult:
+        """Send a safety message: the out-of-role answer to a crisis (R-SAFE-001, D-685).
+
+        The one send that a running channel probe does not hold back (the probe's measurement
+        yields to a person in danger).  Nothing else about it is special: the recipient guard, the
+        login, the window and the count apply as to any other send.  A channel that has no probe
+        to yield to just sends; the WeChat channel overrides this.  Only the engine's crisis answer
+        calls it (``tests/unit/test_channel_probe_policy.py`` scans for that).
+        """
+        return await self.send_text(text, quote, recipient=recipient)
 
     @abstractmethod
     async def send_typing(self, active: bool, *, recipient: str | None = None) -> None:

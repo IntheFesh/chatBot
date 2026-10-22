@@ -9,7 +9,11 @@
 * anything else: ``unknown`` with the item type number.
 
 A media problem never loses the message: the message is delivered without its media and a
-flag says what went wrong.  Only type numbers and reasons are recorded, never content.
+flag says what went wrong.  The same holds when the media store cannot be written (disk full,
+locked file: ``store_failed``) and when the conversion itself crashes:
+:meth:`InboundConverter.degraded` then builds the messages from what is certain (the words, the
+file name, the transcript) and flags them ``convert_failed`` (D-682).  Only type numbers and
+reasons are recorded, never content.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from twin.channel.base import (
+    FLAG_CONVERT_FAILED,
     FLAG_MEDIA_UNAVAILABLE,
     FLAG_UNKNOWN_ITEM_TYPE,
     FLAG_VIDEO_NO_COVER,
@@ -145,9 +150,7 @@ class InboundConverter:
     async def convert(self, wire: WireMessage, message_id: str) -> Converted:
         received_at = self._clock.now_utc()
         at = message_time(wire, received_at)
-        items = [
-            item for item in wire.items() if item.type not in (ITEM_TOOL_START, ITEM_TOOL_RESULT)
-        ]
+        items = _content_items(wire)
         result = Converted(item_types=[item.type for item in wire.items() if item.type is not None])
         quote: QuoteInfo | None = None
         quote_index: int | None = None
@@ -166,14 +169,28 @@ class InboundConverter:
             target = next((pos for pos, (i, _) in enumerate(built) if i == quote_index), 0)
             built[target] = (built[target][0], _with_quote(built[target][1], quote))
         result.messages = [message for _, message in built]
-        for message in result.messages:
-            if message.text and message.kind in (MessageKind.TEXT, MessageKind.VOICE):
-                result.quote_entries.append((message.id, message.text))
-        for item in items:
-            item_id = as_text(item.msg_id)
-            text = _item_text(item)
-            if item_id and text:
-                result.quote_entries.append((item_id, text))
+        _note_quotable(result, items)
+        return result
+
+    def degraded(self, wire: WireMessage, message_id: str) -> Converted:
+        """What is certain of ``wire`` after :meth:`convert` crashed (D-682).
+
+        No network, no store and no quote lookup: each item becomes the message of its type
+        without media (the words of a text, the transcript of a voice, the name of a file), flagged
+        :data:`~twin.channel.base.FLAG_CONVERT_FAILED`.  The ids are the ones ``convert`` would
+        have made, so a redelivery of the same wire message matches.  The cursor of the poller has
+        moved on by the time anyone could ask for the message again, so this is the only chance
+        to keep it.
+        """
+        at = message_time(wire, self._clock.now_utc())
+        items = _content_items(wire)
+        result = Converted(item_types=[item.type for item in wire.items() if item.type is not None])
+        for index, item in enumerate(items):
+            suffix = message_id if len(items) == 1 else f"{message_id}#{index}"
+            message = _degraded_item(item, suffix, at)
+            if message is not None:
+                result.messages.append(message)
+        _note_quotable(result, items)
         return result
 
     # ----------------------------------------------------------- one item
@@ -268,7 +285,11 @@ class InboundConverter:
                 data = aes_ecb_decrypt(key, data)
             except MediaCryptoError:
                 raise MediaFetchError("decrypt_failed") from None
-        stored = await asyncio.to_thread(self._media.put, data, kind)
+        try:
+            stored = await asyncio.to_thread(self._media.put, data, kind)
+        except Exception as exc:  # disk full, a locked file, a key that cannot be read ...
+            log.warning("inbound_media_store_failed", error_type=type(exc).__name__)
+            raise MediaFetchError("store_failed") from None
         return MediaRef(stored.sha256, kind, stored.size, sniff_image_mime(data))
 
     # -------------------------------------------------------------- quote
@@ -303,6 +324,55 @@ class InboundConverter:
             media_ref=media_ref,
             resolved=text is not None or media_ref is not None,
         )
+
+
+def _content_items(wire: WireMessage) -> list[WireItem]:
+    """The items that carry something for the user (tool-call items are not messages)."""
+    return [item for item in wire.items() if item.type not in (ITEM_TOOL_START, ITEM_TOOL_RESULT)]
+
+
+def _note_quotable(result: Converted, items: list[WireItem]) -> None:
+    """Remember the text of what arrived, so that a later quote can be resolved by its id."""
+    for message in result.messages:
+        if message.text and message.kind in (MessageKind.TEXT, MessageKind.VOICE):
+            result.quote_entries.append((message.id, message.text))
+    for item in items:
+        item_id = as_text(item.msg_id)
+        text = _item_text(item)
+        if item_id and text:
+            result.quote_entries.append((item_id, text))
+
+
+def _degraded_item(item: WireItem, message_id: str, at: datetime) -> InboundMessage | None:
+    """One item as a message without media, from plain attribute reads only (see ``degraded``)."""
+    kind = item.type
+    flags = {FLAG_CONVERT_FAILED}
+    text: str | None = None
+    if kind == ITEM_TEXT:
+        text = item.text_item.text if item.text_item else None
+        if not text:
+            return None
+        message_kind = MessageKind.TEXT
+    elif kind == ITEM_IMAGE:
+        flags.add(FLAG_MEDIA_UNAVAILABLE)
+        message_kind = MessageKind.IMAGE
+    elif kind == ITEM_VOICE:
+        text = (item.voice_item.text if item.voice_item else None) or None
+        if text is None:
+            flags.add(FLAG_VOICE_UNTRANSCRIBED)
+        message_kind = MessageKind.VOICE
+    elif kind == ITEM_FILE:
+        text = item.file_item.file_name if item.file_item else None
+        message_kind = MessageKind.FILE
+    elif kind == ITEM_VIDEO:
+        flags.add(FLAG_VIDEO_NO_COVER)
+        message_kind = MessageKind.VIDEO
+    else:
+        flags.add(FLAG_UNKNOWN_ITEM_TYPE)
+        message_kind = MessageKind.UNKNOWN
+    return InboundMessage(
+        message_id, at, message_kind, text=text, flags=frozenset(flags), item_type=kind
+    )
 
 
 def _first_key(hex_key: str | None, media_key: str | None) -> bytes | None:

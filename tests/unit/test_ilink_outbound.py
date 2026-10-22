@@ -39,6 +39,7 @@ from tests.support.ilink import (
 from tests.support.synthetic import mobile
 from tests.support.waiting import wait_until
 from twin.channel.base import (
+    PROBE_RUNNING,
     BypassRefused,
     CapabilityNotSupported,
     MediaNotAllowed,
@@ -53,6 +54,15 @@ from twin.channel.ilink.outbound import (
     IlinkSender,
 )
 from twin.channel.policy import CompositeMediaPolicy, sha256_hex
+from twin.channel.probe.model import (
+    Attempt,
+    AttemptPhase,
+    PlanStatus,
+    ProbePlan,
+    StepId,
+    StepStatus,
+)
+from twin.channel.probe.store import ProbeStore
 from twin.storage.db import Database
 
 SEND = f"{API}/ilink/bot/sendmessage"
@@ -291,6 +301,70 @@ async def test_other_server_errors_are_reported_without_closing_the_window(
     assert not h.channel.session_state().expired
     assert h.channel.session_state().outbound_since_inbound == 0  # a refusal costs no quota
     assert route.call_count == 1
+
+
+async def test_a_configured_code_marks_the_session_expired_like_minus_two(
+    api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    """R17-48 (D-683): ``channel.session_expired_codes`` says which answers end the session."""
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts(), session_expired_codes=[-2, -7])
+    harness.login()
+    harness.bind()
+    try:
+        route = api.post(SEND).respond(200, json={"ret": -7, "errmsg": "session over"})
+        result = await harness.channel.send_text("嗨")
+        assert not result.ok and result.kind is OutboundKind.WINDOW_REJECTED
+        assert result.session_expired is True and result.code == -7
+        assert harness.channel.session_state().expired
+        again = await harness.channel.send_text("再试")
+        assert again.reason == "session_expired" and route.call_count == 1  # no loop
+
+        route.respond(200, json={"ret": -2})  # the old code still counts: both are in the list
+        harness.store.update_window(22, 8, lambda w: w.on_inbound(clock.now_utc()))
+        assert (await harness.channel.send_text("还在吗")).session_expired
+    finally:
+        await harness.channel.stop()
+
+
+async def test_by_default_only_minus_two_ends_the_session_and_minus_seven_is_a_plain_refusal(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    """R17-48 (D-683): the default list is ``[-2]``; any other code is an ordinary rejection."""
+    route = api.post(SEND).respond(200, json={"ret": -7, "errmsg": "something else"})
+    result = await h.channel.send_text("嗨")
+    assert result.kind is OutboundKind.REJECTED and result.code == -7
+    assert not result.session_expired and not h.channel.session_state().expired
+    assert (await h.channel.send_text("再来")).kind is OutboundKind.REJECTED  # asked again
+    assert route.call_count == 2
+
+
+async def test_an_empty_list_means_that_no_answer_ends_the_session(
+    api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts(), session_expired_codes=[])
+    harness.login()
+    harness.bind()
+    try:
+        api.post(SEND).respond(200, json={"ret": -2})
+        result = await harness.channel.send_text("嗨")
+        assert result.kind is OutboundKind.REJECTED and not result.session_expired
+    finally:
+        await harness.channel.stop()
+
+
+async def test_the_login_code_is_never_a_session_code_even_if_listed(
+    api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    """R17-48: ``-14`` (the token is dead) is decided before the list is looked at."""
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts(), session_expired_codes=[-14])
+    harness.login()
+    harness.bind()
+    try:
+        api.post(SEND).respond(200, json={"ret": -14})
+        result = await harness.channel.send_text("嗨")
+        assert result.kind is OutboundKind.AUTH_EXPIRED and not result.session_expired
+    finally:
+        await harness.channel.stop()
 
 
 async def test_a_dead_login_during_a_send_raises_the_alert(
@@ -715,3 +789,119 @@ async def test_a_typing_notice_after_the_login_vanished_sends_nothing(
     h.state.delete("ilink.credentials")
     await h.channel.send_typing(False)
     assert typing.call_count == 1  # only the start; nothing could be sent without a login
+
+
+# ------------------------------------------------------------ a running probe
+
+
+def start_probe(h: Harness, *, attempt: bool = False) -> ProbeStore:
+    store = ProbeStore(h.db, h.clock)
+    store.create()
+    if attempt:
+
+        def open_attempt(plan: ProbePlan) -> None:
+            step = plan.step(StepId.COUNT)
+            step.status = StepStatus.ACTIVE
+            step.attempts.append(
+                Attempt(
+                    n=1,
+                    phase=AttemptPhase.RUNNING,
+                    armed_at=plan.created_at,
+                    baseline_inbound_at=None,
+                )
+            )
+
+        store.update(open_attempt)
+    return store
+
+
+async def test_while_a_probe_runs_a_send_that_is_not_the_probes_is_held_back(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    """R17-4 (D-684): the probe counts what the platform lets the bot send; nothing else may go."""
+    route = api.post(SEND).respond(200, json={})
+    upload = api.post(UPLOAD_URL).respond(200, json={"upload_param": "P"})
+    store = start_probe(h)
+    for result in (
+        await h.channel.send_text("嗨，你在吗"),
+        await h.channel.send_image(STICKER, "image/gif"),
+    ):
+        assert not result.ok and result.kind is OutboundKind.WINDOW_REJECTED
+        assert result.reason == PROBE_RUNNING and not result.session_expired
+    assert route.call_count == 0 and upload.call_count == 0  # nothing touched the network
+    state = h.channel.session_state()
+    assert state.outbound_since_inbound == 0 and not state.expired  # no quota used, no window shut
+    assert h.store.window_state().last_error is None  # and no error recorded against the platform
+    text_entry, image_entry = store.audit()
+    assert (text_entry["decision"], text_entry["why"], text_entry["kind"]) == (
+        "refused",
+        "probe_running",
+        "text",
+    )
+    assert text_entry["text_chars"] == len("嗨，你在吗") and text_entry["text_head"] is None
+    assert image_entry["kind"] == "image" and image_entry["run_id"] is not None
+
+
+async def test_the_probes_own_send_passes_and_the_channel_is_free_again_when_it_ends(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    """R17-4 (D-684): the probe's own send is not held; the hold ends with the plan."""
+    route = api.post(SEND).respond(200, json={})
+    store = start_probe(h)
+    assert (await h.channel.send_text("[测试]x", bypass=AllowingBypass())).ok
+    assert route.call_count == 1
+    assert not (await h.channel.send_text("嗨")).ok and route.call_count == 1
+    store.finish(PlanStatus.STOPPED, "done")
+    assert (await h.channel.send_text("嗨")).ok and route.call_count == 2
+
+
+async def test_an_urgent_message_passes_a_running_probe_and_voids_the_attempt_it_disturbed(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    """R17-4 (D4, D-685): safety wins over the measurement; the attempt is redone."""
+    route = api.post(SEND).respond(200, json={})
+    store = start_probe(h, attempt=True)
+    result = await h.channel.send_urgent_text("我想先停一下，你不是一个人")
+    assert result.ok and route.call_count == 1
+    plan = store.load()
+    assert plan is not None and plan.status is PlanStatus.RUNNING
+    attempt = plan.steps[0].attempts[0]
+    assert attempt.outcome == "void" and attempt.phase is AttemptPhase.FINISHED
+    assert attempt.void_reason is not None and "safety message" in attempt.void_reason
+    assert "void" in plan.events[-1].text
+    [entry] = store.audit()
+    assert entry["decision"] == "urgent" and entry["why"] == "urgent_during_probe"
+    assert entry["text_head"] is None  # the words of the answer are not copied into the audit
+
+
+async def test_an_urgent_message_obeys_the_other_gates_and_voids_nothing_if_it_is_refused(
+    api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    """R17-4 (D-685): ``urgent`` skips only the probe's hold, not the login or the context token."""
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts())
+    harness.login()
+    harness.bind(with_context=False)
+    try:
+        route = api.post(SEND).respond(200, json={})
+        store = start_probe(harness, attempt=True)
+        result = await harness.channel.send_urgent_text("你不是一个人")
+        assert result.reason == "no_context_token" and route.call_count == 0
+        plan = store.load()
+        assert plan is not None and plan.steps[0].attempts[0].outcome is None  # nothing was sent
+        with pytest.raises(RecipientNotAllowed):
+            await harness.channel.send_urgent_text("你不是一个人", recipient=OTHER)
+    finally:
+        await harness.channel.stop()
+
+
+async def test_an_urgent_message_without_a_probe_is_an_ordinary_send_and_audits_nothing(
+    api: respx.MockRouter, h: Harness
+) -> None:
+    route = api.post(SEND).respond(200, json={})
+    assert (await h.channel.send_urgent_text("你不是一个人")).ok and route.call_count == 1
+    assert ProbeStore(h.db, h.clock).audit() == []
+
+
+async def test_an_urgent_message_cannot_carry_a_quote(h: Harness) -> None:
+    with pytest.raises(CapabilityNotSupported):
+        await h.channel.send_urgent_text("x", QuoteTarget("id", "text"))

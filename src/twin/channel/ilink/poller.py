@@ -26,7 +26,13 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from twin.channel.base import AuthState
+from twin.channel.base import (
+    FLAG_CONVERT_FAILED,
+    FLAG_UNKNOWN_ITEM_TYPE,
+    AuthState,
+    InboundMessage,
+    MessageKind,
+)
 from twin.channel.ilink.auth import AuthGuard
 from twin.channel.ilink.http import (
     TIMEOUT_DEFAULT_POLL_S,
@@ -36,7 +42,7 @@ from twin.channel.ilink.http import (
     IlinkProtocolError,
     IlinkTransportError,
 )
-from twin.channel.ilink.inbound import InboundConverter, message_time
+from twin.channel.ilink.inbound import Converted, InboundConverter, message_time
 from twin.channel.ilink.store import (
     BatchCommit,
     ContextToken,
@@ -279,16 +285,34 @@ class IlinkPoller:
                 continue
             try:
                 converted = await self._converter.convert(wire, message_id)
-            except Exception as exc:  # one bad message must not stop the batch
+            except Exception as exc:  # one bad message must not stop the batch, nor be lost
                 failures["convert_error"] += 1
                 log.error("convert_failed", error_type=type(exc).__name__)
-                self._note_inbound(batch, wire, now)
-                continue
+                converted = self._degraded(wire, message_id, now)
             batch.deliver.extend(converted.messages)
             batch.item_types.extend(converted.item_types)
             failures.update(converted.failures)
             batch.quote_entries.extend(converted.quote_entries)
             self._note_inbound(batch, wire, now)
+
+    def _degraded(self, wire: WireMessage, message_id: str, now: datetime) -> Converted:
+        """The message after a crash of ``convert``: what is certain of it, still delivered.
+
+        The cursor moves with the batch, so a message dropped here would be gone for good (D-682).
+        If even the degraded conversion fails, a bare ``unknown`` message keeps the place (the
+        window and the context token are renewed from the wire message by ``_note_inbound``).
+        """
+        try:
+            return self._converter.degraded(wire, message_id)
+        except Exception as exc:
+            log.error("degraded_convert_failed", error_type=type(exc).__name__)
+            bare = InboundMessage(
+                message_id,
+                message_time(wire, now),
+                MessageKind.UNKNOWN,
+                flags=frozenset({FLAG_CONVERT_FAILED, FLAG_UNKNOWN_ITEM_TYPE}),
+            )
+            return Converted(messages=[bare])
 
     def _note_inbound(self, batch: BatchCommit, wire: WireMessage, now: datetime) -> None:
         """Any message from the bound user renews the context token and restarts the window."""

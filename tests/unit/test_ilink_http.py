@@ -137,6 +137,40 @@ async def test_a_request_without_a_token_sends_no_bearer(
     assert b"base_info" not in route.calls.last.request.content
 
 
+async def test_a_timeout_object_is_passed_on_unchanged_and_a_number_stays_a_total_limit(
+    api: respx.MockRouter, http: IlinkHttp
+) -> None:
+    """R17-45 (D-680): ``timeout_s`` may be a number, an ``httpx.Timeout`` or ``None``."""
+    route = api.post(URL).respond(200, json={})
+    await http.post(
+        "getupdates", {}, base_url=API, token=TOKEN, timeout_s=httpx.Timeout(None, connect=10)
+    )
+    assert route.calls.last.request.extensions["timeout"] == {
+        "connect": 10,
+        "read": None,
+        "write": None,
+        "pool": None,
+    }
+    await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
+    assert route.calls.last.request.extensions["timeout"] == {
+        "connect": 5,
+        "read": 5,
+        "write": 5,
+        "pool": 5,
+    }
+
+
+async def test_a_redirect_from_the_api_is_never_followed_because_the_token_travels_with_it(
+    api: respx.MockRouter, http: IlinkHttp
+) -> None:
+    """R17-46 (D-681): only the CDN media transfers (ciphertext, no token) follow redirects."""
+    api.post(URL).respond(302, headers={"location": "https://elsewhere.example/ilink/bot/x"})
+    elsewhere = api.post("https://elsewhere.example/ilink/bot/x").respond(200, json={})
+    with pytest.raises(IlinkHttpError) as caught:
+        await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
+    assert caught.value.status == 302 and elsewhere.call_count == 0
+
+
 # ----------------------------------------------------------------- errors
 
 

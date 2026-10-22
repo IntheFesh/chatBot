@@ -103,6 +103,7 @@ class ScriptedChannel(Channel):
         self.supports_quote = supports_quote
         self.supports_typing = supports_typing
         self.out: list[Out] = []
+        self.urgent: list[str] = []  # the texts that were sent as urgent (the crisis answer)
         self.results: deque[OutboundResult] = deque()  # answers for the next sends, in order
         self.image_error: Exception | None = None
         self._inbox: asyncio.Queue[InboundMessage | None] = asyncio.Queue()
@@ -162,6 +163,12 @@ class ScriptedChannel(Channel):
         if result.ok or result.kind is OutboundKind.AMBIGUOUS:
             self._record(Out("text", text, self.clock.now_utc(), quote))
         return result
+
+    async def send_urgent_text(
+        self, text: str, quote: QuoteTarget | None = None, *, recipient: str | None = None
+    ) -> OutboundResult:
+        self.urgent.append(text)
+        return await self.send_text(text, quote, recipient=recipient)
 
     async def send_image(
         self,
@@ -439,6 +446,7 @@ def build_harness(
     seed: int = 7,
     short_answers: ShortAnswers | None = None,
     renderer: InboundRenderer | None = None,
+    probe_active: Callable[[], bool] | None = None,
 ) -> Harness:
     """Wire an engine the way ``build_engine`` does, with the doubles of this module."""
     chosen_channel = channel or ScriptedChannel(clock)
@@ -486,6 +494,7 @@ def build_harness(
         backends=backends,
         pacing=lambda view: chosen_pacing,
         queue_extraction=queue,
+        probe_active=probe_active,
     )
     return Harness(
         engine,

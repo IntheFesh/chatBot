@@ -9,6 +9,13 @@ every change is a read-modify-write inside one ``BEGIN IMMEDIATE`` transaction
 When a change leaves the plan in a final state (completed or stopped) the structured summary
 is written to the ``settings`` table in the same transaction, so the plan and the result the
 milestone check reads can never disagree.
+
+A third key, :data:`KEY_ACTIVE`, says whether a plan is running.  It is written in the same
+transaction as every change of the plan, and it is what the rest of the application asks (the
+sender, the engine, the proactive scheduler: while a probe measures, nobody else may write to the
+user, D-684): a small read instead of decoding the whole plan.  The state version moves when a
+plan starts or ends, so the running application notices within seconds, whichever process
+changed it.
 """
 
 from __future__ import annotations
@@ -31,15 +38,18 @@ from twin.channel.probe.model import (
     new_plan,
     plan_from_json,
     plan_to_json,
+    void_attempt,
 )
 from twin.channel.probe.summary import save_summary, summarize
 from twin.channel.state import ChannelStateStore, StateTx
 from twin.clock import Clock, ensure_aware
 from twin.storage.db import Database
+from twin.storage.state import bump_state_version
 
 T = TypeVar("T")
 
 KEY_PLAN = "probe.plan"
+KEY_ACTIVE = "probe.active"
 KEY_AUDIT = "probe.audit"
 AUDIT_MAX = 500
 
@@ -83,6 +93,22 @@ class ProbeStore:
         data = self._state.get(KEY_PLAN)
         return plan_from_json(data) if isinstance(data, dict) else None
 
+    def active(self) -> bool:
+        """Is a probe plan running?  The answer of every process, from one small read (D-684).
+
+        A plan stored before the flag existed has no flag: it is read from the plan itself.  A
+        plan that cannot be read is not running (a broken plan must not silence the bot for good;
+        the probe itself refuses to work with it, ``ProbeSendPolicy``).
+        """
+        flag = self._state.get(KEY_ACTIVE)
+        if isinstance(flag, bool):
+            return flag
+        try:
+            plan = self.load()
+        except Exception:
+            return False
+        return plan is not None and plan.status is PlanStatus.RUNNING
+
     def create(self, options: ProbeOptions | None = None) -> ProbePlan:
         """Start a new plan; refuses while another one is running."""
         now = self._clock.now_utc()
@@ -97,6 +123,8 @@ class ProbeStore:
             plan = new_plan(run_id, now, options or ProbeOptions())
             plan.add_event(now, "probe plan created")
             tx.put(KEY_PLAN, plan_to_json(plan))
+            tx.put(KEY_ACTIVE, True)
+            bump_state_version(session, self._clock)  # the engine and the scheduler hold at once
         return plan
 
     def update(self, change: Callable[[ProbePlan], T]) -> T:
@@ -109,8 +137,13 @@ class ProbeStore:
             was_running = plan.status is PlanStatus.RUNNING
             result = change(plan)
             tx.put(KEY_PLAN, plan_to_json(plan))
-            if was_running and plan.status is not PlanStatus.RUNNING:
+            running = plan.status is PlanStatus.RUNNING
+            tx.put(KEY_ACTIVE, running)
+            if was_running and not running:
                 save_summary(session, summarize(plan), self._clock)
+                # ``twin run`` ends a plan by itself (``ProbeRunner``); nothing else would bump
+                # the version then, and the engine would go on waiting for a probe that is over
+                bump_state_version(session, self._clock)
             return result
 
     def finish(self, status: PlanStatus, reason: str | None) -> ProbePlan:
@@ -124,6 +157,28 @@ class ProbeStore:
             return plan
 
         return self.update(change)
+
+    def void_current_attempt(self, reason: str) -> bool:
+        """Void the attempt that is under way (a safety message went out in the middle of it).
+
+        The probe then asks for a fresh message and measures again.  ``False`` when no plan runs
+        or no attempt is open: nothing was disturbed.
+        """
+        now = self._clock.now_utc()
+
+        def change(plan: ProbePlan) -> bool:
+            if plan.status is not PlanStatus.RUNNING:
+                return False
+            step = plan.active_step()
+            attempt = step.current_attempt() if step else None
+            if step is None or attempt is None:
+                return False
+            return void_attempt(plan, step, attempt, reason, now)
+
+        try:
+            return self.update(change)
+        except NoProbePlan:
+            return False
 
     # ------------------------------------------------------------- questions
 

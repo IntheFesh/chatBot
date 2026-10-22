@@ -14,7 +14,10 @@
 * what the channel answers is handled by its kind: a send that never left the machine is repeated
   twice at a short distance, a send whose outcome is unknown is not repeated (it would be said
   twice), a refusal of the window or the login ends the reply, a sticker that cannot be sent is
-  skipped.
+  skipped; a channel that holds its sends for a running probe (``probe_running``) ends the reply
+  quietly, with no alert (the platform said nothing; D-684);
+* the out-of-role answer to a crisis goes out as an *urgent* send (``urgent=True``): the one kind
+  of message a running probe does not hold back (D-685).
 
 Every bubble that goes out is reported to ``on_sent`` at once, so the engine can store it
 (``bot_turns``, ``conversation_state``) before the next one starts: a process that dies between
@@ -35,6 +38,7 @@ from enum import StrEnum
 from typing import Literal
 
 from twin.channel.base import (
+    PROBE_RUNNING,
     AuthState,
     CapabilityNotSupported,
     Channel,
@@ -70,6 +74,7 @@ class StopReason(StrEnum):
     QUOTA = "quota"  # no message is left in the platform's count
     UNBOUND = "unbound"  # nobody is bound as the user
     FAILED = "failed"  # the channel could not send it
+    PROBE = "probe"  # a channel probe is running: the channel holds every send but its own
 
 
 @dataclass(frozen=True)
@@ -147,13 +152,15 @@ class BubbleSender:
         first_of_reply: bool = True,
         quote: QuoteTarget | None = None,
         paced: bool = True,
+        urgent: bool = False,
     ) -> SendReport:
         """Send ``bubbles`` in order.
 
         ``on_sending`` is told which bubble is about to be handed to the channel, before it is;
         ``first_of_reply`` is false when the first of them continues a reply that is already
         under way; ``quote`` goes with the first text bubble; ``paced=False`` (the fixed
-        out-of-role answer to a crisis, R-SAFE-001) sends without waiting.
+        out-of-role answer to a crisis, R-SAFE-001) sends without waiting; ``urgent=True`` (the
+        same answer) sends every text bubble as an urgent message of the channel (D-685).
         """
         report = SendReport()
         typing = paced and self._channel.capabilities().supports_typing
@@ -178,7 +185,7 @@ class BubbleSender:
             quote_for_bubble = quote_pending if bubble.kind == "text" else None
             if on_sending is not None:
                 await on_sending(bubble)
-            outcome = await self._deliver(bubble, quote_for_bubble, wait)
+            outcome = await self._deliver(bubble, quote_for_bubble, wait, urgent)
             if isinstance(outcome, StopReason):
                 await self._typing(False)
                 report.stop, report.rest = outcome, rest
@@ -229,12 +236,12 @@ class BubbleSender:
     # ----------------------------------------------------------------------- sending
 
     async def _deliver(
-        self, bubble: OutBubble, quote: QuoteTarget | None, wait: Wait
+        self, bubble: OutBubble, quote: QuoteTarget | None, wait: Wait, urgent: bool
     ) -> _Delivered | StopReason | None:
         """Send one bubble; the result, a reason to stop, or ``None`` for a skipped sticker."""
         for attempt in range(NETWORK_RETRIES + 1):
             try:
-                result = await self._once(bubble, quote)
+                result = await self._once(bubble, quote, urgent)
             except RecipientNotAllowed:
                 return self._block(StopReason.UNBOUND, ALERT_UNBOUND, "nobody is bound as the user")
             except (MediaNotAllowed, CapabilityNotSupported) as exc:
@@ -249,6 +256,9 @@ class BubbleSender:
             kind = result.kind
             if kind is OutboundKind.AMBIGUOUS:
                 return _Delivered(result.message_id, True)  # not repeated: it may have arrived
+            if result.reason == PROBE_RUNNING:  # the probe has the channel: stop, say nothing
+                log.info("reply_held_for_probe")
+                return StopReason.PROBE
             if kind in (OutboundKind.WINDOW_REJECTED, OutboundKind.AUTH_EXPIRED) or (
                 result.session_expired
             ):
@@ -268,8 +278,12 @@ class BubbleSender:
             return self._block(StopReason.FAILED, ALERT_SEND, f"{kind.value}: {result.reason}")
         return self._block(StopReason.FAILED, ALERT_SEND, "the send was repeated and failed")
 
-    async def _once(self, bubble: OutBubble, quote: QuoteTarget | None) -> OutboundResult | None:
+    async def _once(
+        self, bubble: OutBubble, quote: QuoteTarget | None, urgent: bool
+    ) -> OutboundResult | None:
         if bubble.kind == "text":
+            if urgent:
+                return await self._channel.send_urgent_text(bubble.text, quote)
             return await self._channel.send_text(bubble.text, quote)
         sticker = await asyncio.to_thread(self._lookup, bubble.sticker_md5 or "")
         if sticker is None:

@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 
 from twin.channel.ilink.http import (
     TIMEOUT_DEFAULT_POLL_S,
-    TIMEOUT_QR_S,
+    TIMEOUT_QR,
     IlinkError,
     IlinkHttp,
     IlinkHttpError,
@@ -164,7 +164,7 @@ class IlinkLogin:
                 {"local_token_list": self._local_tokens},
                 base_url=self._api_base,
                 token=None,
-                timeout_s=TIMEOUT_QR_S,
+                timeout_s=TIMEOUT_QR,
                 query={"bot_type": str(BOT_TYPE)},
                 with_base_info=False,
             )

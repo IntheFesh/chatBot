@@ -59,6 +59,11 @@ messages to the :class:`~twin.engine.correction_port.CorrectionPort` once the re
 that is the "yes" to an open question is taken by the same port, answered at once like a command
 and marked ``is_command`` (it is not conversation, memory or learning).
 
+While a channel probe runs (``probe_active``) the engine says nothing (D-684): the user's messages
+are stored and screened for a crisis, the round waits in COLLECTING, commands are not run, and when
+the probe ends the round is decided afresh from that moment with the short "just seen" pause.  The
+answer to a crisis is the one exception (it goes out as an urgent send, D-685).
+
 Backends: with a :class:`BackendChooser` (``BackendSelector`` of the style model) every reply asks
 it which backend to use and tells it how the reply went, which is what makes the fallback to
 DeepSeek and the way back work (R-SRV-004); without one the setting ``backend.active`` is used
@@ -129,6 +134,7 @@ log = get_logger("twin.engine.machine")
 
 MERGE_SHARE = 0.8  # past this share of the wait, a message that joins adds a short pause
 STEP_FAILURE_PAUSE_S = 5.0
+PROBE_RECHECK_S = 60.0  # while a probe holds the round: look again at least this often
 STEP_FAILURES_BEFORE_RESET = 5
 SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
@@ -234,6 +240,7 @@ class ConversationEngine:
         pacing: PacingSource = PacingModel.from_view,
         queue_extraction: ExtractionQueue | None = None,
         corrections: CorrectionPort | None = None,
+        probe_active: Callable[[], bool] | None = None,
     ) -> None:
         self._channel = channel
         self._store = store
@@ -257,6 +264,8 @@ class ConversationEngine:
         self._backends = backends
         self._pacing_source = pacing
         self._queue_extraction = queue_extraction
+        self._probe_active = probe_active
+        self._probe_held = False  # held for a probe: re-timed when it ends
         low, high = settings.schedule.greeting_window_min
         self._decider = Decider(time, rng, wake_window_min=(float(low), float(high)))
         self._sender = BubbleSender(channel, stickers, lookup, clock, alerts, rng)
@@ -439,6 +448,9 @@ class ConversationEngine:
         record = added.record
         if not added.created and not await self._lost(record.id, record.is_command):
             return  # delivered again after a restart: it is queued or answered already
+        if (slash or confirming) and await self._probe_running():
+            log.info("command_held_for_probe")  # stored as a command row; not run, not answered
+            return
         if confirming and self._corrections is not None:
             outcome = await self._confirmation(item.text, message.at, record.id)
             if outcome is not None:
@@ -706,6 +718,8 @@ class ConversationEngine:
             return
         if await self._screen(snap, data):
             return
+        if await self._probe_hold(snap):
+            return
         await self._decide(snap, continuation=data.skip_quiet)
 
     async def _quiet_window_s(self) -> float:
@@ -769,6 +783,8 @@ class ConversationEngine:
     async def _deciding(self, snap: ConversationSnapshot) -> None:
         data = RoundData.of(snap)
         if await self._screen(snap, data):
+            return
+        if await self._probe_hold(snap):
             return
         decision = data.decision
         planned = snap.planned_send_at
@@ -1198,6 +1214,7 @@ class ConversationEngine:
             wait=uninterruptible_pause(self._clock),
             on_sent=keep,
             paced=False,
+            urgent=True,  # safety wins over a running probe (D-685); no other send sets this
         )
         await self._complete(snap.pending)
 
@@ -1219,7 +1236,9 @@ class ConversationEngine:
         if any(p not in data.answering for p in snap.pending):
             await self._interrupted(snap, data, outgoing)
             return
-        if outgoing.reply_id is None and await self._active_pause() is not None:
+        if outgoing.reply_id is None and (
+            await self._active_pause() is not None or await self._probe_running()
+        ):
             await self._edit(
                 lambda d: replace(d, outgoing=None, decision=None),
                 state=STATE_DECIDING,
@@ -1575,6 +1594,40 @@ class ConversationEngine:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _probe_running(self) -> bool:
+        """Is a channel probe running?  The probe has the channel to itself (D-684)."""
+        check = self._probe_active
+        return check is not None and await asyncio.to_thread(check)
+
+    async def _probe_hold(self, snap: ConversationSnapshot) -> bool:
+        """Hold the round while a probe runs; ``True`` if the driver has nothing more to do now.
+
+        Nothing is decided, written or sent meanwhile: what the user writes is stored (and
+        screened for a crisis before this is asked) and waits in COLLECTING.  When the probe has
+        ended the round is timed afresh from that moment, as a continuation: she has "just seen"
+        the messages, and answers after a short pause instead of at once as if they were old
+        news.  The pause of ``/暂停`` is a separate thing (``_active_pause``).
+        """
+        if await self._probe_running():
+            if not self._probe_held:
+                log.info("round_held_for_probe", waiting=len(snap.pending))
+            self._probe_held = True
+            if snap.state != STATE_COLLECTING:  # a decision or a planned time made before the probe
+                await self._edit(
+                    lambda d: replace(d, decision=None, decided_for=0),
+                    state=STATE_COLLECTING,
+                    planned_send_at=None,
+                )
+            await self._wait_wake(PROBE_RECHECK_S)
+            return True
+        if self._probe_held:
+            self._probe_held = False
+            log.info("round_released_after_probe", waiting=len(snap.pending))
+            now = self._clock.now_utc()
+            await self._edit(lambda d: replace(d, quiet_from=now, skip_quiet=True))
+            return True  # the driver looks again with the round re-timed
+        return False
 
     async def _active_pause(self) -> datetime | None:
         """The end of the pause (``/暂停``) if one is in force now."""

@@ -54,6 +54,7 @@ from twin.channel.probe.model import (
     StepState,
     StepStatus,
     end_plan,
+    void_attempt,
 )
 from twin.channel.probe.store import NoProbePlan, ProbeStore
 from twin.clock import Clock
@@ -605,18 +606,8 @@ class ProbeRunner:
         now = self._clock.now_utc()
 
         def change(p: ProbePlan) -> None:
-            _s, current = self._find(p, step.id, attempt.n)
-            if current.outcome is not None:
-                return
-            current.outcome = "void"
-            current.void_reason = reason
-            current.phase = AttemptPhase.FINISHED
-            current.finished_at = now
-            p.notice = None
-            for action in current.actions:
-                if action.status in (ActionStatus.PENDING, ActionStatus.ACTIVE):
-                    action.status = ActionStatus.SKIPPED
-            p.add_event(now, f"step {step.id.value} attempt {current.n} void: {reason}")
+            state, current = self._find(p, step.id, attempt.n)
+            void_attempt(p, state, current, reason, now)
 
         await self._update(change)
         log.warning("probe_attempt_void", probe_step=step.id.value, attempt=attempt.n, why=reason)

@@ -243,6 +243,22 @@ class ChannelConfig(_Section):
     proactive_window_safe_h: float = Field(default=22, gt=0)
     outbound_quota_safe: int = Field(default=8, ge=0)
     proactive_reserve: int = Field(default=2, ge=0)
+    # The ``ret``/``errcode`` answers to a send that mean "the session is over" (R-CH-008): the
+    # window stays closed until the user writes again.  -2 is what the community reports; the
+    # real values come from the M0 probe.  The login code -14 is handled apart (a new login).
+    session_expired_codes: list[int] = Field(default_factory=lambda: [-2])
+
+    @field_validator("session_expired_codes")
+    @classmethod
+    def _error_codes_only(cls, value: list[int]) -> list[int]:
+        for code in value:
+            if code == 0:
+                raise ValueError("0 means success, not an expired session")
+            if code == -14:
+                raise ValueError(
+                    "-14 is the login code (a new login is needed), not an expired session"
+                )
+        return value
 
 
 class RetrievalConfig(_Section):
