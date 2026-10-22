@@ -8,6 +8,7 @@ Qwen's.  Nothing here is a real conversation.
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import pytest
 from sqlalchemy import select
 
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import run_with_plans
 from tests.support.export_world import (
     CORRECTION,
     FACT_MANUAL,
@@ -28,7 +30,14 @@ from tests.support.export_world import (
 from tests.support.memory import add_fact
 from tests.support.synth_chat import MessageWriter
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
-from twin.engine.style_prompt import StylePromptBuilder, StyleTurn
+from twin.engine.style_prompt import (
+    PROACTIVE_CUE_TEXT,
+    WOKE_UP_LINE,
+    StylePromptBuilder,
+    StyleTurn,
+    normalize_context,
+    with_proactive_cue,
+)
 from twin.ingest.events import default_detector
 from twin.llm.redaction import ConsistentRedactor
 from twin.memory.asof import AsOfSource
@@ -71,7 +80,7 @@ def run_export(
     exporter = TrainingSetExporter(
         services, TOKENIZER, ExportOptions(out_dir=directory, plan_ratio=ratio, **options)
     )
-    return exporter.run()
+    return run_with_plans(services, exporter)
 
 
 def rows(dataset: DatasetDir, name: str) -> list[dict[str, Any]]:
@@ -183,14 +192,12 @@ def test_every_reply_block_is_a_sample_or_a_counted_drop(world: World, tmp_path:
     blocks = sum(1 for ref in iter_block_refs(world.services) if ref.reproducible)
     dropped = sum(stats["dropped"].values())
     assert stats["samples"]["total"] + dropped == blocks
-    # her opening of a conversation (and a second block in a row) answers nobody
-    assert stats["dropped"]["no_user_turn_to_answer"] > 0
-    assert set(stats["dropped"]) <= {
-        "no_user_turn_to_answer",
-        "empty_target",
-        "over_budget",
-        "target_too_long",
-    }
+    # R17-6 (D-642): her opening of a conversation, a second block in a row and a reply after a
+    # long pause are samples too (the first two end with the proactive cue), none is dropped for
+    # lack of a user turn any more
+    assert stats["samples"]["proactive"] > 0 and stats["samples"]["after_gap"] > 0
+    assert "no_user_turn_to_answer" not in stats["dropped"]
+    assert set(stats["dropped"]) <= {"empty_target", "over_budget", "target_too_long"}
 
 
 def test_a_range_limits_the_samples_but_keeps_the_context_of_its_first_block(
@@ -225,6 +232,12 @@ def test_the_context_starts_with_the_user_and_her_opening_turns_go_to_the_prelud
             section = row["system"].split("【前文】\n", 1)[1]
             assert section.startswith("她：")
     assert prelude > 0
+    # a block that no user turn precedes still has a context that opens with the user: the cue
+    cue = [r for r in all_rows(dataset) if r["conversations"][-2]["value"] == PROACTIVE_CUE_TEXT]
+    assert cue and all(r["conversations"][0]["from"] == "human" for r in cue)
+
+
+_PLAN_SECTION = re.compile(r"\n\n【规划】\n.*?(?=\n\n【|\Z)", re.DOTALL)
 
 
 def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Path) -> None:
@@ -235,8 +248,8 @@ def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Pa
     loader = MessageLoader(services)
     label = StickerCatalog(services).tag_lookup()
     by_id = {row["id"]: row for row in all_rows(dataset)}
-    checked = 0
-    for ref in iter_block_refs(services):
+    checked = proactive = 0
+    for ref in iter_block_refs(services, across_gaps=True):
         row = by_id.get(ref.sample_id)
         if row is None:
             continue
@@ -248,9 +261,16 @@ def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Pa
             )
             for turn in block.context
         ]
+        turns = [t for t in turns if t.text]
+        if not normalize_context(turns).ends_with_user:  # nobody waits: she writes first
+            turns = with_proactive_cue(turns)
+            proactive += 1
         view = source.at(block.at)
-        parts = builder.compose(view, [t for t in turns if t.text], budget=None)
-        assert row["system"].split("【此刻】")[1] == parts.system.split("【此刻】")[1]
+        parts = builder.compose(view, turns, budget=None)
+        # the plan and the waking line have tests of their own (test_training_export_context.py)
+        written = _PLAN_SECTION.sub("", row["system"]).replace("\n" + WOKE_UP_LINE, "")
+        assert written.split("【此刻】")[1] == parts.system.split("【此刻】")[1]
+        assert written == parts.system
         rendered = lf_template.render_prompt(
             row["system"],
             [
@@ -259,10 +279,11 @@ def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Pa
             ],
         )
         assert rendered.endswith("<|im_start|>assistant\n")
+        assert [t.content for t in parts.turns] == [m["value"] for m in row["conversations"][:-1]]
         checked += 1
-        if checked >= 25:
+        if checked >= 40:
             break
-    assert checked == 25
+    assert checked == 40 and proactive > 0
 
 
 def test_the_system_message_has_the_moment_the_state_and_the_memory_of_that_time(
@@ -605,11 +626,19 @@ def test_the_report_has_the_numbers_of_the_spec(world: World, tmp_path: Path) ->
     sticker = stats["sticker_share"]
     assert abs(sticker["export"] - sticker["profile"]) < 0.06
     assert stats["emoji_code_rate"]["profile"] is not None
+    # ratio 0: the only samples with a plan are the proactive ones before the cut-off (D-643)
+    rows_before = [
+        r for name in ("train", "val") for r in rows(result.dataset, f"sft_{name}.jsonl")
+    ]
+    with_plan = [r for r in rows_before if "【规划】" in r["system"]]
+    assert with_plan and all(
+        r["conversations"][-2]["value"] == PROACTIVE_CUE_TEXT for r in with_plan
+    )
     assert stats["plans"] == {
-        "selected": 0,
-        "planned": 0,
-        "share_of_train_and_val": 0.0,
-        "share_of_all": 0.0,
+        "selected": len(with_plan),
+        "planned": len(with_plan),
+        "share_of_train_and_val": round(len(with_plan) / len(rows_before), 4),
+        "share_of_all": round(len(with_plan) / stats["samples"]["total"], 4),
     }
     assert stats["tokens"]["total"] > stats["tokens"]["train"] > 0
     assert set(stats["training_hours"]) == {"5090-8b", "5090-14b", "pro6000-14b", "pro6000-32b"}
@@ -627,7 +656,7 @@ def test_the_directory_is_a_valid_dataset_with_template_check_cases(
     cases = rows(dataset, "parity_cases.jsonl")
     assert cases and all(case["prompt"].endswith("<|im_start|>assistant\n") for case in cases)
     tags = {tag for case in cases for tag in case["tags"]}
-    assert {"prelude", "sticker", "multiline", "longest"} <= tags
+    assert {"prelude", "sticker", "multiline", "longest", "proactive"} <= tags
 
 
 def test_an_export_into_a_directory_that_is_in_use_is_refused(world: World, tmp_path: Path) -> None:

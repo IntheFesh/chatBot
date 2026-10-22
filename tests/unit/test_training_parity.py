@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import run_with_plans
 from tests.support.export_world import build_world
 from tests.support.tiny_tokenizer import (
     build_merging_tokenizer,
@@ -357,9 +358,12 @@ def test_the_cases_the_exporter_chooses_are_token_identical(
 ) -> None:
     build_world(services, embedder, days=8)
     tokenizer = tiny_qwen_tokenizer()
-    result = TrainingSetExporter(
-        services, tokenizer, ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
-    ).run()
+    result = run_with_plans(
+        services,
+        TrainingSetExporter(
+            services, tokenizer, ExportOptions(out_dir=tmp_path / "ds", plan_ratio=0.0)
+        ),
+    )
     assert result.dataset is not None and result.dataset.has_parity
     cases = load_cases(result.dataset.file_path("parity_cases.jsonl"))
     assert len(cases) >= 5 and len({c.id for c in cases}) == len(cases)
@@ -367,6 +371,7 @@ def test_the_cases_the_exporter_chooses_are_token_identical(
     results = run_checks(cases, engine_tokenizer, engine, CUTOFF_LEN)
     assert [r.problems for r in results if not r.passed] == []
     assert any("prelude" in r.tags for r in results)
+    assert any("proactive" in r.tags for r in results)  # the cue turn is checked like any other
 
 
 # --------------------------------------------- the dataset directory and the package

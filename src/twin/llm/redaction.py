@@ -24,7 +24,7 @@ symbols are mapped one-to-one to ASCII, so offsets stay valid and ``１３８...
 shortcut used by the logging layer.  :class:`ConsistentRedactor` keeps one numbered token per
 distinct entity (``[手机号#1]``) for training exports (R-TRN-007); :func:`prompt_redactor` is the
 one of the running process, which every prompt sent to a style model server goes through, so the
-placeholders the model sees at inference are the numbered ones it was trained on (R-LLM-011,
+tokens the model sees at inference are the numbered ones it was trained on (R-LLM-011,
 D-641).  :func:`find_tokens` detects tokens in a model reply (R-ENG-012).
 
 This module is a leaf: it imports nothing from the rest of the project, so the logging and job
@@ -409,7 +409,7 @@ def prompt_redactor() -> ConsistentRedactor:
     """The process-wide redactor of the prompts sent to a style model server (R-LLM-011, D-641).
 
     The training set is redacted by one :class:`ConsistentRedactor`, so the model learned
-    ``[手机号#1]``-style placeholders (R-TRN-007, D-326).  At inference every prompt, to the local
+    ``[手机号#1]``-style tokens (R-TRN-007, D-326).  At inference every prompt, to the local
     llama.cpp server as well as to vLLM on AutoDL, goes through this one instance: the same entity
     keeps the same number in every prompt of the process and two different entities never share
     one.  The numbering lives as long as the process (it is not stored).

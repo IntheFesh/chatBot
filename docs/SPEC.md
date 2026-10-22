@@ -391,10 +391,10 @@ safety:
 | `pro6000-32b` | RTX PRO 6000 96GB | Qwen/Qwen3-32B | LoRA bf16（r=16），梯度检查点 | 本地推理需大显存，否则走远程 |
 
 模板 `qwen3_nothink`（纯 ChatML、不含 think 标记；训练与推理逐 token 一致，见 R-TRN-011），`mask_history: true`（只在最后一轮、即她的目标回复上计算 loss），`cutoff_len` 2048，`lora_target: all`，学习率 1e-4，2 个 epoch（数据 < 20k 样本时 3），cosine，warmup 0.05，验证集 loss 早停（patience 2 次评估）。`5090-14b` 的 QLoRA 适配器合并时加载 bf16 基座（不设 `quantization_bit`，`export_device: cpu`）。
-- **R-TRN-002** 训练集导出 `twin train export`：每个样本以她的一个真实回复块为学习目标，输入为其前面最多 8 个合并轮次；系统提示由 `StylePromptBuilder` 生成（pre_holdout 范围的精简人设卡 + 当时当地时间与星期 + 她当时的作息状态 + `memory_view(as_of=样本时刻)` 的记忆块），与线上 style 后端完全同一代码；全部数据经 R-TRN-013 的防泄露视图读取。
+- **R-TRN-002** 训练集导出 `twin train export`：每个样本以她的一个真实回复块为学习目标，输入为其前面最多 8 个合并轮次（不论中间停了多久；前面没有用户轮次可答的块，最后一轮是与主动消息路径同一个固定提示）；系统提示由 `StylePromptBuilder` 生成（pre_holdout 范围的精简人设卡 + 当时当地时间与星期 + 她当时的作息状态 + `memory_view(as_of=样本时刻)` 的记忆块），与线上 style 后端完全同一代码；全部数据经 R-TRN-013 的防泄露视图读取。
 - **R-TRN-003** 表示约定：目标（她的回复块）中连发用换行；表情包写成 `[表情包:<标签>]`；表情代码原样；引用写成首行 `[引用:...]`；机器人无法复现的行（图片、语音、视频、通话、转账、红包、位置、文件、链接、聊天记录、系统事件）从目标中删除，删除后为空则丢弃该样本（R-SAFE-006）。上下文（用户与她之前的轮次）中这些仍以事件文字呈现（R-IMP-007）。
 - **R-TRN-004** 只用她的真实消息作目标；机器人回复不得进入（导出函数只接受 `messages` 表；有测试）。
-- **R-TRN-005** hybrid 训练数据：按比例（默认 30%）为样本合成"规划"（DeepSeek 读她的真实回复反推 `{intent, facts_to_use, tone, bubble_hint}`，非高峰执行），放入提示词的规划字段，使风格模型学会"按规划用她的语气说"；其余样本不带规划。
+- **R-TRN-005** hybrid 训练数据：按比例（默认 30%）为样本合成"规划"（DeepSeek 读她的真实回复反推 `{intent, facts_to_use, tone, bubble_hint}`，非高峰执行），放入提示词的规划字段，使风格模型学会"按规划用她的语气说"；其余样本不带规划，但训练与验证部分里前面没有用户轮次可答的（主动形态的）样本一律带规划，因为线上主动消息总带规划。
 - **R-TRN-006** 切分：按时间，最后 10% 为测试集（与 R-RET-003 留出集一致），之前 5% 为验证集，其余训练；不得随机打乱跨越时间边界。
 - **R-TRN-007** 脱敏：导出前过 R-LLM-009；同一实体在整个数据集中用一致的占位符。
 - **R-TRN-008** 训练包 `twin train bundle --profile <档位>`：生成 `bundle.tar.zst`（数据集、`dataset_info.json`、由模板生成的 LLaMA-Factory YAML、AutoDL 脚本、清单与 sha256），用口令（scrypt + AES-GCM）加密；口令不落盘。

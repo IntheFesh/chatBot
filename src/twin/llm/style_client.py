@@ -26,7 +26,7 @@ the engine decides whether to fall back to DeepSeek.
 Both clients redact the prompt before it is sent (CLAUDE.md rule 6 for the AutoDL server behind
 the SSH tunnel; for the local one so that the model sees the same text in both places) and they do
 it with the one process-wide numbered redactor, :func:`~twin.llm.redaction.prompt_redactor`: the
-placeholders are the ``[手机号#1]`` the training set was redacted with (R-TRN-007, D-326), not the
+tokens are the ``[手机号#1]`` the training set was redacted with (R-TRN-007, D-326), not the
 unnumbered ones of the logs (D-641).  ``tokenize`` sends exactly what ``generate`` would.
 """
 

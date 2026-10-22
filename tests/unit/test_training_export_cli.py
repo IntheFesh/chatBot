@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 
 from tests.support.deepseek import API, TEST_KEY, ok
 from tests.support.embedding import HashingBackend
+from tests.support.export_plans import fill_missing_plans
 from tests.support.export_world import build_world
 from tests.support.policies import AlwaysOffPeak
 from tests.support.synth_chat import MessageWriter
@@ -98,6 +99,8 @@ def test_the_command_queues_a_job_and_the_foreground_runs_it(
     world_in_cli_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("TWIN_TRAINING__HYBRID_PLAN_RATIO", "0")
+    # ratio 0 asks for no plans of the ordinary samples; the proactive ones still have theirs
+    assert with_services(lambda s: fill_missing_plans(s, tiny_qwen_tokenizer())) > 0
     queued = invoke("train", "export", "--out", str(tmp_path / "ds"))
     assert queued.exit_code == 0, queued.output
     assert "queued (job " in queued.output and "twin train export-status" in queued.output
@@ -131,12 +134,24 @@ def test_the_status_command_tells_how_the_last_export_ended(
 ) -> None:
     assert "no export has run yet" in invoke("train", "export-status").output
     monkeypatch.setenv("TWIN_TRAINING__HYBRID_PLAN_RATIO", "0")
+    written = with_services(lambda s: fill_missing_plans(s, tiny_qwen_tokenizer()))
     invoke("train", "export", "--out", str(tmp_path / "ds"), "--foreground")
     shown = invoke("train", "export-status")
     assert shown.exit_code == 0
     assert "export: done" in shown.output and "train" in shown.output
-    assert "plans: pending 0, done 0, refused 0" in shown.output
+    assert f"plans: pending 0, done {written}, refused 0" in shown.output
     assert "planning figures" in shown.output and "5090-8b" in shown.output
+
+
+def test_r17_6_at_ratio_zero_the_proactive_samples_still_wait_for_their_plans(
+    world_in_cli_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-643: the ratio is the share of the ordinary samples; a proactive one always has a plan."""
+    monkeypatch.setenv("TWIN_TRAINING__HYBRID_PLAN_RATIO", "0")
+    waiting = invoke("train", "export", "--out", str(tmp_path / "ds"), "--foreground")
+    assert waiting.exit_code == 0, waiting.output
+    assert "export: waiting_for_plans" in waiting.output
+    assert "twin jobs approve " in waiting.output and not (tmp_path / "ds").exists()
 
 
 def test_missing_plans_are_queued_as_a_priced_batch_and_the_second_export_completes(

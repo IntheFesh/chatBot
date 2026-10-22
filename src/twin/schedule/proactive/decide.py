@@ -53,7 +53,7 @@ from twin.engine.postprocess import PostResult
 from twin.engine.prompt import NO_PERSONA, STATE_LINES, VIOLATION_NOTES, lay_out_turns, moment_text
 from twin.engine.refusal import FILTER_FINISHES
 from twin.engine.style_backend import StyleWriter
-from twin.engine.style_prompt import PlanFields
+from twin.engine.style_prompt import PROACTIVE_CUE_TEXT, PlanFields
 from twin.engine.types import (
     Bubble,
     InboundItem,
@@ -83,7 +83,7 @@ if TYPE_CHECKING:
 log = get_logger("twin.schedule.proactive.decide")
 
 TEMPLATE = "proactive_plan"
-CUE_TEXT = "（对方这会儿没有说话，是她自己想主动找他聊几句。）"
+CUE_TEXT = PROACTIVE_CUE_TEXT  # the one constant lives with the prompt builder (D-642)
 HISTORY_TURNS = 12  # merged turns of the recent conversation the planner sees
 HISTORY_MESSAGES = 60  # messages read to find them
 PLAN_TEMPERATURE = 0.8

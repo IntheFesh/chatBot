@@ -3,8 +3,9 @@
 The check on the instance (``twin.training.parity_check``) takes a few dozen samples of the
 exported set - not all of them: it tokenises each one twice - and they should be the awkward ones:
 a reply of several lines, a sticker or an emoji code in it, a plan, a context that opened with her,
-a single turn and a deep context, a conversation that was trimmed to fit, a sample near the length
-limit, one with a desensitised entity.  :class:`ParitySelector` keeps the first few samples of each
+a single turn and a deep context, a proactive one (her opening, ending with the cue turn), a
+conversation that was trimmed to fit, a sample near the length limit, one with a desensitised
+entity.  :class:`ParitySelector` keeps the first few samples of each
 kind while the export runs and the longest of all.
 """
 
@@ -18,6 +19,7 @@ from twin.training.dataset_dir import ParityCase
 
 TAG_PLAN: Final = "plan"
 TAG_PRELUDE: Final = "prelude"
+TAG_PROACTIVE: Final = "proactive"
 TAG_TRIMMED: Final = "trimmed"
 TAG_MULTILINE: Final = "multiline"
 TAG_STICKER: Final = "sticker"

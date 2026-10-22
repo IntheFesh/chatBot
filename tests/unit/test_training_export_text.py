@@ -70,6 +70,17 @@ def test_a_burst_becomes_lines_and_stickers_and_emoji_codes_are_written_as_agree
     assert target.lines == ["在呢", "[表情包:开心]", "刚吃完饭[拥抱]", "[表情包]"]
     assert target.text == "在呢\n[表情包:开心]\n刚吃完饭[拥抱]\n[表情包]"
     assert (target.stickers, target.text_lines, target.code_lines) == (2, 2, 1)
+    # the tags of the stickers in order, for the sticker hint of a plan (D-644); none for "[表情包]"
+    assert target.sticker_tags == ["开心"]
+
+
+def test_a_label_with_a_bracket_gives_the_tag_without_it() -> None:
+    target = render_target([msg("sticker", md5="a" * 32), msg("sticker", md5="b" * 32)], label)
+    assert target.sticker_tags == ["开心", "撒娇"]
+    assert render_target([msg("sticker", md5="a" * 32)], lambda md5: "撒]娇").sticker_tags == [
+        "撒娇"
+    ]
+    assert render_target([msg(text="只有文字")], label).sticker_tags == []
 
 
 def test_everything_the_bot_cannot_send_is_deleted_from_the_target() -> None:
