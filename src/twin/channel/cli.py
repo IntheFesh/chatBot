@@ -13,7 +13,13 @@ from typing import Annotated
 
 import typer
 
-from twin.channel.base import TEST_PREFIX, InboundMessage, OutboundResult, RecipientNotAllowed
+from twin.channel.base import (
+    TEST_PREFIX,
+    InboundMessage,
+    MediaRef,
+    OutboundResult,
+    RecipientNotAllowed,
+)
 from twin.channel.binding import confirm_unbind, mask_user_id
 from twin.channel.chat import run_local_chat
 from twin.channel.console import TyperPrompter
@@ -28,10 +34,15 @@ from twin.channel.probe.cli import probe_app
 from twin.channel.probe.model import PlanStatus
 from twin.channel.probe.store import ProbeStore
 from twin.channel.state import ChannelStateStore
+from twin.llm.errors import UnsupportedImageError
 from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR
 from twin.ops.logging import configure_logging, shutdown_logging
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
 from twin.services import Services, get_cli_context
+from twin.stickers.incoming import recognise_library_sticker
+from twin.stickers.library import MAX_STICKER_BYTES, describe_sticker_bytes
+from twin.storage.crypto import DecryptionError
+from twin.storage.media import MediaError, MediaKind
 
 channel_app = typer.Typer(
     help="WeChat channel: login, status, send-test, unbind, listen, echo-test, probe.",
@@ -168,8 +179,38 @@ def channel_unbind() -> None:
     typer.echo(f"unbound {mask_user_id(bound.user_id)}; run `twin channel login` to bind again")
 
 
-def describe_inbound(message: InboundMessage) -> str:
-    """One line about a received message: its form, never its content."""
+def picture_facts(services: Services, ref: MediaRef) -> list[str]:
+    """The structure of a stored picture, as ``key=value`` words: never a pixel of it.
+
+    ``mime`` and ``size`` (pixels) come from the file's own header, ``sha256`` is the first eight
+    digits of the hash the media store names it by, and ``library`` says whether the sticker
+    library knows the picture: ``sha256`` (the stored file), ``md5`` (the MD5 of the export) or
+    ``none``.  This is what the first real-device run needs to learn whether WeChat hands the bot
+    a sticker of the user as the very bytes the library holds (R17-5, D-690).
+    """
+    facts = []
+    if ref.size <= MAX_STICKER_BYTES:
+        try:
+            described = describe_sticker_bytes(services.media.read_bytes(ref.sha256))
+        except UnsupportedImageError:
+            facts.append("mime=unknown")
+        except (MediaError, DecryptionError, OSError):
+            facts.append("file=unreadable")
+        else:
+            facts.append(f"mime={described.mime}")
+            if described.width is not None and described.height is not None:
+                facts.append(f"size={described.width}x{described.height}")
+    facts.append(f"sha256={ref.sha256[:8]}")
+    match = recognise_library_sticker(services, ref.sha256, ref.size)
+    facts.append(f"library={match.by if match is not None else 'none'}")
+    return facts
+
+
+def describe_inbound(message: InboundMessage, services: Services | None = None) -> str:
+    """One line about a received message: its form, never its content.
+
+    With ``services`` a picture also gets its structure (:func:`picture_facts`).
+    """
     parts = [
         message.at.strftime("%H:%M:%SZ"),
         f"kind={message.kind.value}",
@@ -179,6 +220,8 @@ def describe_inbound(message: InboundMessage) -> str:
         parts.append(f"text_chars={len(message.text)}")
     if message.media_ref is not None:
         parts.append(f"media={message.media_ref.kind.value}:{message.media_ref.size}B")
+        if services is not None and message.media_ref.kind in (MediaKind.IMAGE, MediaKind.STICKER):
+            parts.extend(picture_facts(services, message.media_ref))
     if message.quote is not None:
         parts.append("quote=resolved" if message.quote.resolved else "quote=unresolved")
     if message.flags:
@@ -212,7 +255,8 @@ def channel_listen(
         try:
             async for message in channel.incoming():
                 seen += 1
-                typer.echo(f"#{seen}  {describe_inbound(message)}")
+                line = await asyncio.to_thread(describe_inbound, message, services)
+                typer.echo(f"#{seen}  {line}")
                 if count and seen >= count:
                     break
         finally:

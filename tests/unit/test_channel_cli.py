@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from collections.abc import Iterator
 from datetime import timedelta
@@ -15,15 +16,21 @@ from typer.testing import CliRunner
 from tests.support.ilink import (
     API,
     BOT,
+    CDN,
     CTX,
     OTHER,
     TOKEN,
     USER,
+    b64_raw,
+    encrypt,
+    image_bytes,
+    image_item,
     message,
     request_json,
     text_item,
     updates,
 )
+from tests.support.persona import sticker_scenario
 from twin.channel.base import AuthState
 from twin.channel.ilink.store import BatchCommit, Credentials, IlinkStore, PendingBinding
 from twin.channel.state import ChannelStateStore
@@ -370,3 +377,91 @@ def test_listen_cannot_run_next_to_the_application(svc: Services) -> None:
     finally:
         lock.release()
     assert result.exit_code == 4 and "already running" in result.output
+
+
+def test_listen_says_whether_a_picture_is_in_the_sticker_library_and_never_shows_it(
+    svc: Services, api: respx.MockRouter
+) -> None:
+    """R17-5: the first real-device run learns what iLink delivers for a sticker of the user.
+
+    The line holds the structure of a picture - type, size, the start of its SHA-256 and whether
+    the library knows it (by the file's hash, by its MD5, or not at all) - and nothing of the
+    picture or of anyone's words.
+    """
+    logged_in(svc)
+    scenario = sticker_scenario(svc)
+    known = scenario.files[scenario.md5s[0]]
+    photo = image_bytes("PNG", colour=(10, 200, 30), size=12)
+    key = bytes(range(1, 17))
+    api.post(f"{API}/ilink/bot/msg/notifystart").respond(200, json={})
+    api.post(f"{API}/ilink/bot/msg/notifystop").respond(200, json={})
+    for name, data in (("DL-S", known), ("DL-P", photo)):
+        api.get(f"{CDN}/download", params={"encrypted_query_param": name}).respond(
+            200, content=encrypt(key, data)
+        )
+    created = int(svc.clock.now_utc().timestamp() * 1000)
+    batch = [
+        message(image_item("DL-S", media_key=b64_raw(key)), mid=1, created_ms=created),
+        message(image_item("DL-P", media_key=b64_raw(key)), mid=2, created_ms=created),
+    ]
+    api.post(f"{API}/ilink/bot/getupdates").mock(
+        side_effect=[httpx.Response(200, json=updates(batch, cursor="C1"))]
+        + [httpx.Response(200, json=updates(cursor="C1"))] * 50
+    )
+    result = runner.invoke(app, ["channel", "listen", "--count", "2"])
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.splitlines() if line.startswith("#")]
+    assert len(lines) == 2
+    library, stranger = lines
+    assert "mime=image/png" in library and "size=64x64" in library
+    assert f"sha256={hashlib.sha256(known).hexdigest()[:8]}" in library
+    assert "library=sha256" in library
+    assert "mime=image/png" in stranger and "size=12x12" in stranger
+    assert f"sha256={hashlib.sha256(photo).hexdigest()[:8]}" in stranger
+    assert "library=none" in stranger
+    assert hashlib.sha256(known).hexdigest()[:9] not in result.output  # only the first 8 digits
+
+
+def test_a_picture_is_described_by_its_structure_only(svc: Services) -> None:
+    """R17-5: ``library=md5`` for a sticker without a stored file; no facts for non-pictures."""
+    from datetime import UTC, datetime
+
+    from twin.channel.base import InboundMessage, MediaRef, MessageKind
+    from twin.channel.cli import describe_inbound
+    from twin.storage.chat_models import Sticker
+    from twin.storage.media import MediaKind
+
+    data = image_bytes("PNG", colour=(1, 2, 3), size=9)
+    md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    now = svc.clock.now_utc()
+    with svc.db.transaction(bump_state=False) as session:
+        session.add(
+            Sticker(
+                md5=md5,
+                status="unavailable",
+                reason="download_failed",
+                attempts=1,
+                her_uses=1,
+                user_uses=0,
+                context_uses=0,
+                disabled=False,
+                origin="import",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    stored = svc.media.put(data, MediaKind.IMAGE)
+    at = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    ref = MediaRef(stored.sha256, MediaKind.IMAGE, stored.size, "image/png", None)
+    line = describe_inbound(InboundMessage("m", at, MessageKind.IMAGE, media_ref=ref), svc)
+    assert "library=md5" in line and "size=9x9" in line and "mime=image/png" in line
+    plain = describe_inbound(InboundMessage("m", at, MessageKind.IMAGE, media_ref=ref))
+    assert "library=" not in plain  # no database to ask: the old line, unchanged
+    junk = svc.media.put(b"not a picture at all" * 20, MediaKind.IMAGE)
+    odd = MediaRef(junk.sha256, MediaKind.IMAGE, junk.size, None, None)
+    assert "mime=unknown" in describe_inbound(
+        InboundMessage("m", at, MessageKind.IMAGE, media_ref=odd), svc
+    )
+    voice = MediaRef(junk.sha256, MediaKind.VOICE, junk.size, None, None)
+    line = describe_inbound(InboundMessage("m", at, MessageKind.VOICE, media_ref=voice), svc)
+    assert "library=" not in line and "mime=" not in line

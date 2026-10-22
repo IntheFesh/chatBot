@@ -354,7 +354,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 11 / 12 | 工具调用开始 / 结果 | `tool_call_start_item` / `tool_call_result_item` | — | 仅 OpenClaw 的"进度提示"用（W:src/messaging/reply-progress-sender.ts:165-221）；**我们不使用** |
 
 通用字段：`create_time_ms`、`update_time_ms`、`is_completed`、`msg_id`、`ref_msg`（W:src/api/types.ts:175-189）。
-**源码没有表情包/贴纸/位置/链接/名片等其它 item 类型**（`MessageItemType` 只有上表这些）。用户发来的微信表情包以何种形态到达【M0 采集】。
+**源码没有表情包/贴纸/位置/链接/名片等其它 item 类型**（`MessageItemType` 只有上表这些）。用户发来的微信表情包以何种形态到达【M0 采集】。**程序里的做法（第 17 轮，D-690）：**不看 item 类型，把每张图片的字节与表情包库比对——文件的 SHA-256，或其 MD5——命中的才当表情包，没命中的是照片。这个精确比对**只在 iLink 把发送者的原始字节原样下发时才命中**（微信若转码或只给缩略图，字节就变了，库永远命不中）；所以第一次真机联调要用 `twin channel listen` 看一次：发一张库里有的表情包，行里的 `library=sha256|md5|none` 就是答案。若永远是 `none`，按铁律 9 停下来向用户报告，不自行加感知哈希（那要先改 SPEC）。
 
 ### 6.3 各类 item 的结构
 
@@ -526,7 +526,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 接收**文件** | 支持（含 `file_name`） | W:src/media/media-download.ts:100-129 | — | — |
 | 接收**视频** | 支持本体；**封面**有 `thumb_media` 字段，官方未使用 | W:src/api/types.ts:141 | — | 封面能否按同样规则解密【M0 采集】 |
 | 接收**引用** | 支持，且新版客户端可能只给 `svr_id` → 必须本地缓存消息正文才能还原 | W:src/messaging/inbound.ts:300-403 | — | 实际形态【M0 采集】 |
-| 接收**表情包** | **源码无此 item 类型**；到达形态未知 | W:src/api/types.ts:70-79 | — | 【M0 采集】 |
+| 接收**表情包** | **源码无此 item 类型**；到达形态未知。程序按字节哈希与表情包库比对（D-690）：只在原始字节原样下发时命中 | W:src/api/types.ts:70-79 | — | 【M0 采集】`twin channel listen` 的 `library=` 一栏 |
 | 接收**群聊** | 类型里有 `group_id`，官方声明 `chatTypes:["direct"]`；本项目不涉及 | W:src/channel.ts:229-233 | — | — |
 | 主动发送窗口时长 | **源码无线索** | §9.1 | `proactive_window_h = None`（配置值仅为保守猜测） | **【M0】R-CH-009 ③** |
 | 单次入站后的发送条数上限 | **源码无线索** | §9.1 | `outbound_quota = None` | **【M0】R-CH-009 ①** |
@@ -674,7 +674,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 
 1. `twin channel login`：记录各接口**真实响应**（脱敏）并回填本文 §5/§10.7 中标 † 的项。
 2. `twin channel send-test "你好"`：记录 `sendmessage` 成功响应体。
-3. 让用户依次发送：文字、图片、语音、视频、文件、引用（对文字和对图片各一次）、微信自带表情包，记录**item 形态**（只记结构，不记内容）。
+3. 让用户依次发送：文字、图片、语音、视频、文件、引用（对文字和对图片各一次）、微信自带表情包（**库里有的、库里没有的各一张**），记录**item 形态**（只记结构，不记内容）。`twin channel listen` 对每张图片打印 `mime`、像素尺寸、SHA-256 前 8 位和 `library=sha256|md5|none`，据此判断表情包库的精确哈希比对是否命中（D-690）。
 4. 再运行探针。
 
 ---
@@ -688,7 +688,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | **D-007** | R-CH-008：收到会话过期错误（社区报告为 `ret:-2`）时标记过期；R-CH-002 提示"以源码与实测为准" | 源码中**没有 `-2`**；唯一的凭据/会话类码是 `-14`（getupdates，官方已更名为"token 失效，而非 session 过期"）。"窗口过期"概念在源码中不存在。社区对 `-2` 有速率限制/会话过期/每 10 条回复三种互斥解释 | 拆成两类：`-14`→`AUTH_EXPIRED`（需重新登录+告警）；`sendmessage ret=-2`→暂按"窗口/配额类拒绝"处理（标 expired、不重试）；所有 `ret/errmsg` 原样记录，由 M0 报告判定 `-2` 的真实含义 |
 | **D-008** | R-CH-006："媒体发送需要非空 `context_token` 时按源码规则获取" | 源码**没有"媒体需非空 token"的规则**：所有出站统一带最近入站的 `context_token`，缺失仅告警仍发送；"媒体必须非空、文字可空"只见于社区 C1 | 所有出站带最近的 `context_token`；没有则拒绝发送（A 同）；"空 token 文字能否发送"列为可选 M0 实验 |
 | **D-009** | R-CH-006/R-CH-009 ②：引用（若协议支持） | **出站引用不存在**（`ref_msg` 只在入站解析） | 条件分支落定为"不支持"：`supports_quote=False`；探针引用子步骤跳过 |
-| **D-010** | R-CH-005：表情包（若可识别 md5） | `MessageItemType` 无表情/贴纸类型；md5 只存在于 `file_item.md5`、`video_item.video_md5`，不是表情 md5 | 02b 不识别表情包；未知 item 类型记为 `unknown`；到达形态由 M0 采集后再决定是否支持 |
+| **D-010** | R-CH-005：表情包（若可识别 md5） | `MessageItemType` 无表情/贴纸类型；md5 只存在于 `file_item.md5`、`video_item.video_md5`，不是表情 md5 | 02b 不识别表情包；未知 item 类型记为 `unknown`；到达形态由 M0 采集后再决定是否支持。**第 17 轮修订（D-690）：**引擎把每张入站图片的字节与表情包库比对（SHA-256 与 MD5，精确匹配），命中才当表情包，未命中是照片；该比对只在 iLink 下发原始字节时命中，需真机采集确认（`twin channel listen`） |
 | **D-011** | R-CH-005：视频取封面 | 官方只下载视频本体；`thumb_media` 有字段无用法，密钥/URL 规则无示例 | 尝试用 `thumb_media` 自带的 `aes_key` 解密；失败降级为"视频（无封面）"；形态由 M0 采集 |
 | **D-012** | R-CH-007：以登录后第一条入站的发送者为准，CLI 确认 | 登录响应直接给出扫码者的 `ilink_user_id`（官方以它作授权兜底） | 保留 SPEC 流程；额外把 `ilink_user_id` 作为期望值——不一致时 CLI 明确警告并默认拒绝（只加强，不放宽） |
 | **D-013** | R-CH-002 接口清单 | 实际还有 `getuploadurl`（上传必经）、`msg/notifystart`、`msg/notifystop`；`get_bot_qrcode` 官方 2.4.9 是 `POST`+`local_token_list`（A 为旧式 `GET`）；CDN 主机 `novac2c.cdn.weixin.qq.com/c2c` 不在 SPEC；登录响应的 `baseurl`/`redirect_host` 可改写 API 主机 | 全部实现；`baseurl` 持久化；CDN 主机写为常量 |
@@ -713,7 +713,7 @@ Bot 接口（POST，需鉴权）的头（W:src/api/api.ts:240-254，P:protocol.m
 | 7 | 出站引用 | 源码不支持（D-009） | 默认不测 |
 | 8 | 空 `context_token` 文字/媒体是否可发 | 官方只告警；社区矛盾 | 可选实验 |
 | 9 | ret=0 与手机实收是否一致 | 源码读不出 | 探针对账（D-016） |
-| 10 | 入站各类型的真实形态：表情包、视频封面、语音转写覆盖率、仅 `svr_id` 的引用、`message_id` 稳定性/重放 | 源码只有类型 | 首次联调采集（§11） |
+| 10 | 入站各类型的真实形态：表情包（含：下发的是否是库里那份原始字节，D-690）、视频封面、语音转写覆盖率、仅 `svr_id` 的引用、`message_id` 稳定性/重放 | 源码只有类型 | 首次联调采集（§11） |
 | 11 | `sendmessage`/`getupdates` 的真实响应体（含 `{}`、`message_id`） | 官方仅类型与 mock | 首次联调记录 |
 | 12 | 长轮询服务端真实挂起时长；`longpolling_timeout_ms` 的取值 | 源码只有客户端侧 | 首次联调记录 |
 | 13 | `bot_token` 的实际寿命、`-14` 出现条件 | 源码无到期时间 | 长期运行观察 |

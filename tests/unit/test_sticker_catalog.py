@@ -193,3 +193,53 @@ def test_each_use_of_hers_is_tied_to_the_example_window_it_happened_in(
         assert message_id in windows[window_id]
     assert len(set(found.values())) == 5  # five episodes, five windows
     assert catalog.use_windows("0" * 32) == {}
+
+
+def test_a_sticker_is_found_by_the_hash_of_its_picture(
+    catalog: StickerCatalog, services: Services
+) -> None:
+    """R17-5: the SHA-256 of the stored file finds a sticker, and so does the MD5 of the bytes."""
+    first = catalog.records()[0]
+    assert first.sha256 is not None
+    by_sha = catalog.find_by_hash(sha256=first.sha256)
+    assert by_sha is not None and by_sha.md5 == first.md5
+    by_md5 = catalog.find_by_hash(md5=first.md5.upper())
+    assert by_md5 is not None and by_md5.md5 == first.md5
+    both = catalog.find_by_hash(md5="0" * 32, sha256=first.sha256)  # the SHA-256 comes first
+    assert both is not None and both.md5 == first.md5
+    fallback = catalog.find_by_hash(md5=first.md5, sha256="f" * 64)
+    assert fallback is not None and fallback.md5 == first.md5
+    assert catalog.find_by_hash() is None
+    assert catalog.find_by_hash(md5="0" * 32, sha256="f" * 64) is None
+
+
+def test_every_status_and_origin_is_found_by_its_hash(
+    catalog: StickerCatalog, services: Services
+) -> None:
+    """R17-5: a hash identifies a picture; whether it may be sent is another question."""
+    now = services.clock.now_utc()
+    with services.db.transaction(bump_state=False) as session:
+        for number, (status, origin) in enumerate(
+            [("md5_mismatch", "import"), ("unavailable", "incoming"), ("pending", "import")]
+        ):
+            session.add(
+                Sticker(
+                    md5=f"{number:032x}",
+                    status=status,
+                    attempts=0,
+                    her_uses=0,
+                    user_uses=0,
+                    context_uses=0,
+                    disabled=False,
+                    origin=origin,
+                    sha256=f"{number + 1:064x}",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    for number, (status, origin) in enumerate(
+        [("md5_mismatch", "import"), ("unavailable", "incoming"), ("pending", "import")]
+    ):
+        found = catalog.find_by_hash(sha256=f"{number + 1:064x}")
+        assert found is not None and (found.status, found.origin) == (status, origin)
+        assert catalog.find_by_hash(md5=f"{number:032x}") == found

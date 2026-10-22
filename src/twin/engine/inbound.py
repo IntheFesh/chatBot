@@ -15,6 +15,11 @@ sticker        ``[表情包：<描述>（情绪：<标签>）]`` from the librar
 anything else  ``[其他消息]``
 =============  =====================================================================
 
+A channel delivers a sticker of the user as an image (iLink has no item type for it), so an
+image whose bytes are in the sticker library - by the SHA-256 of the file or by its MD5 - is read
+as a sticker, with the library's description and no API call; any other image is a photo
+(R17-5, D-690).
+
 The bracket forms are the event-text templates of :mod:`twin.ingest.events` - the same text the
 real history uses - so the model sees one notation everywhere.  The renderer never raises for a
 picture it cannot describe: the reply goes on without the description.
@@ -24,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from twin.channel.base import InboundMessage, MediaRef, MessageKind, QuoteInfo
@@ -33,7 +38,7 @@ from twin.ingest.captions import CaptionService
 from twin.ingest.events import Kind, render_event_text
 from twin.llm.deepseek import DeepSeekClient
 from twin.ops.logging import get_logger
-from twin.stickers.incoming import describe_incoming_sticker
+from twin.stickers.incoming import describe_incoming_sticker, recognise_library_sticker
 from twin.storage.media import MediaKind
 
 if TYPE_CHECKING:
@@ -103,7 +108,8 @@ class InboundRenderer:
 
     async def render(self, message: InboundMessage) -> InboundItem:
         """The stable line for ``message`` (see the module description)."""
-        text = await self._text(message)
+        message, known = await self._recognise(message)
+        text = await self._text(message, known)
         quote = quote_line(message.quote)
         if quote is not None and message.kind is MessageKind.TEXT:
             text = f"{quote}\n{text}" if text else quote
@@ -119,14 +125,30 @@ class InboundRenderer:
 
     # -------------------------------------------------------------------------- kinds
 
-    async def _text(self, message: InboundMessage) -> str:
+    async def _recognise(self, message: InboundMessage) -> tuple[InboundMessage, str | None]:
+        """An image that is a library sticker becomes one: ``(message, the library's MD5)``.
+
+        The message that comes back carries the picture as ``MediaKind.STICKER``, which is what
+        ``bot_turns`` keeps; anything that is not in the library is returned as it came.
+        """
+        ref = message.media_ref
+        if message.kind is not MessageKind.IMAGE or ref is None or ref.kind is not MediaKind.IMAGE:
+            return message, None
+        match = await asyncio.to_thread(
+            recognise_library_sticker, self._services, ref.sha256, ref.size
+        )
+        if match is None:
+            return message, None
+        return replace(message, media_ref=replace(ref, kind=MediaKind.STICKER)), match.record.md5
+
+    async def _text(self, message: InboundMessage, known: str | None = None) -> str:
         kind = message.kind
         if kind is MessageKind.TEXT:
             return (message.text or "").strip()
         ref = message.media_ref
         if kind is MessageKind.IMAGE:
             if ref is not None and ref.kind is MediaKind.STICKER:
-                return await self._sticker(ref)
+                return await self._sticker(ref, known)
             return self._event(Kind.IMAGE, await self._describe(ref))
         if kind is MessageKind.VIDEO:
             return self._event(Kind.VIDEO, await self._describe(ref))
@@ -151,7 +173,10 @@ class InboundRenderer:
             return None
         return await self._captions.describe_stored(ref.sha256)
 
-    async def _sticker(self, ref: MediaRef) -> str:
+    async def _sticker(self, ref: MediaRef, md5: str | None = None) -> str:
+        """The line of a sticker; ``md5`` is the library row the picture was recognised as."""
         data = await asyncio.to_thread(self._services.media.read_bytes, ref.sha256)
-        found = await describe_incoming_sticker(self._services, image=data, client=self._client)
+        found = await describe_incoming_sticker(
+            self._services, md5=md5, image=data, client=self._client
+        )
         return found.text

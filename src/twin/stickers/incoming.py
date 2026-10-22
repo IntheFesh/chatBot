@@ -11,6 +11,12 @@
 4. if the picture is missing, the model answers wrongly or too slowly, or the API fails, the
    answer is the plain ``[表情包]`` and nothing is cached: the reply goes on without a
    description rather than waiting.
+
+A channel delivers every picture as an image (iLink has no item type for stickers, D-010), so
+the engine asks :func:`recognise_library_sticker` first: a picture whose bytes - the SHA-256 of
+the stored file, or failing that its MD5 - are in the library is a sticker; any other is a photo
+(R17-5, D-690).  The match is exact; whether WeChat hands the bot the sender's original bytes is
+a finding of the real device (``twin channel listen``), not an assumption.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
+from typing import Literal
 
 from twin.llm.deepseek import DeepSeekClient
 from twin.llm.errors import LlmError
@@ -27,9 +34,11 @@ from twin.llm.types import DAILY, LedgerTag
 from twin.ops.logging import get_logger
 from twin.services import Services
 from twin.stickers.catalog import ORIGIN_INCOMING, StickerCatalog, StickerRecord
-from twin.stickers.library import store_sticker_file
+from twin.stickers.library import MAX_STICKER_BYTES, store_sticker_file
 from twin.stickers.tagging import StickerTagger, Vision
 from twin.storage.chat_models import Sticker
+from twin.storage.crypto import DecryptionError
+from twin.storage.media import MediaError
 
 log = get_logger("twin.stickers.incoming")
 
@@ -63,6 +72,41 @@ class StickerDescription:
 
 
 NOTHING = StickerDescription(None, (), None, "none")
+
+
+@dataclass(frozen=True)
+class LibraryMatch:
+    """A picture of the media store that is a sticker of the library (R17-5).
+
+    ``by`` says which hash found it: ``"sha256"`` (the stored file, or the first frame the bot
+    sends in its place, D-697) or ``"md5"`` (the MD5 the export names - a sticker whose file was
+    never stored, or one stored under another MD5).
+    """
+
+    record: StickerRecord
+    by: Literal["sha256", "md5"]
+
+
+def recognise_library_sticker(services: Services, sha256: str, size: int) -> LibraryMatch | None:
+    """Is the stored picture ``sha256`` a sticker of the library?  Blocking (database, media).
+
+    The SHA-256 is the media store's own key, so the first look costs one indexed query.  Only
+    when that misses is the file read to work out its MD5 - and only a file small enough to be a
+    sticker (:data:`~twin.stickers.library.MAX_STICKER_BYTES`), so a big photo is never read for
+    this.  A file the store cannot give back is simply not a match.
+    """
+    catalog = StickerCatalog(services)
+    found = catalog.find_by_hash(sha256=sha256)
+    if found is not None:
+        return LibraryMatch(found, "sha256")
+    if size > MAX_STICKER_BYTES:
+        return None
+    try:
+        data = services.media.read_bytes(sha256)
+    except (MediaError, DecryptionError, OSError, ValueError):
+        return None
+    found = catalog.find_by_hash(md5=hashlib.md5(data, usedforsecurity=False).hexdigest())
+    return LibraryMatch(found, "md5") if found is not None else None
 
 
 def _from_record(record: StickerRecord, source: str) -> StickerDescription:

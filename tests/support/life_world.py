@@ -58,7 +58,7 @@ from tests.support.synth_chat import ChatSpec, MessageWriter, build_chat
 from tests.support.waiting import wait_until
 from tests.support.wechat_double import Phone, WeChatDouble
 from twin.assembly import Assembly, assemble
-from twin.channel.base import Channel, MediaRef, MessageKind
+from twin.channel.base import Channel
 from twin.channel.ilink.store import Credentials, IlinkStore
 from twin.channel.state import ChannelStateStore
 from twin.clock import set_active_clock
@@ -78,9 +78,10 @@ from twin.schedule.service import schedule_kit
 from twin.schedule.store import SALT_KEY
 from twin.services import CliContext, Services, build_services, get_cli_context, set_cli_context
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.library import store_sticker_file
+from twin.storage.chat_models import Sticker
 from twin.storage.crypto import set_active_keyring
 from twin.storage.engine_models import BotTurn
-from twin.storage.media import MediaKind
 from twin.storage.models import Alert, Job
 from twin.storage.profile_models import ActivityModelVersion
 from twin.storage.settings_store import put_setting
@@ -733,14 +734,41 @@ class LifeWorld:
         path.write_bytes(data)
         await self.say(f"/img {path}")
 
-    async def say_sticker(self, data: bytes) -> None:
-        """The user sends a sticker: the terminal has no key for it, the channel's inbox does."""
-        before = self.handled
-        stored = await asyncio.to_thread(self.services.media.put, data, MediaKind.STICKER)
-        ref = MediaRef(stored.sha256, MediaKind.STICKER, stored.size, "image/png", "sticker.png")
-        self.channel._deliver(MessageKind.IMAGE, media=ref)  # the terminal has no sticker key
-        await wait_until(lambda: self.handled > before, limit_s=15.0, interval=0.002)
-        await self.clock.settle()
+    async def say_sticker(self, data: bytes, tag: str = "开心") -> str:
+        """The user sends a sticker of the library, the way the real channel delivers it (R17-5).
+
+        iLink and ``/img`` hand over every picture as an ordinary image; the engine knows it for
+        a sticker because the library has it.  So the picture is registered in the library first
+        - with a description, as the import of the history left it - and then sent as a plain
+        picture.  Returns its MD5.
+        """
+        md5 = await asyncio.to_thread(self.register_sticker, data, tag)
+        await self.say_picture(data)
+        return md5
+
+    def register_sticker(self, data: bytes, tag: str = "开心") -> str:
+        """Put a picture in the sticker library as a stored, described sticker; returns its MD5."""
+        md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        now = self.now
+        with self.services.db.transaction(bump_state=False) as session:
+            row = Sticker(
+                md5=md5,
+                status="pending",
+                attempts=0,
+                her_uses=0,
+                user_uses=1,
+                context_uses=0,
+                disabled=False,
+                origin="import",
+                created_at=now,
+                updated_at=now,
+            )
+            store_sticker_file(row, data, self.services.media, now)
+            session.add(row)
+        StickerCatalog(self.services).save_vision(
+            md5, [tag], self.deepseek.sticker_description, "开心的时候", at=now
+        )
+        return md5
 
     # ---- what happened ------------------------------------------------------------------------
 
