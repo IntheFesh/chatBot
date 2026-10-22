@@ -886,13 +886,51 @@ async def test_the_budget_holds_back_proactive_work_but_never_replies(
     assert rig.budget.current_level() == 3
     with pytest.raises(BudgetDeniedError, match="proactive"):
         await rig.client.chat([user("x")], purpose="proactive")
-    with pytest.raises(BudgetDeniedError):
-        await rig.client.chat([user("x")], purpose="plan", thinking=True)
     assert route.call_count == 0
     await rig.client.chat([user("x")], purpose="reply", thinking=True)  # allowed, no thinking
     assert request_json(route.calls.last.request)["thinking"] == {"type": "disabled"}
+    # D-115 (round 17, item 17): the daily life line is not a "proactive message", so planning
+    # goes out at level 3 as well, only with its thinking switched off
+    await rig.client.chat([user("x")], purpose="plan", thinking=True)
+    assert request_json(route.calls.last.request)["thinking"] == {"type": "disabled"}
     await rig.client.chat([user("x")], purpose="summary")
-    assert route.call_count == 2
+    assert route.call_count == 3
+
+
+async def test_background_work_still_goes_out_at_the_last_level(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R17-17 (D-115): at level 4 only the proactive messages are refused (R-LLM-008 item 3).
+
+    The daily life line (``plan``, thinking switched off), a sticker caption, a sticker tag and
+    a summary are not refused; the jobs that make these calls keep their ``except
+    BudgetDeniedError`` handlers for the one purpose that still raises.
+    """
+    rig = Rig(db, clock, with_budget=True)
+    route = mock(api, *[ok()] * 4)
+    assert rig.budget is not None
+    rig.ledger.record(
+        LedgerRecord(
+            "deepseek",
+            "deepseek-flash",
+            "reply",
+            Usage(1, 1, 0, 1, 0),
+            CostBreakdown(2.1, 0, 0, True, 1.0),
+            False,
+            1,
+            clock.now_utc(),
+        )
+    )
+    rig.budget.note_spend()
+    assert rig.budget.current_level() == 4
+    with pytest.raises(BudgetDeniedError, match="proactive"):
+        await rig.client.chat([user("x")], purpose="proactive")
+    assert route.call_count == 0
+    await rig.client.chat([user("x")], purpose="plan", thinking=True)
+    assert request_json(route.calls.last.request)["thinking"] == {"type": "disabled"}
+    for purpose in ("caption", "sticker_tag", "summary"):
+        await rig.client.chat([user("x")], purpose=purpose)
+    assert route.call_count == 4
 
 
 async def test_thinking_stays_available_for_planning_until_proactive_is_paused(
