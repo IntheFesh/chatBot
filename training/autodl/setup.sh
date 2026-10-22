@@ -22,8 +22,11 @@ MODE="${2:-install}"
 # jieba, nltk and rouge-chinese are not dependencies of the llamafactory wheel, but 0.9.5 checks
 # them as mandatory whenever it generates replies (predict_with_generate, i.e. eval.sh).
 install_packages() {
-    log "installing the pinned packages (LLaMA-Factory ${TWIN_LLAMAFACTORY})"
-    "${TWIN_PYTHON}" -m pip install \
+    local constraints="${TWIN_HOME}/state/torch-constraints.txt"
+    mkdir -p "${TWIN_HOME}/state"
+    write_torch_constraints "${constraints}"
+    log "installing the pinned packages (LLaMA-Factory ${TWIN_LLAMAFACTORY}); PyTorch stays as it is: $(tr '\n' ' ' <"${constraints}")"
+    "${TWIN_PYTHON}" -m pip install -c "${constraints}" \
         "llamafactory==${TWIN_LLAMAFACTORY}" \
         "transformers==${TWIN_TRANSFORMERS}" \
         "peft==${TWIN_PEFT}" \
@@ -101,6 +104,7 @@ run_install() {
     ensure_zstd
     ensure_torch
     with_turbo install_packages
+    require_usable_torch "after the packages are installed"
     download_base_model
     turbo_off
     "${TWIN_PYTHON}" -m pip check || log "pip check reported conflicts (see above); training may still work"
@@ -172,6 +176,7 @@ run_verify() {
     use_data_disk
     [ -f "${TWIN_HOME}/data/dataset_info.json" ] || die "no dataset yet; run decrypt.sh first"
     [ -f "${TWIN_HOME}/.setup_done" ] || die "run setup.sh ${TWIN_PROFILE} install first"
+    require_usable_torch "on this instance"
     run_eval_packages_check
     run_parity_check
     run_trial_step

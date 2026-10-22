@@ -31,6 +31,7 @@ from tests.support.autodl_scripts import (
     prepared_workdir,
     run_script,
     script_env,
+    write_distribution,
 )
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
@@ -583,10 +584,7 @@ def test_the_probe_names_the_evaluation_packages_that_are_missing(tmp_path: Path
     del env["TWIN_PROBE_OVERRIDES"]  # the tests' default stands in for the probe; this one is real
 
     def install(name: str) -> None:
-        info = site / f"{name.replace('-', '_')}-1.0.dist-info"
-        info.mkdir(parents=True)
-        metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: 1.0\n"
-        (info / "METADATA").write_text(metadata, encoding="utf-8")
+        write_distribution(site, name, "1.0")
 
     site.mkdir()
     everything = call_function(autodl, env, "probe_eval_packages")
@@ -633,6 +631,109 @@ def test_sourcing_setup_defines_the_functions_and_runs_nothing(tmp_path: Path) -
     done = call_setup(autodl, env, "declare -F " + " ".join(names))
     assert done.returncode == 0, done.stderr
     assert [line.split()[-1] for line in done.stdout.splitlines()] == names
+
+
+# ------------------------------------------------------ PyTorch stays as it is (R17-49b)
+
+COUNTED_TORCH = (
+    # the first look at PyTorch (before the packages) is fine; every later one finds a CUDA 13 build
+    'counter="${TWIN_TEST_COUNTER}"; '
+    'probe_torch() { local n; n="$(cat "${counter}" 2>/dev/null || echo 0)"; '
+    'echo $((n + 1)) >"${counter}"; '
+    "if [ \"${n}\" -ge 1 ]; then echo '2.11.0 13.0 sm_80,sm_120'; "
+    "else echo '2.9.1+cu128 12.8 sm_80,sm_90,sm_120'; fi; }; "
+)
+
+
+@posix_only
+def test_the_torch_stack_is_frozen_while_the_packages_are_installed(tmp_path: Path) -> None:
+    """R17-49b (D-632): pip must not swap PyTorch for another build as a side effect.
+
+    ``install_packages`` passes a constraints file with the stack that was just accepted
+    (``torch==2.9.1+cu128`` ...); before, nothing stopped the resolver from replacing it.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    done = call_setup(autodl, env, "install_packages")
+    assert done.returncode == 0, done.stderr
+    install = next(call for call in pip_calls(tmp_path) if call[:1] == ["install"])
+    assert "-c" in install, install
+    constraints = Path(install[install.index("-c") + 1])
+    assert constraints.read_text("utf-8").splitlines() == [
+        "torch==2.9.1+cu128",
+        "torchvision==0.24.1+cu128",
+        "torchaudio==2.9.1+cu128",
+    ]
+    assert not any(argument.startswith("torch") for argument in install if "==" in argument[:-1])
+
+
+@posix_only
+def test_only_the_torch_packages_that_are_installed_are_frozen(tmp_path: Path) -> None:
+    """R17-49b (D-632): the real probe reads ``importlib.metadata``; a missing one is not pinned."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    site = tmp_path / "site"
+    write_distribution(site, "torch", "2.8.0+cu128")
+    write_distribution(site, "torchaudio", "2.8.0+cu128")
+    env = script_env(workdir, tmp_path, PYTHONPATH=str(site))
+    del env["TWIN_PROBE_OVERRIDES"]  # the real probe, not the tests' default
+    target = tmp_path / "constraints.txt"
+    done = call_function(autodl, env, f"write_torch_constraints {target}")
+    assert done.returncode == 0, done.stderr
+    assert target.read_text("utf-8").splitlines() == [
+        "torch==2.8.0+cu128",
+        "torchaudio==2.8.0+cu128",
+    ]
+
+
+@posix_only
+def test_a_torch_replaced_by_the_package_install_stops_the_setup(tmp_path: Path) -> None:
+    """R17-49b (D-632): ``run_install`` asks again after ``install_packages``.
+
+    The probe finds a good PyTorch the first time and a CUDA 13 build every time after: the
+    setup stops with exit 1 before it downloads the base model or marks itself done.  Before,
+    nothing looked at PyTorch again and the run went on to hours of work on a broken stack.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PYTHON=str(install_stub_python(tmp_path)),
+        TWIN_TEST_COUNTER=str(tmp_path / "torch_looks"),
+    )
+    download = tmp_path / "download_started"
+    body = (
+        SETUP_WITHOUT_THE_DOWNLOAD
+        + COUNTED_TORCH
+        + f'download_base_model() {{ touch "{download}"; }}; run_install'
+    )
+    done = call_setup(autodl, env, body)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "PyTorch is not usable after the packages are installed" in done.stderr
+    assert "CUDA 13.0 builds are not used" in done.stderr
+    assert not download.exists() and not (workdir / ".setup_done").exists()
+    assert int((tmp_path / "torch_looks").read_text("utf-8")) == 2  # before and after, no more
+
+
+@posix_only
+def test_verify_stops_when_the_torch_of_the_instance_is_not_usable(tmp_path: Path) -> None:
+    """R17-49b (D-632): the cheap second look in ``setup.sh verify``."""
+    workdir = prepared_workdir(tmp_path)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path, probe_torch="echo '2.11.0 13.0 sm_80,sm_120'"
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 1
+    assert "PyTorch is not usable on this instance" in done.stderr
+    assert cli_calls(log) == []  # no template check, no trial step
 
 
 # ---------------------------------------------------------------------------- decrypt

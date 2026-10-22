@@ -80,8 +80,14 @@ def install_scripts(workdir: Path, profile: str, *, dpo_min_pairs: int = 200) ->
 DEFAULT_PROBES = """\
 # the virtual environment of the tests has no jieba, nltk or rouge-chinese: the instance has them
 probe_eval_packages() { :; }
+# no GPU in the tests; the instance of the profiles has a Blackwell card with the right PyTorch
+probe_gpu() { echo 'NVIDIA GeForce RTX 5090, 32607 MiB, 570.86.10, 12.0'; }
+probe_torch() { echo '2.9.1+cu128 12.8 sm_80,sm_90,sm_120'; }
+probe_torch_versions() {
+    printf 'torch 2.9.1+cu128\\ntorchvision 0.24.1+cu128\\ntorchaudio 2.9.1+cu128\\n'
+}
 """
-"""Probes every script test replaces unless it brings its own (R17-1, D-631)."""
+"""Probes every script test replaces unless it brings its own (R17-1, R17-49b: D-631, D-632)."""
 
 
 def script_env(workdir: Path, tmp_path: Path, **extra: str) -> dict[str, str]:
@@ -157,6 +163,14 @@ def call_function(autodl: Path, env: dict[str, str], body: str) -> subprocess.Co
         "set -a; . ./versions.env; . ./profile.env; set +a; . ./lib.sh; "
     )
     return run_bash(prologue + body, env)
+
+
+def write_distribution(site: Path, name: str, version: str) -> None:
+    """An installed distribution for ``importlib.metadata`` (a ``.dist-info`` in ``site``)."""
+    info = site / f"{name.replace('-', '_')}-{version}.dist-info"
+    info.mkdir(parents=True, exist_ok=True)
+    metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+    (info / "METADATA").write_text(metadata, encoding="utf-8")
 
 
 def call_setup(autodl: Path, env: dict[str, str], body: str) -> subprocess.CompletedProcess[str]:
