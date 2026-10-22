@@ -40,7 +40,7 @@ from twin.learning.pairs import (
 )
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
-from twin.ops.jobs import HandlerRegistry, JobQueue
+from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, JobView
 from twin.services import Services, build_services
 from twin.storage.ids import new_id
 from twin.storage.learning_models import PreferencePair
@@ -504,6 +504,17 @@ def test_a_failed_dpo_export_is_kept_and_shown_and_the_command_fails(
     assert failed.exit_code != 0 and "export-dpo: failed" in failed.output
     shown = runner.invoke(app, ["train", "export-status"])
     assert "export-dpo: failed" in shown.output and "twin train export" in shown.output
+
+
+async def test_the_dpo_job_needs_the_services_container(clock: ManualClock) -> None:
+    job = JobView(
+        id="J" * 26, type=EXPORT_DPO_JOB, payload={}, priority=80, status="running", attempts=1,
+        max_attempts=1, run_after=NOW, offpeak_only=False, deadline=None, last_error=None,
+        batch_id=None, estimated_cost_usd=None, requires_approval=False, approved_at=None,
+        approved_usd=None, started_at=NOW, finished_at=None, created_at=NOW, updated_at=NOW,
+    )  # fmt: skip
+    with pytest.raises(RuntimeError, match="services container"):
+        await handle_training_export_dpo(JobContext(job=job, services=None, clock=clock))
 
 
 async def test_the_job_writes_the_same_file_as_the_synchronous_export(

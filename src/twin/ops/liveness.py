@@ -76,7 +76,9 @@ class ProcessProbe:
         return (sys.platform if self.platform is None else self.platform) == "win32"
 
     def _api(self) -> Win32:
-        return self.win32 if self.win32 is not None else load_win32()
+        if self.win32 is None:
+            self.win32 = load_win32()  # once: a recovery asks about every running job
+        return self.win32
 
     def exists(self, pid: int) -> bool:
         if self._is_windows():

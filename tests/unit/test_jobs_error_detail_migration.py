@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.unit.test_ops_migration import columns, insert
+from twin.ops.backup.archive import database_key_ids
 from twin.storage import migrate
 
 BEFORE = "0017_eval_kinds"
@@ -121,3 +122,20 @@ def test_the_constraints_and_indexes_of_the_queue_survive_the_downgrade(tmp_path
             add_job(connection, "Y" * 26, attempts=-1)
     finally:
         connection.close()
+
+
+def test_a_backup_of_the_schema_before_the_column_can_still_be_scanned_for_its_keys(
+    tmp_path: Path,
+) -> None:
+    """The scan of a snapshot looks for the encrypted columns of the models: the older snapshot
+    has no ``last_error_detail``, and SQLite reads a double-quoted unknown name as a string."""
+    path = old_database(tmp_path)
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("UPDATE jobs SET payload = ?", (b"\x01\x00\x00\x00\x07rest",))
+        connection.commit()
+    finally:
+        connection.close()
+    assert database_key_ids(path) == {7}  # the key id inside the sealed payload; no TypeError
+    migrate.upgrade(path, AFTER)
+    assert database_key_ids(path) == {7}
