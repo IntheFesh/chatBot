@@ -243,6 +243,9 @@ if config.get("per_device_train_batch_size", 1) > limit:
     sys.stderr.write("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB\n")
     sys.exit(1)
 if mode == "export":
+    if config.get("adapter_name_or_path") and config.get("quantization_bit"):
+        sys.stderr.write("ValueError: Cannot merge adapters to a quantized model.\n")
+        sys.exit(1)
     merged = Path(config["export_dir"])
     merged.mkdir(parents=True, exist_ok=True)
     (merged / "config.json").write_text("{}", encoding="utf-8")

@@ -1060,12 +1060,22 @@ def prepare_export(
 
 
 @posix_only
+@pytest.mark.parametrize(
+    ("profile", "export_device"), [("5090-14b", "cpu"), ("pro6000-14b", "auto")]
+)
 def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
-    tmp_path: Path,
+    tmp_path: Path, profile: str, export_device: str
 ) -> None:
-    workdir, env, trace = prepare_export(tmp_path)
+    """R-TRN-009; R17-49f (D-635): for the QLoRA profile and the bf16 one, with their own settings.
 
-    done = run_script(workdir, env, "export.sh", "5090-14b")
+    The 14B profile of the 5090 trains with 4-bit QLoRA and must merge on the CPU into the bf16
+    base *without* ``quantization_bit`` (LLaMA-Factory refuses to merge into a quantised model);
+    the PRO 6000 profile merges wherever LLaMA-Factory puts it.  The test used only one profile
+    and looked at none of these settings.
+    """
+    workdir, env, trace = prepare_export(tmp_path, profile)
+
+    done = run_script(workdir, env, "export.sh", profile)
     assert done.returncode == 0, done.stderr + done.stdout
 
     lines = trace.read_text("utf-8").splitlines()
@@ -1081,33 +1091,48 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     # R17-8 (D-634): the quantizer writes where the files stay; there is no second copy on the disk
     targets = (tmp_path / "quant_targets.log").read_text("utf-8").splitlines()
     assert [Path(target).name for target in targets] == [
-        "5090-14b-Q4_K_M.gguf.part",
-        "5090-14b-Q5_K_M.gguf.part",
-        "5090-14b-Q8_0.gguf.part",
+        f"{profile}-Q4_K_M.gguf.part",
+        f"{profile}-Q5_K_M.gguf.part",
+        f"{profile}-Q8_0.gguf.part",
     ]
     assert {Path(target).parent for target in targets} == {artifacts / "gguf"}
     assert list((workdir / "gguf").iterdir()) == []  # not even the F16 file is left
     assert sorted(p.name for p in (artifacts / "gguf").iterdir()) == [
-        "5090-14b-Q4_K_M.gguf",
-        "5090-14b-Q5_K_M.gguf",
-        "5090-14b-Q8_0.gguf",
+        f"{profile}-Q4_K_M.gguf",
+        f"{profile}-Q5_K_M.gguf",
+        f"{profile}-Q8_0.gguf",
     ]
     assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == b"adapter-weights"
     manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
-    assert manifest["run_id"] == "r-test-1" and manifest["profile"] == "5090-14b"
+    assert manifest["run_id"] == "r-test-1" and manifest["profile"] == profile
     assert manifest["template_version"] == "qwen3_nothink@llamafactory-0.9.5"
     assert manifest["persona_version"] == "v3" and manifest["dataset_version"] == "ds-test-01"
     assert [m["quant"] for m in manifest["models"]] == ["Q4_K_M", "Q5_K_M", "Q8_0", "lora"]
     listed = {f["path"] for f in manifest["files"]}
-    assert "gguf/5090-14b-Q4_K_M.gguf" in listed and "adapter/adapter_model.safetensors" in listed
+    assert f"gguf/{profile}-Q4_K_M.gguf" in listed and "adapter/adapter_model.safetensors" in listed
     export_call = next(
         c for c in cli_calls(tmp_path / "stubs" / "cli_calls.log") if c["mode"] == "export"
     )
     assert str(export_call["adapter"]).endswith("/output/sft")
+    # R17-49f (D-635): what is specific to the profile reached the merge
+    assert export_call["export_device"] == export_device
+    assert export_call["quantization_bit"] is None  # the merge loads the bf16 base, never 4-bit
+    assert PROFILES[profile].export_device == export_device
     # a second run has nothing left to do
-    again = run_script(workdir, env, "export.sh", "5090-14b")
+    again = run_script(workdir, env, "export.sh", profile)
     assert again.returncode == 0 and "already done" in again.stdout
     assert len(trace.read_text("utf-8").splitlines()) == 4
+
+
+@posix_only
+def test_a_merge_into_a_quantised_base_is_refused_like_llamafactory_does(tmp_path: Path) -> None:
+    """R17-49f (D-635): the fake command knows the rule, so a wrong export.yaml cannot slip by."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-14b")
+    config = workdir / "config" / "export.yaml"
+    config.write_text(config.read_text("utf-8") + "quantization_bit: 4\n", encoding="utf-8")
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode != 0
+    assert "Cannot merge adapters to a quantized model" in done.stderr + done.stdout
 
 
 @posix_only
