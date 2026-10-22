@@ -59,6 +59,20 @@ version_ge() {
     [ "$(printf '%s\n%s\n' "${b}" "${a}" | sort -V | head -n1)" = "${b}" ]
 }
 
+# check_python_version FOUND MIN: success when the Python of the instance is new enough.
+# LLaMA-Factory declares Requires-Python >=3.11 (TWIN_PYTHON_MIN); the tools of the instance
+# (tools/remote_job.py and the others) are written for exactly that and newer.
+check_python_version() {
+    local found="$1" minimum="$2"
+    if version_ge "${found}" "${minimum}"; then
+        log "python: ${found} (${minimum} or newer needed) - ok"
+        return 0
+    fi
+    log "python: ${TWIN_PYTHON} is ${found}, but LLaMA-Factory ${TWIN_LLAMAFACTORY:-?} needs Python ${minimum} or newer" >&2
+    log "请在 AutoDL 控制台换带 Python ${minimum} 及以上的镜像 (choose an image with Python ${minimum} or newer, or point TWIN_PYTHON at one)" >&2
+    return 1
+}
+
 # check_disk_space FREE_GB REQUIRED_GB SPEC_GB: success when the free space is enough.
 check_disk_space() {
     local free="$1" required="$2" spec="$3"
@@ -122,6 +136,18 @@ next_smaller_batch() {
         return 1
     fi
     echo "$((batch / 2)) $((accum * 2))"
+}
+
+# The largest quantization (Q8_0) is 0.53 of the F16 size (twin.training.profiles.QUANT_FACTORS);
+# 0.55 leaves a little room.
+QUANT_SPACE_FACTOR=0.55
+
+# quant_space_needed_gb F16_BYTES: whole GB that must be free before one quantization writes its
+# file: ceil(F16 size * QUANT_SPACE_FACTOR) + 2.  The F16 file is already on the disk, and the
+# earlier quantizations are in artifacts/gguf, so only the new file is added.
+quant_space_needed_gb() {
+    awk -v bytes="$1" -v factor="${QUANT_SPACE_FACTOR}" \
+        'BEGIN { gb = bytes * factor / 1073741824; n = int(gb); if (n < gb) n++; print n + 2 }'
 }
 
 # yaml_get FILE KEY: the value of a top-level "key: value" line.
@@ -214,6 +240,40 @@ probe_gpu() {
     nvidia-smi --query-gpu=name,memory.total,driver_version,compute_cap --format=csv,noheader | head -n1
 }
 
+# probe_python_version: "major.minor.micro" of TWIN_PYTHON.
+probe_python_version() {
+    "${TWIN_PYTHON}" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])'
+}
+
+# probe_eval_packages: the packages LLaMA-Factory needs to generate replies for the evaluation
+# (predict_with_generate: jieba, nltk, rouge-chinese) that are NOT installed, one name per line;
+# nothing is printed when all three are there.
+probe_eval_packages() {
+    "${TWIN_PYTHON}" - <<'PY'
+from importlib import metadata
+
+for name in ("jieba", "nltk", "rouge-chinese"):
+    try:
+        metadata.version(name)
+    except metadata.PackageNotFoundError:
+        print(name)
+PY
+}
+
+# probe_torch_versions: "name version" of each of torch, torchvision and torchaudio that is
+# installed, the version as pip shows it (with its +cu128 tag).
+probe_torch_versions() {
+    "${TWIN_PYTHON}" - <<'PY'
+from importlib import metadata
+
+for name in ("torch", "torchvision", "torchaudio"):
+    try:
+        print(name, metadata.version(name))
+    except metadata.PackageNotFoundError:
+        pass
+PY
+}
+
 # probe_torch: "version cuda arch,arch,..." of the installed PyTorch, or "none none ".
 probe_torch() {
     "${TWIN_PYTHON}" - <<'PY' 2>/dev/null || echo "none none "
@@ -225,6 +285,28 @@ PY
 }
 
 # ------------------------------------------------------------------ combined checks
+
+# run_python_check: the Python is new enough; its version is recorded in state/python.version
+# (what a report of a failed run on another image needs to know).
+run_python_check() {
+    local found
+    found="$(probe_python_version)" || die "${TWIN_PYTHON} cannot be run; the instance needs Python ${TWIN_PYTHON_MIN} or newer"
+    check_python_version "${found}" "${TWIN_PYTHON_MIN}" || return 1
+    mkdir -p "${TWIN_HOME}/state"
+    printf '%s\n' "${found}" >"${TWIN_HOME}/state/python.version"
+}
+
+# run_eval_packages_check: LLaMA-Factory checks jieba, nltk and rouge-chinese as mandatory when
+# it generates replies (eval.sh; DISABLE_VERSION_CHECK does not skip it) and its wheel does not
+# list them, so a missing one only shows in the second step of eval.sh.  Stop here instead.
+run_eval_packages_check() {
+    local missing
+    missing="$(probe_eval_packages)" || die "cannot look for the evaluation packages with ${TWIN_PYTHON}"
+    if [ -n "${missing}" ]; then
+        die "LLaMA-Factory needs ${missing//$'\n'/, } to generate the replies of the evaluation; run setup.sh ${TWIN_PROFILE} install again"
+    fi
+    log "evaluation packages (jieba, nltk, rouge-chinese) - ok"
+}
 
 # run_resource_checks: the disk and memory checks of the profile in profile.env.
 run_resource_checks() {
@@ -245,6 +327,28 @@ run_torch_check() {
     read -r torch_version cuda archs <<<"$(probe_torch)"
     log "PyTorch: ${torch_version}, CUDA ${cuda}, architectures: ${archs:-none}" >&2
     torch_stack_verdict "${torch_version}" "${cuda}" "${archs:-}" "${capability}"
+}
+
+# write_torch_constraints FILE: a pip constraints file that freezes the PyTorch stack as it is
+# installed now (the one run_torch_check has just accepted: "torch==2.9.1+cu128").  A pip install
+# of other packages that were to replace it - by the CUDA 13 build of PyPI, say - fails instead.
+write_torch_constraints() {
+    local file="$1" name version
+    : >"${file}"
+    while read -r name version; do
+        printf '%s==%s\n' "${name}" "${version}" >>"${file}"
+    done < <(probe_torch_versions)
+}
+
+# require_usable_torch WHEN: stop unless the installed PyTorch still has the verdict "ok".  It is
+# asked again after the packages are installed and when the instance is verified, because pip
+# may pull another build in as a dependency and the first verdict says nothing about that.
+require_usable_torch() {
+    local verdict
+    verdict="$(run_torch_check)"
+    [ "${verdict}" = "ok" ] ||
+        die "PyTorch is not usable $1: ${verdict}. Run setup.sh ${TWIN_PROFILE:-<profile>} install again (it reinstalls the CUDA ${TWIN_CUDA_SERIES} build first); logs/setup.log shows which package replaced it"
+    log "PyTorch $1 - ok"
 }
 
 # --------------------------------------------------------------------- environment
@@ -366,7 +470,7 @@ export_step_text() {
         prepare_llama_cpp) echo "clone llama.cpp ${TWIN_LLAMA_CPP_TAG:-?} and build llama-quantize on the CPU" ;;
         convert_f16) echo "convert the merged model to an F16 GGUF (convert_hf_to_gguf.py)" ;;
         delete_merged_hf) echo "delete the merged HF weights" ;;
-        quantize) echo "quantize the F16 GGUF to ${TWIN_GGUF_QUANTS:-Q4_K_M,Q5_K_M,Q8_0}" ;;
+        quantize) echo "quantize the F16 GGUF to ${TWIN_GGUF_QUANTS:-Q4_K_M,Q5_K_M,Q8_0}, written into artifacts/gguf" ;;
         delete_f16) echo "delete the F16 GGUF" ;;
         collect_artifacts) echo "copy the adapter, compute sha256 and write artifacts/manifest.json" ;;
         *) return 1 ;;

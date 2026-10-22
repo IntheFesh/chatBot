@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,10 @@ import yaml
 from twin.training import lf_template, versions
 from twin.training.layout import RemoteLayout
 from twin.training.profiles import (
+    DISK_OVERHEAD_GB,
+    DISK_PEAK_FACTOR,
     PROFILES,
+    QUANT_FACTORS,
     ProfileError,
     epochs_for,
     get_profile,
@@ -231,6 +236,37 @@ def test_the_committed_versions_file_is_the_one_python_generates() -> None:
     assert committed == versions.versions_env()
     assert f"TWIN_LLAMAFACTORY={lf_template.LLAMAFACTORY_VERSION}\n" in committed
     assert "cu128" in versions.TORCH_INDEX_URL and "cu13" not in versions.TORCH_INDEX_URL
+
+
+def test_the_disk_peak_factor_is_the_sum_of_what_is_on_the_disk_at_the_last_quantization() -> None:
+    """R17-8 (D-634): the base, the F16 GGUF and the three quantizations, and nothing else.
+
+    The quantizer writes straight into ``artifacts/gguf``, so there is no copy of the quantized
+    files in the sum.  The numbers the user is told stay what R-TRN-009 says: 8B 70 GB, 14B 110 GB,
+    32B 230 GB (the computed need is not above them).
+    """
+    assert set(QUANT_FACTORS) == set(versions.GGUF_QUANTS)
+    assert 1 + 1 + sum(QUANT_FACTORS.values()) == DISK_PEAK_FACTOR
+    assert pytest.approx(3.20) == DISK_PEAK_FACTOR
+    needs = {name: profile.required_disk_gb for name, profile in PROFILES.items()}
+    assert needs == {"5090-8b": 68, "5090-14b": 110, "pro6000-14b": 110, "pro6000-32b": 225}
+    for name, profile in PROFILES.items():
+        peak = profile.base_gb * (1 + 1 + sum(QUANT_FACTORS.values())) + DISK_OVERHEAD_GB
+        assert profile.required_disk_gb == math.ceil(peak), name
+        assert profile.required_disk_gb <= profile.spec_disk_gb, name
+
+
+def test_the_packages_llamafactory_checks_to_generate_replies_are_pinned() -> None:
+    """R17-1 (D-631): jieba, nltk and rouge-chinese are mandatory for ``predict_with_generate``."""
+    lines = dict(line.split("=", 1) for line in versions.versions_env().splitlines())
+    pins = {
+        "TWIN_JIEBA": versions.JIEBA,
+        "TWIN_NLTK": versions.NLTK,
+        "TWIN_ROUGE_CHINESE": versions.ROUGE_CHINESE,
+    }
+    for key, pin in pins.items():
+        assert lines[key] == pin
+        assert re.fullmatch(r"\d+(\.\d+)+", pin), f"{key} must be an exact version, not {pin!r}"
 
 
 def test_the_assets_directory_is_found_next_to_the_sources() -> None:

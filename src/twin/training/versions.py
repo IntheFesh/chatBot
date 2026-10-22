@@ -13,6 +13,12 @@ Why these versions:
   later ``pip install`` finds its requirement already met.
 * transformers, peft, trl, accelerate and datasets sit at the upper bound that LLaMA-Factory 0.9.5
   accepts (transformers 4.57.6 is also what llama.cpp's converter is pinned to).
+* jieba, nltk and rouge-chinese: LLaMA-Factory 0.9.5 checks all three as *mandatory*
+  (``check_version(..., mandatory=True)`` in ``hparams/parser.py``, which
+  ``DISABLE_VERSION_CHECK`` does not skip) whenever ``predict_with_generate`` is set, i.e. in
+  ``eval.sh``; its wheel lists none of them in ``Requires-Dist`` and has no extra for them.
+  Checked 2026-10-22: all three resolve on the index (jieba is source-only and builds on the
+  instance; nltk 3.10.4 exists, 3.10.3 is the pin).
 * bitsandbytes 0.49.2 ships ``libbitsandbytes_cuda128.so``, built for compute capability 12.0.
 * llama.cpp tag ``b11177`` (2026-09-25): ``convert_hf_to_gguf.py`` registers ``Qwen3ForCausalLM``
   (``conversion/qwen.py``) and ``llama-quantize`` is a CMake target of the tree.
@@ -30,6 +36,14 @@ from typing import Final
 
 from twin.training.lf_template import LLAMAFACTORY_VERSION
 
+PYTHON_MIN: Final = "3.11"
+"""The oldest Python the instance may have: LLaMA-Factory 0.9.5 declares ``Requires-Python >=3.11``.
+
+``setup.sh`` refuses an older ``python3``; ``training/autodl/tools/remote_job.py`` and the two
+``twin`` modules in the package's ``pylib`` must run (and parse) on it;
+``scripts/check_remote_job.py`` runs the tool under the interpreters CI has, 3.11 and 3.12.3
+(D-630).
+"""
 TORCH: Final = "2.9.1"
 TORCHVISION: Final = "0.24.1"
 TORCHAUDIO: Final = "2.9.1"
@@ -47,6 +61,9 @@ DATASETS: Final = "4.0.0"
 BITSANDBYTES: Final = "0.49.2"
 MODELSCOPE: Final = "1.39.1"
 ZSTANDARD: Final = "0.25.0"
+JIEBA: Final = "0.42.1"
+NLTK: Final = "3.10.3"
+ROUGE_CHINESE: Final = "1.0.3"
 CRYPTOGRAPHY_MIN: Final = "43"
 
 LLAMA_CPP_REPO: Final = "https://github.com/ggml-org/llama.cpp"
@@ -80,6 +97,7 @@ def versions_env() -> str:
     """The pinned versions as ``KEY=value`` lines (``training/autodl/versions.env``)."""
     values = {
         "TWIN_LLAMAFACTORY": LLAMAFACTORY_VERSION,
+        "TWIN_PYTHON_MIN": PYTHON_MIN,
         "TWIN_TORCH": TORCH,
         "TWIN_TORCHVISION": TORCHVISION,
         "TWIN_TORCHAUDIO": TORCHAUDIO,
@@ -96,6 +114,9 @@ def versions_env() -> str:
         "TWIN_BITSANDBYTES": BITSANDBYTES,
         "TWIN_MODELSCOPE": MODELSCOPE,
         "TWIN_ZSTANDARD": ZSTANDARD,
+        "TWIN_JIEBA": JIEBA,
+        "TWIN_NLTK": NLTK,
+        "TWIN_ROUGE_CHINESE": ROUGE_CHINESE,
         "TWIN_CRYPTOGRAPHY_MIN": CRYPTOGRAPHY_MIN,
         "TWIN_LLAMA_CPP_REPO": LLAMA_CPP_REPO,
         "TWIN_LLAMA_CPP_TAG": LLAMA_CPP_TAG,

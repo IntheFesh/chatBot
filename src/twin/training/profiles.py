@@ -8,12 +8,15 @@ file the shell scripts source (:func:`profile_env`) are both generated from here
 never repeat a number.
 
 Disk space (``required_disk_gb``)
-    the peak is reached while the F16 GGUF still exists: the base model, that F16 copy and all
-    three quantised files (Q4_K_M, Q5_K_M and Q8_0 are together about 1.19 times the bf16 size)
-    are on the data disk at the same moment, next to the Python environments, the caches and the
-    checkpoints (about 15 GB).  The result is ``base_gb * 3.19 + 15``, rounded up: 68 GB for 8B,
-    110 GB for 14B and 225 GB for 32B, which is what R-TRN-009 asks for ("about 70, 110 and
-    230 GB").  The merged bf16 copy is deleted before the quantisation, so it adds nothing to it.
+    the peak is reached at the last quantisation, while the F16 GGUF still exists: the base model,
+    that F16 copy and all three quantised files (Q4_K_M, Q5_K_M and Q8_0 are together 1.20 times
+    the bf16 size, :data:`QUANT_FACTORS`) are on the data disk at the same moment, next to the
+    Python environments, the caches and the checkpoints (about 15 GB).  ``export.sh`` writes the
+    quantised files straight into ``artifacts/gguf`` (a copy there would be a fourth set and make
+    the peak 3.4 times, which the disks of R-TRN-009 do not hold: D-634).  The result is
+    ``base_gb * 3.20 + 15``, rounded up: 68 GB for 8B, 110 GB for 14B and 225 GB for 32B, which is
+    what R-TRN-009 asks for ("about 70, 110 and 230 GB").  The merged bf16 copy is deleted before
+    the quantisation, so it adds nothing to it.
 Memory (``required_ram_gb``)
     a QLoRA adapter is merged on the CPU into the bf16 base (``export_device: cpu``), which needs
     the whole bf16 model in RAM; the other profiles merge on the GPU and only map the weights.
@@ -27,7 +30,10 @@ import math
 from dataclasses import dataclass
 from typing import Final, Literal
 
-DISK_PEAK_FACTOR: Final = 3.19
+QUANT_FACTORS: Final = {"Q4_K_M": 0.31, "Q5_K_M": 0.36, "Q8_0": 0.53}
+"""Size of each GGUF quantisation as a fraction of the bf16 (= F16) size of the model."""
+DISK_PEAK_FACTOR: Final = 1 + 1 + sum(QUANT_FACTORS.values())
+"""The base, the F16 GGUF and every quantisation on the disk at once (3.20)."""
 DISK_OVERHEAD_GB: Final = 15
 RAM_CPU_MERGE_FACTOR: Final = 1.3
 RAM_CPU_MERGE_EXTRA_GB: Final = 4

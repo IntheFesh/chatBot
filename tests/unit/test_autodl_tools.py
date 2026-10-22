@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -12,11 +13,17 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
-from tests.support.autodl_scripts import AUTODL
+from tests.support.autodl_scripts import AUTODL, ROOT, installed_pythons
 from tests.support.waiting import wait_until_sync as wait_until
+from twin.training import bundle
+from twin.training.profiles import PROFILES
+from twin.training.versions import PYTHON_MIN
 
 TOOLS = AUTODL / "tools"
+CHECK_SCRIPT = ROOT / "scripts" / "check_remote_job.py"
 
 
 def load_tool(name: str) -> ModuleType:
@@ -28,9 +35,20 @@ def load_tool(name: str) -> ModuleType:
     return module
 
 
+def load_script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"script_{name}", ROOT / "scripts" / f"{name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+check_remote_job = load_script("check_remote_job")
 remote_job = load_tool("remote_job")
 summarize_train = load_tool("summarize_train")
 make_eval = load_tool("make_eval_generations")
+make_trial = load_tool("make_trial_dataset")
 artifact_manifest = load_tool("artifact_manifest")
 verify_manifest = load_tool("verify_manifest")
 
@@ -222,6 +240,243 @@ def test_start_without_a_command_is_a_usage_error(tmp_path: Path) -> None:
         timeout=30,
     )
     assert done.returncode == 2
+
+
+def run_check(python: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+    command = [python, str(CHECK_SCRIPT)]
+    if root is not None:
+        command += ["--root", str(root)]
+    return subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=180
+    )
+
+
+def test_remote_job_starts_a_command_on_every_installed_python() -> None:
+    """R17-2 (D-630): the tool runs under the Python of the instance, not only under ours.
+
+    ``start ... -- COMMAND`` once failed with "unrecognized arguments" on Python 3.11 and
+    3.12.0-3.12.6 (``argparse`` before 3.12.7 handles ``--`` after the options differently); the
+    tests ran under the newest 3.12 only.  ``scripts/check_remote_job.py`` runs start, status,
+    tail and stop for real under the interpreter that runs it; here under every different Python
+    this machine has (the system 3.11 and 3.12.3 of ``ubuntu-latest`` among them), and CI runs it
+    under 3.11 and 3.12.3 in its own job.
+    """
+    pythons = installed_pythons()
+    assert pythons, "not even the interpreter of the tests is usable"
+    failures = {}
+    for version, executable in pythons:
+        done = run_check(executable)
+        if done.returncode != 0:
+            failures[version] = done.stderr
+        else:
+            assert f"works under Python {version}" in done.stdout
+    assert not failures, failures
+
+
+def test_the_command_may_look_like_options(tmp_path: Path) -> None:
+    """R17-2 (D-630): everything after the first ``--`` is the command, verbatim."""
+    words = ["--name", "x", "--dir", "y", "--", "--env", "K=V", "start", "-h"]
+    code = "import sys, json; print(json.dumps(sys.argv[1:]))"
+    for version, executable in installed_pythons():
+        jobs = tmp_path / f"jobs-{version}"
+        tool = [executable, str(TOOLS / "remote_job.py")]
+        started = subprocess.run(
+            [
+                *tool,
+                "start",
+                "--dir",
+                str(jobs),
+                "--name",
+                "o",
+                "--",
+                executable,
+                "-c",
+                code,
+                *words,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=60,
+        )
+        assert started.returncode == 0, (version, started.stderr)
+        wait_until(lambda jobs=jobs: (jobs / "o" / "exit_code").exists(), timeout=30)
+        assert json.loads((jobs / "o" / "log").read_text("utf-8")) == words, version
+
+
+def test_only_the_first_double_dash_ends_the_options_and_only_start_takes_a_command(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): the split of the arguments is ours, not ``argparse``'s."""
+    head, tail = remote_job.split_command(["start", "--name", "n", "--", "a", "--", "b"])
+    assert (head, tail) == (["start", "--name", "n"], ["a", "--", "b"])
+    assert remote_job.split_command(["status", "--name", "n"]) == (["status", "--name", "n"], [])
+    jobs = str(tmp_path / "jobs")
+    for action in ("status", "tail", "stop"):
+        with_command = [action, "--dir", jobs, "--name", "n", "--", "echo", "hi"]
+        assert remote_job.main(with_command) == 2  # a command only makes sense for start
+    assert remote_job.main(["start", "--dir", jobs, "--name", "n", "--"]) == 2
+    with pytest.raises(SystemExit) as refused:  # words without ``--`` are not a command
+        remote_job.main(["start", "--dir", jobs, "--name", "n", "echo", "hi"])
+    assert refused.value.code == 2
+
+
+@given(
+    head=st.lists(st.text(min_size=1, max_size=8).filter(lambda word: word != "--"), max_size=6),
+    tail=st.lists(st.text(max_size=8), max_size=6),
+)
+def test_the_split_gives_back_what_was_joined(head: list[str], tail: list[str]) -> None:
+    """R17-2 (D-630): whatever the command looks like, it comes out unchanged."""
+    assert remote_job.split_command([*head, "--", *tail]) == (head, tail)
+    assert remote_job.split_command(head) == (head, [])
+
+
+def test_the_check_script_reads_the_minimum_python_and_lists_what_the_instance_runs() -> None:
+    """R17-2 (D-630): one source for the minimum, and the files checked are the files shipped."""
+    check = check_remote_job
+    assert check.minimum_python(ROOT) == tuple(int(part) for part in PYTHON_MIN.split("."))
+    assert check.PYLIB_MODULES == bundle.PYLIB_MODULES
+    uploaded = bundle.plain_upload_files(PROFILES["5090-8b"])
+    tools = {Path(name).name for name in uploaded if name.startswith("autodl/tools/")}
+    listed = {path.name for path in check.instance_files(ROOT)}
+    assert {name for name in tools if name.endswith(".py")} <= listed
+    assert {f"{name}.py" for name in bundle.PYLIB_MODULES} <= listed
+
+
+def copy_instance_files(root: Path) -> None:
+    """A repository with only what ``check_remote_job.py`` looks at."""
+    shutil.copytree(TOOLS, root / "training" / "autodl" / "tools")
+    shutil.copy(AUTODL / "versions.env", root / "training" / "autodl" / "versions.env")
+    package = root / "src" / "twin" / "training"
+    package.mkdir(parents=True)
+    for name in (*check_remote_job.TOOL_MODULES, *bundle.PYLIB_MODULES):
+        shutil.copy(ROOT / "src" / "twin" / "training" / f"{name}.py", package)
+
+
+def test_the_check_refuses_syntax_that_the_minimum_python_cannot_parse(tmp_path: Path) -> None:
+    """R17-2 (D-630): a tool written for 3.12 must not reach an instance with 3.11."""
+    copy_instance_files(tmp_path)
+    clean = run_check(sys.executable, tmp_path)
+    assert clean.returncode == 0, clean.stderr
+    new_syntax = tmp_path / "training" / "autodl" / "tools" / "generic.py"
+    new_syntax.write_text("def first[T](items: list[T]) -> T:\n    return items[0]\n", "utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1
+    assert "training/autodl/tools/generic.py:1" in done.stderr
+    assert f"Python {PYTHON_MIN}" in done.stderr
+
+
+def test_the_check_needs_the_minimum_to_be_written_down(tmp_path: Path) -> None:
+    copy_instance_files(tmp_path)
+    versions = tmp_path / "training" / "autodl" / "versions.env"
+    versions.write_text("TWIN_TORCH=2.9.1\n", encoding="utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1 and "TWIN_PYTHON_MIN" in done.stderr
+
+
+# ----------------------------------------------------------------- make_trial_dataset
+
+
+def sharegpt_row(name: str, system: str, *turns: str) -> dict[str, object]:
+    roles = ("human", "gpt")
+    return {
+        "id": name,
+        "system": system,
+        "conversations": [{"from": roles[i % 2], "value": text} for i, text in enumerate(turns)],
+    }
+
+
+def write_trial_source(directory: Path, rows: list[dict[str, object]]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    (directory / "sft_train.jsonl").write_text(text, encoding="utf-8")
+    info = {
+        "twin_sft_train": {
+            "file_name": "sft_train.jsonl",
+            "formatting": "sharegpt",
+            "columns": {"messages": "conversations", "system": "system"},
+            "tags": {"role_tag": "from", "content_tag": "value", "user_tag": "human"},
+        },
+        "twin_sft_val": {"file_name": "sft_val.jsonl", "formatting": "sharegpt"},
+    }
+    (directory / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")
+
+
+def test_the_trial_dataset_holds_the_longest_samples_unchanged(tmp_path: Path) -> None:
+    """R17-49c (D-633): longest first, rows copied as they are, the train entry reused."""
+    rows = [
+        sharegpt_row("a", "sys", "x" * 5, "y" * 5),  # 13
+        sharegpt_row("b", "sys", "x" * 50),  # 53
+        sharegpt_row("c", "", "x" * 20, "y" * 20, "z" * 20),  # 60
+        sharegpt_row("d", "sys", "x" * 8),  # 11
+        sharegpt_row("e", "s" * 30, "x" * 30),  # 60: ties with c, the earlier row goes first
+    ]
+    write_trial_source(tmp_path / "data", rows)
+    out = tmp_path / "trial"
+    arguments = ["--data-dir", str(tmp_path / "data"), "--dataset", "twin_sft_train"]
+    code = make_trial.main([*arguments, "--out-dir", str(out), "--count", "3"])
+    assert code == 0
+    written = (out / "sft_trial.jsonl").read_text("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in written] == ["c", "e", "b"]
+    source = (tmp_path / "data" / "sft_train.jsonl").read_text("utf-8").splitlines()
+    assert set(written) <= set(source)  # byte for byte what the exporter wrote
+    info = json.loads((out / "dataset_info.json").read_text("utf-8"))
+    assert list(info) == ["twin_sft_trial"]
+    expected = json.loads((tmp_path / "data" / "dataset_info.json").read_text("utf-8"))
+    assert info["twin_sft_trial"] == {**expected["twin_sft_train"], "file_name": "sft_trial.jsonl"}
+
+
+def test_a_training_set_with_fewer_samples_than_the_count_is_taken_whole(tmp_path: Path) -> None:
+    rows = [sharegpt_row(f"r{i}", "s", "x" * (i + 1)) for i in range(5)]
+    write_trial_source(tmp_path / "data", rows)
+    selected, total, shortest, longest = make_trial.build(
+        tmp_path / "data", "twin_sft_train", tmp_path / "trial", 64
+    )
+    assert (selected, total, shortest, longest) == (5, 5, 2, 6)
+
+
+@given(
+    lengths=st.lists(st.integers(min_value=0, max_value=200), min_size=1, max_size=40),
+    count=st.integers(min_value=0, max_value=50),
+)
+def test_the_selection_never_leaves_out_a_longer_sample_than_it_takes(
+    lengths: list[int], count: int
+) -> None:
+    """R17-49c (D-633): whatever the lengths, what is taken is at least as long as what is not."""
+    lines = [json.dumps(sharegpt_row(str(i), "", "x" * n)) for i, n in enumerate(lengths)]
+    chosen = make_trial.select_longest(lines, count)
+    assert len(chosen) == min(count, len(lines))
+    taken = {line for _, line in chosen}
+    assert len(taken) == len(chosen)
+    assert [length for length, _ in chosen] == sorted(
+        (length for length, _ in chosen), reverse=True
+    )
+    left = [n for line, n in zip(lines, lengths, strict=True) if line not in taken]
+    if chosen and left:
+        assert min(length for length, _ in chosen) >= max(left)
+
+
+def test_the_trial_dataset_refuses_data_it_cannot_use_and_never_prints_a_sample(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "a sentence of hers"
+    bad = tmp_path / "bad"
+    write_trial_source(bad, [{"id": "x", "system": secret, "conversations": [{"from": "human"}]}])
+    arguments = ["--dataset", "twin_sft_train", "--out-dir", str(tmp_path / "out")]
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert "line 1" in capsys.readouterr().err
+    (bad / "sft_train.jsonl").write_text(secret + "\n", encoding="utf-8")  # not JSON at all
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert secret not in capsys.readouterr().err
+    empty = tmp_path / "empty"
+    write_trial_source(empty, [])
+    assert make_trial.main(["--data-dir", str(empty), *arguments]) == 1
+    assert "no samples" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(empty), "--dataset", "nope", "--out-dir", "x"]) == 1
+    assert "no dataset 'nope'" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(tmp_path / "missing"), *arguments]) == 1
+    assert not (tmp_path / "out").exists()  # nothing is written when nothing was chosen
 
 
 # ------------------------------------------------------------------------- the others

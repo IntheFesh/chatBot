@@ -399,7 +399,7 @@ safety:
 - **R-TRN-007** 脱敏：导出前过 R-LLM-009；同一实体在整个数据集中用一致的占位符。
 - **R-TRN-008** 训练包 `twin train bundle --profile <档位>`：生成 `bundle.tar.zst`（数据集、`dataset_info.json`、由模板生成的 LLaMA-Factory YAML、AutoDL 脚本、清单与 sha256），用口令（scrypt + AES-GCM）加密；口令不落盘。
 - **R-TRN-009** AutoDL 脚本（`training/autodl/`，bash，`set -euo pipefail`，可重复执行）：
-  - `setup.sh`：检查 `nvidia-smi` 与计算能力；确认 `torch>=2.7` 且 CUDA 12.8 构建并包含 `sm_120`（Blackwell），不满足则安装 cu128 版 PyTorch；不使用 CUDA 13.x；`source /etc/network_turbo` 加速 GitHub/Hugging Face；安装固定版本的 LLaMA-Factory、bitsandbytes 与 `zstd`（解包训练包需要）；注意力实现用 `sdpa`（不编译 flash-attn）；`HF_HOME`、`MODELSCOPE_CACHE`、`PIP_CACHE_DIR`、`TMPDIR` 全部指向数据盘；模型经 ModelScope（`USE_MODELSCOPE_HUB=1`）下载到 `/root/autodl-tmp/models`；数据与输出放 `/root/autodl-tmp/twin`（数据盘，非系统盘）；按档位检查数据盘剩余空间（按基座实际大小计算，约为 8B ≥ 70GB、14B ≥ 110GB、32B ≥ 230GB；AutoDL 默认数据盘 50GB，不足时停止并提示到控制台扩容）与内存（QLoRA 合并需在 CPU 上加载 bf16 基座）。
+  - `setup.sh`：检查 `nvidia-smi` 与计算能力；确认 `torch>=2.7` 且 CUDA 12.8 构建并包含 `sm_120`（Blackwell），不满足则安装 cu128 版 PyTorch；不使用 CUDA 13.x；`source /etc/network_turbo` 加速 GitHub/Hugging Face；安装固定版本的 LLaMA-Factory、bitsandbytes 与 `zstd`（解包训练包需要），以及 LLaMA-Factory 在 `predict_with_generate` 时强制检查而自身依赖里没有的 `jieba`、`nltk`、`rouge-chinese`（`eval.sh` 生成回复需要；`setup.sh verify` 先检查它们是否齐全）；注意力实现用 `sdpa`（不编译 flash-attn）；`HF_HOME`、`MODELSCOPE_CACHE`、`PIP_CACHE_DIR`、`TMPDIR` 全部指向数据盘；模型经 ModelScope（`USE_MODELSCOPE_HUB=1`）下载到 `/root/autodl-tmp/models`；数据与输出放 `/root/autodl-tmp/twin`（数据盘，非系统盘）；按档位检查数据盘剩余空间（按基座实际大小计算，约为 8B ≥ 70GB、14B ≥ 110GB、32B ≥ 230GB；AutoDL 默认数据盘 50GB，不足时停止并提示到控制台扩容）与内存（QLoRA 合并需在 CPU 上加载 bf16 基座）。
   - `decrypt.sh`：解密训练包到数据盘。
   - `train.sh <profile>`：运行 SFT，日志与 loss 曲线落盘，支持断点续训（`resume_from_checkpoint`）。
   - `eval.sh`：在测试集上生成回复（固定采样参数与种子）输出 JSONL，并计算验证集 loss。

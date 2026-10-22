@@ -3,7 +3,8 @@
 It is ``asyncssh``'s own server side: password or public key login, an SFTP subsystem confined to
 a directory (the "instance's disk"), and command execution that runs the command line in a
 subprocess with that directory as its working directory.  ``python3`` in a command line means
-the interpreter running the tests, so the tools in ``training/autodl/tools`` run on Windows as well.
+the interpreter running the tests (or ``python``, when a test wants the old Python an instance
+image may have: R17-2), so the tools in ``training/autodl/tools`` run on Windows as well.
 
 Hooks let a test break the connection in the middle of a transfer (``drop_after_bytes``) and
 record what was written and which commands were run.
@@ -44,6 +45,7 @@ class ServerState:
     allow_forwarding: bool = False  # accept direct-tcpip requests (the tunnel of round 14)
     forwards: list[tuple[str, int]] = field(default_factory=list)  # (host, port) asked for
     connections: list[asyncssh.SSHServerConnection] = field(default_factory=list)
+    python: str = field(default_factory=lambda: sys.executable)  # what ``python3`` stands for
 
 
 class _Auth(asyncssh.SSHServer):
@@ -120,7 +122,7 @@ def _process_handler(state: ServerState) -> Any:
             return
         argv = shlex.split(command)
         if argv and argv[0] == "python3":
-            argv[0] = sys.executable
+            argv[0] = state.python
         try:
             child = await asyncio.create_subprocess_exec(
                 *argv,
@@ -167,9 +169,11 @@ def _process_handler(state: ServerState) -> Any:
 class LocalSSHServer:
     """``async with LocalSSHServer(tmp_path) as server`` - then connect to ``server.port``."""
 
-    def __init__(self, root: Path, *, chroot: bool = True) -> None:
+    def __init__(self, root: Path, *, chroot: bool = True, python: str | None = None) -> None:
         root.mkdir(parents=True, exist_ok=True)
         self.state = ServerState(root=root, chroot=chroot)
+        if python is not None:
+            self.state.python = python
         self.host_key = asyncssh.generate_private_key("ssh-ed25519")
         self._server: asyncssh.SSHAcceptor | None = None
         self.port = 0

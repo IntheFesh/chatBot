@@ -3,13 +3,13 @@
 #
 #   setup.sh <profile> [install|verify]
 #
-# install (default)  checks the GPU, the data disk and the memory, makes sure PyTorch is a CUDA
-#                    12.8 build for Blackwell, installs the pinned training packages and
-#                    downloads the base model from ModelScope.  Run it again after an
-#                    interruption: every step skips what is already done.
-# verify             runs after decrypt.sh: the template consistency check (R-TRN-011) and a
-#                    one-step trial run whose batch size is lowered until it no longer runs out
-#                    of memory.
+# install (default)  checks the Python (3.11 or newer), the GPU, the data disk and the memory,
+#                    makes sure PyTorch is a CUDA 12.8 build for Blackwell, installs the pinned
+#                    training packages and downloads the base model from ModelScope.  Run it
+#                    again after an interruption: every step skips what is already done.
+# verify             runs after decrypt.sh: the packages the evaluation needs, the template
+#                    consistency check (R-TRN-011) and a one-step trial run whose batch size is
+#                    lowered until it no longer runs out of memory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,9 +19,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILE_NAME="${1:-}"
 MODE="${2:-install}"
 
+# jieba, nltk and rouge-chinese are not dependencies of the llamafactory wheel, but 0.9.5 checks
+# them as mandatory whenever it generates replies (predict_with_generate, i.e. eval.sh).  The
+# PyTorch stack that ensure_torch has just accepted is frozen with a constraints file, so that no
+# dependency of these packages can replace it with another build (D-632).
 install_packages() {
-    log "installing the pinned packages (LLaMA-Factory ${TWIN_LLAMAFACTORY})"
-    "${TWIN_PYTHON}" -m pip install \
+    local constraints="${TWIN_HOME}/state/torch-constraints.txt"
+    mkdir -p "${TWIN_HOME}/state"
+    write_torch_constraints "${constraints}"
+    log "installing the pinned packages (LLaMA-Factory ${TWIN_LLAMAFACTORY}); PyTorch stays as it is: $(tr '\n' ' ' <"${constraints}")"
+    "${TWIN_PYTHON}" -m pip install -c "${constraints}" \
         "llamafactory==${TWIN_LLAMAFACTORY}" \
         "transformers==${TWIN_TRANSFORMERS}" \
         "peft==${TWIN_PEFT}" \
@@ -31,6 +38,9 @@ install_packages() {
         "bitsandbytes==${TWIN_BITSANDBYTES}" \
         "modelscope==${TWIN_MODELSCOPE}" \
         "zstandard==${TWIN_ZSTANDARD}" \
+        "jieba==${TWIN_JIEBA}" \
+        "nltk==${TWIN_NLTK}" \
+        "rouge-chinese==${TWIN_ROUGE_CHINESE}" \
         "cryptography>=${TWIN_CRYPTOGRAPHY_MIN}" \
         matplotlib
 }
@@ -90,11 +100,13 @@ run_install() {
     start_logging setup
     log "profile ${TWIN_PROFILE}: ${TWIN_BASE_MODEL}, ${TWIN_METHOD}"
     mkdir -p "${TWIN_HOME}" "${TWIN_MODELS}"
+    run_python_check || exit 1
     use_data_disk
     run_resource_checks || exit 1
     ensure_zstd
     ensure_torch
     with_turbo install_packages
+    require_usable_torch "after the packages are installed"
     download_base_model
     turbo_off
     "${TWIN_PYTHON}" -m pip check || log "pip check reported conflicts (see above); training may still work"
@@ -120,19 +132,33 @@ run_parity_check() {
 }
 
 # One training step with the configured batch layout; on a CUDA out-of-memory failure the
-# per-device batch is halved (and the accumulation doubled) until the step runs.
+# per-device batch is halved (and the accumulation doubled) until the step runs.  The step
+# trains on the LONGEST samples of the training set (tools/make_trial_dataset.py): memory is
+# decided by length, and LLaMA-Factory's max_samples would take the first, i.e. earliest, rows.
+# The copy of those samples is removed when the script ends, however it ends.
+TRIAL_SAMPLES=64
+
 run_trial_step() {
     local config="${TWIN_HOME}/config/sft.yaml" trial="${TWIN_HOME}/config/trial.yaml"
     local batch accum next trial_log="${TWIN_HOME}/logs/trial.log"
+    local trial_data="${TWIN_HOME}/trial_data"
     batch="$(yaml_get "${config}" per_device_train_batch_size)"
     accum="$(yaml_get "${config}" gradient_accumulation_steps)"
+    trap 'rm -rf "${TWIN_HOME}/trial_data"' EXIT
+    "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/make_trial_dataset.py" \
+        --data-dir "${TWIN_HOME}/data" --dataset "$(yaml_get "${config}" dataset)" \
+        --out-dir "${trial_data}" --count "${TRIAL_SAMPLES}" ||
+        die "the data of the trial step could not be prepared"
     while true; do
         cp "${config}" "${trial}"
         yaml_set "${trial}" per_device_train_batch_size "${batch}"
         yaml_set "${trial}" gradient_accumulation_steps "${accum}"
         yaml_set "${trial}" per_device_eval_batch_size "${batch}"
         yaml_set "${trial}" max_steps 1
-        yaml_set "${trial}" max_samples 64
+        yaml_set "${trial}" dataset twin_sft_trial
+        yaml_set "${trial}" dataset_dir "${trial_data}"
+        yaml_drop "${trial}" eval_dataset
+        yaml_drop "${trial}" max_samples
         yaml_set "${trial}" output_dir "${TWIN_HOME}/output/trial"
         yaml_set "${trial}" eval_strategy '"no"'
         yaml_set "${trial}" save_strategy '"no"'
@@ -157,7 +183,7 @@ run_trial_step() {
         yaml_set "${config}" "${key}" "${batch}"
     done
     yaml_set "${config}" gradient_accumulation_steps "${accum}"
-    rm -rf "${TWIN_HOME}/output/trial" "${trial}"
+    rm -rf "${TWIN_HOME}/output/trial" "${trial}" "${trial_data}"
     log "trial step succeeded; training will use batch ${batch} with accumulation ${accum}"
 }
 
@@ -166,6 +192,8 @@ run_verify() {
     use_data_disk
     [ -f "${TWIN_HOME}/data/dataset_info.json" ] || die "no dataset yet; run decrypt.sh first"
     [ -f "${TWIN_HOME}/.setup_done" ] || die "run setup.sh ${TWIN_PROFILE} install first"
+    require_usable_torch "on this instance"
+    run_eval_packages_check
     run_parity_check
     run_trial_step
     log "verification finished"
@@ -181,4 +209,7 @@ main() {
     esac
 }
 
-main
+# Sourcing the file (the tests do) defines the functions without running anything.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    main
+fi

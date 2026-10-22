@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -21,17 +22,23 @@ from tests.support.autodl_scripts import (
     AUTODL,
     ROOT,
     call_function,
+    call_setup,
     cli_calls,
     install_fake_cli,
     install_scripts,
+    install_stub_python,
+    pip_calls,
     posix_only,
     prepared_workdir,
     run_script,
     script_env,
+    write_distribution,
+    yaml_value,
 )
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
-from twin.training.profiles import PROFILES
+from twin.training.profiles import PROFILES, QUANT_FACTORS
+from twin.training.versions import JIEBA, NLTK, ROUGE_CHINESE
 
 PASSPHRASE = "correct horse battery staple"
 SCRIPTS = sorted(path.name for path in AUTODL.glob("*.sh"))
@@ -319,6 +326,72 @@ def test_out_of_memory_is_recognised_in_a_log(env_for, tmp_path: Path) -> None: 
     assert call_function(autodl, env, f"oom_in_log {fine}").returncode == 1
 
 
+@posix_only
+@pytest.mark.parametrize(
+    ("found", "ok"),
+    [
+        ("3.11.0", True),
+        ("3.11.17", True),
+        ("3.12.3", True),
+        ("3.13.1", True),
+        ("3.10.12", False),
+        ("3.9.18", False),
+        ("3.8.10", False),
+    ],
+)
+def test_the_python_of_the_instance_must_be_new_enough_for_llamafactory(  # type: ignore[no-untyped-def]
+    env_for, found: str, ok: bool
+) -> None:
+    """R17-2 (D-630): LLaMA-Factory 0.9.5 needs Python >= 3.11 (``TWIN_PYTHON_MIN``)."""
+    autodl, env = env_for("5090-8b")
+    done = call_function(autodl, env, f"check_python_version {found} $TWIN_PYTHON_MIN")
+    assert (done.returncode == 0) is ok, done.stderr
+    if not ok:
+        assert f"is {found}" in done.stderr and "3.11 or newer" in done.stderr
+        assert "请在 AutoDL 控制台换带 Python 3.11 及以上的镜像" in done.stderr
+
+
+@posix_only
+def test_the_python_version_is_probed_and_recorded(env_for, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    """R17-2 (D-630): ``state/python.version`` says which Python the run used."""
+    autodl, env = env_for("5090-8b")
+    real = call_function(autodl, env, "probe_python_version").stdout.strip()
+    assert real == ".".join(str(part) for part in sys.version_info[:3])
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(tmp_path, probe_python_version="echo 3.12.3")
+    done = call_function(autodl, env, "run_python_check")
+    assert done.returncode == 0, done.stderr
+    assert (Path(env["TWIN_HOME"]) / "state" / "python.version").read_text("utf-8") == "3.12.3\n"
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(tmp_path, probe_python_version="echo 3.10.4")
+    old = call_function(autodl, env, "run_python_check")
+    assert old.returncode == 1
+    assert (Path(env["TWIN_HOME"]) / "state" / "python.version").read_text("utf-8") == "3.12.3\n"
+
+
+@posix_only
+def test_setup_install_stops_on_an_old_python_before_it_checks_or_installs_anything(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): the cheapest check is the first one; nothing is installed on a 3.10 image."""
+    workdir = tmp_path / "twin"
+    install_scripts(workdir, "5090-8b")
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path,
+            probe_python_version="echo 3.10.12",
+            # if the order ever changes, the resource check fails before anything is installed
+            probe_free_gb="echo 0",
+            probe_present_gb="echo 0",
+            probe_ram_gb="echo 0",
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "install")
+    assert done.returncode == 1
+    assert "needs Python 3.11 or newer" in done.stderr and "disk:" not in done.stderr
+    assert not (workdir / "state" / "python.version").exists()
+
+
 # ------------------------------------------------------------------------- export plan
 
 
@@ -430,6 +503,52 @@ def test_the_trial_step_gives_up_when_a_batch_of_one_does_not_fit(tmp_path: Path
     done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
     assert done.returncode == 1 and "even with a batch of 1" in done.stderr
     assert [call["batch"] for call in cli_calls(log)] == [2, 1]
+    assert not (workdir / "trial_data").exists()  # no copy of her messages is left behind
+
+
+def sample_length(row: dict[str, Any]) -> int:
+    return len(row["system"]) + sum(len(turn["value"]) for turn in row["conversations"])
+
+
+@posix_only
+def test_the_trial_step_trains_on_the_longest_samples_not_the_earliest(tmp_path: Path) -> None:
+    """R17-49c (D-633): the trial decides the batch size, and memory is decided by length.
+
+    ``max_samples: 64`` makes LLaMA-Factory take the first 64 rows of the file - the earliest
+    messages, whatever their length - so a batch that only fits short samples passed the trial and
+    ran out of memory hours into the training.
+    """
+    workdir = prepared_workdir(tmp_path, "5090-8b", train=100)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 0, done.stderr + done.stdout
+    trial = cli_calls(log)[0]
+    assert trial["config"] == "trial.yaml" and trial["batch"] is not None
+    train_lines = (workdir / "data" / "sft_train.jsonl").read_text("utf-8").splitlines()
+    lengths = {row["id"]: sample_length(row) for row in map(json.loads, train_lines)}
+    taken = trial["samples"]
+    assert len(taken) == 64 and len(set(taken)) == 64 and set(taken) <= set(lengths)
+    left = [name for name in lengths if name not in set(taken)]
+    assert min(lengths[name] for name in taken) >= max(lengths[name] for name in left)
+    assert trial["max_samples"] is None and trial["eval_dataset"] is None
+    assert trial["dataset"] == "twin_sft_trial" and trial["dataset_dir"] != str(workdir / "data")
+    # the real training set is what the layout of the batch is written back to, untouched
+    assert yaml_value(workdir / "config" / "sft.yaml", "dataset") == "twin_sft_train"
+    assert (
+        not (workdir / "trial_data").exists() and not (workdir / "config" / "trial.yaml").exists()
+    )
+
+
+@posix_only
+def test_a_training_set_smaller_than_the_trial_is_used_whole(tmp_path: Path) -> None:
+    """R17-49c (D-633): 40 samples are all 40 samples (the default synthetic set)."""
+    workdir = prepared_workdir(tmp_path, "5090-8b")
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 0, done.stderr
+    assert len(cli_calls(log)[0]["samples"]) == 40
 
 
 @posix_only
@@ -443,6 +562,226 @@ def test_the_verify_step_needs_the_data_and_a_finished_setup(tmp_path: Path) -> 
     (workdir / "data").mkdir()
     (workdir / "data" / "dataset_info.json").write_text("{}", encoding="utf-8")
     assert "install first" in run_script(workdir, env, "setup.sh", "5090-8b", "verify").stderr
+
+
+# ------------------------------------------------- the packages of the evaluation (R17-1)
+
+SETUP_WITHOUT_THE_DOWNLOAD = (
+    # the instance's PyTorch is fine, the GPU is there, the disk and memory are plenty; the
+    # download of the base model (tens of GB) and zstd's apt-get are the only things not run
+    "probe_gpu() { echo 'NVIDIA GeForce RTX 5090, 32607 MiB, 570.86.10, 12.0'; }; "
+    "probe_torch() { echo '2.9.1+cu128 12.8 sm_80,sm_90,sm_120'; }; "
+    "probe_free_gb() { echo 900; }; probe_present_gb() { echo 0; }; probe_ram_gb() { echo 256; }; "
+    "ensure_zstd() { :; }; download_base_model() { :; }; "
+)
+
+
+@posix_only
+def test_install_packages_installs_what_llamafactory_needs_for_generation(tmp_path: Path) -> None:
+    """R17-1 (D-631): jieba, nltk and rouge-chinese are not in the wheel's dependencies.
+
+    LLaMA-Factory 0.9.5 checks them as mandatory when ``predict_with_generate`` is set (eval.sh),
+    ``DISABLE_VERSION_CHECK`` does not skip the check, and ``install_packages`` installed none.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    done = call_setup(autodl, env, "install_packages")
+    assert done.returncode == 0, done.stderr
+    requested = {
+        argument for call in pip_calls(tmp_path) if call[:1] == ["install"] for argument in call[1:]
+    }
+    assert {f"jieba=={JIEBA}", f"nltk=={NLTK}", f"rouge-chinese=={ROUGE_CHINESE}"} <= requested
+    assert "llamafactory==0.9.5" in requested and "zstandard==0.25.0" in requested
+
+
+@posix_only
+def test_eval_fails_without_the_generation_dependencies_and_passes_with_them(
+    tmp_path: Path,
+) -> None:
+    """R17-1 (D-631): the setup of the instance leaves what the second step of eval.sh needs.
+
+    The fake ``llamafactory-cli`` refuses ``predict_with_generate`` when one of the three
+    packages is not installed (an ImportError with "To fix: run pip install ...", as the real one
+    does); the pip of the instance is a recorder, so what ``setup.sh install`` asks pip for is
+    what is "installed".
+    """
+    workdir = prepared_workdir(tmp_path)
+    autodl = workdir / "autodl"
+    install_fake_cli(tmp_path, installed=())
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    assert run_script(workdir, env, "train.sh", "5090-8b").returncode == 0
+    # an instance set up by an earlier version of the scripts: eval.sh dies in its second step
+    stale = run_script(workdir, env, "eval.sh", "5090-8b")
+    assert stale.returncode != 0 and "pip install jieba" in stale.stderr
+    done = call_setup(autodl, env, SETUP_WITHOUT_THE_DOWNLOAD + "run_install")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert (workdir / "state" / "python.version").is_file()
+    fixed = run_script(workdir, env, "eval.sh", "5090-8b")
+    assert fixed.returncode == 0, fixed.stderr
+    assert (workdir / "artifacts" / "eval" / "eval_generations.jsonl").is_file()
+
+
+@posix_only
+def test_the_probe_names_the_evaluation_packages_that_are_missing(tmp_path: Path) -> None:
+    """R17-1 (D-631): the real probe, on a site directory with distributions (no overrides)."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    site = tmp_path / "site"
+    env = script_env(workdir, tmp_path, PYTHONPATH=str(site))
+    del env["TWIN_PROBE_OVERRIDES"]  # the tests' default stands in for the probe; this one is real
+
+    def install(name: str) -> None:
+        write_distribution(site, name, "1.0")
+
+    site.mkdir()
+    everything = call_function(autodl, env, "probe_eval_packages")
+    assert everything.stdout.split() == ["jieba", "nltk", "rouge-chinese"], everything.stderr
+    install("nltk")
+    assert call_function(autodl, env, "probe_eval_packages").stdout.split() == [
+        "jieba",
+        "rouge-chinese",
+    ]
+    install("jieba")
+    install("rouge-chinese")
+    complete = call_function(autodl, env, "probe_eval_packages; run_eval_packages_check")
+    assert complete.returncode == 0, complete.stderr
+    assert complete.stdout.count("evaluation packages") == 1  # the probe itself printed nothing
+
+
+@posix_only
+def test_verify_names_the_missing_generation_packages(tmp_path: Path) -> None:
+    """R17-1 (D-631): the missing package stops the verification, not hours of work later."""
+    workdir = prepared_workdir(tmp_path)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path, probe_eval_packages="echo nltk; echo rouge-chinese"
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 1
+    assert "needs nltk, rouge-chinese to generate the replies" in done.stderr
+    assert "run setup.sh 5090-8b install again" in done.stderr
+    assert cli_calls(log) == []  # neither the template check nor the trial step ran
+
+
+@posix_only
+def test_sourcing_setup_defines_the_functions_and_runs_nothing(tmp_path: Path) -> None:
+    """R17-1 (D-631): the guard of ``main``, which lets the tests call ``install_packages``."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path)
+    names = ["install_packages", "run_install", "run_verify", "main"]
+    done = call_setup(autodl, env, "declare -F " + " ".join(names))
+    assert done.returncode == 0, done.stderr
+    assert [line.split()[-1] for line in done.stdout.splitlines()] == names
+
+
+# ------------------------------------------------------ PyTorch stays as it is (R17-49b)
+
+COUNTED_TORCH = (
+    # the first look at PyTorch (before the packages) is fine; every later one finds a CUDA 13 build
+    'counter="${TWIN_TEST_COUNTER}"; '
+    'probe_torch() { local n; n="$(cat "${counter}" 2>/dev/null || echo 0)"; '
+    'echo $((n + 1)) >"${counter}"; '
+    "if [ \"${n}\" -ge 1 ]; then echo '2.11.0 13.0 sm_80,sm_120'; "
+    "else echo '2.9.1+cu128 12.8 sm_80,sm_90,sm_120'; fi; }; "
+)
+
+
+@posix_only
+def test_the_torch_stack_is_frozen_while_the_packages_are_installed(tmp_path: Path) -> None:
+    """R17-49b (D-632): pip must not swap PyTorch for another build as a side effect.
+
+    ``install_packages`` passes a constraints file with the stack that was just accepted
+    (``torch==2.9.1+cu128`` ...); before, nothing stopped the resolver from replacing it.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(workdir, tmp_path, TWIN_PYTHON=str(install_stub_python(tmp_path)))
+    done = call_setup(autodl, env, "install_packages")
+    assert done.returncode == 0, done.stderr
+    install = next(call for call in pip_calls(tmp_path) if call[:1] == ["install"])
+    assert "-c" in install, install
+    constraints = Path(install[install.index("-c") + 1])
+    assert constraints.read_text("utf-8").splitlines() == [
+        "torch==2.9.1+cu128",
+        "torchvision==0.24.1+cu128",
+        "torchaudio==2.9.1+cu128",
+    ]
+    assert not any(argument.startswith("torch") for argument in install if "==" in argument[:-1])
+
+
+@posix_only
+def test_only_the_torch_packages_that_are_installed_are_frozen(tmp_path: Path) -> None:
+    """R17-49b (D-632): the real probe reads ``importlib.metadata``; a missing one is not pinned."""
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    site = tmp_path / "site"
+    write_distribution(site, "torch", "2.8.0+cu128")
+    write_distribution(site, "torchaudio", "2.8.0+cu128")
+    env = script_env(workdir, tmp_path, PYTHONPATH=str(site))
+    del env["TWIN_PROBE_OVERRIDES"]  # the real probe, not the tests' default
+    target = tmp_path / "constraints.txt"
+    done = call_function(autodl, env, f"write_torch_constraints {target}")
+    assert done.returncode == 0, done.stderr
+    assert target.read_text("utf-8").splitlines() == [
+        "torch==2.8.0+cu128",
+        "torchaudio==2.8.0+cu128",
+    ]
+
+
+@posix_only
+def test_a_torch_replaced_by_the_package_install_stops_the_setup(tmp_path: Path) -> None:
+    """R17-49b (D-632): ``run_install`` asks again after ``install_packages``.
+
+    The probe finds a good PyTorch the first time and a CUDA 13 build every time after: the
+    setup stops with exit 1 before it downloads the base model or marks itself done.  Before,
+    nothing looked at PyTorch again and the run went on to hours of work on a broken stack.
+    """
+    workdir = tmp_path / "twin"
+    autodl = install_scripts(workdir, "5090-8b")
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PYTHON=str(install_stub_python(tmp_path)),
+        TWIN_TEST_COUNTER=str(tmp_path / "torch_looks"),
+    )
+    download = tmp_path / "download_started"
+    body = (
+        SETUP_WITHOUT_THE_DOWNLOAD
+        + COUNTED_TORCH
+        + f'download_base_model() {{ touch "{download}"; }}; run_install'
+    )
+    done = call_setup(autodl, env, body)
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "PyTorch is not usable after the packages are installed" in done.stderr
+    assert "CUDA 13.0 builds are not used" in done.stderr
+    assert not download.exists() and not (workdir / ".setup_done").exists()
+    assert int((tmp_path / "torch_looks").read_text("utf-8")) == 2  # before and after, no more
+
+
+@posix_only
+def test_verify_stops_when_the_torch_of_the_instance_is_not_usable(tmp_path: Path) -> None:
+    """R17-49b (D-632): the cheap second look in ``setup.sh verify``."""
+    workdir = prepared_workdir(tmp_path)
+    add_template_check(workdir, 0)
+    log = install_fake_cli(tmp_path)
+    env = script_env(
+        workdir,
+        tmp_path,
+        TWIN_PROBE_OVERRIDES=write_overrides(
+            tmp_path, probe_torch="echo '2.11.0 13.0 sm_80,sm_120'"
+        ),
+    )
+    done = run_script(workdir, env, "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 1
+    assert "PyTorch is not usable on this instance" in done.stderr
+    assert cli_calls(log) == []  # no template check, no trial step
 
 
 # ---------------------------------------------------------------------------- decrypt
@@ -522,6 +861,7 @@ def populate_for_cleanup(workdir: Path, tmp_path: Path) -> None:
         "output/sft/checkpoint-4/optimizer.pt",
         ".unpack/data/x",
         "gguf/model-F16.gguf",
+        "trial_data/sft_trial.jsonl",
         "artifacts/gguf/m.gguf",
         "artifacts/manifest.json",
     ):
@@ -560,6 +900,7 @@ def test_cleanup_erases_the_data_and_keeps_the_artifacts_until_asked(tmp_path: P
         "config",
         "pylib",
         "gguf",
+        "trial_data",
     ):
         assert not (workdir / gone).exists(), gone
     assert not (tmp_path / "disk" / "cache" / "huggingface" / "datasets").exists()
@@ -678,20 +1019,21 @@ root="$(cd "$(dirname "$0")/../../.." && pwd)"
 merged=0; [ -d "$root/output/merged" ] && merged=1
 f16=0; [ -f "$1" ] && f16=1
 printf 'quantize %s merged_exists=%s f16_exists=%s\\n' "$3" "$merged" "$f16" >>"$root/../trace.log"
+printf '%s\\n' "$2" >>"$root/../quant_targets.log"
 printf '%s' "$3-model" >"$2"
 """
 
 
-@posix_only
-def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
-    tmp_path: Path,
-) -> None:
-    workdir = prepared_workdir(tmp_path, "5090-14b")
+def prepare_export(
+    tmp_path: Path, profile: str = "5090-14b", *, free_gb: str = "echo 900"
+) -> tuple[Path, dict[str, str], Path]:
+    """A work directory ready for ``export.sh``: an SFT adapter, llama.cpp's products as stubs."""
+    workdir = prepared_workdir(tmp_path, profile)
     install_fake_cli(tmp_path)
     env = script_env(
         workdir,
         tmp_path,
-        TWIN_PROBE_OVERRIDES=write_overrides(tmp_path, probe_free_gb="echo 900"),
+        TWIN_PROBE_OVERRIDES=write_overrides(tmp_path, probe_free_gb=free_gb),
         TWIN_RUN_ID="r-test-1",
     )
     sft = workdir / "output" / "sft"
@@ -714,9 +1056,26 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     (workdir / "state").mkdir()
     (workdir / "state" / "export.prepare_llama_cpp").touch()
     # the trace file lives next to the work directory so the stubs can reach it
-    trace = workdir.parent / "trace.log"
+    return workdir, env, workdir.parent / "trace.log"
 
-    done = run_script(workdir, env, "export.sh", "5090-14b")
+
+@posix_only
+@pytest.mark.parametrize(
+    ("profile", "export_device"), [("5090-14b", "cpu"), ("pro6000-14b", "auto")]
+)
+def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
+    tmp_path: Path, profile: str, export_device: str
+) -> None:
+    """R-TRN-009; R17-49f (D-635): for the QLoRA profile and the bf16 one, with their own settings.
+
+    The 14B profile of the 5090 trains with 4-bit QLoRA and must merge on the CPU into the bf16
+    base *without* ``quantization_bit`` (LLaMA-Factory refuses to merge into a quantised model);
+    the PRO 6000 profile merges wherever LLaMA-Factory puts it.  The test used only one profile
+    and looked at none of these settings.
+    """
+    workdir, env, trace = prepare_export(tmp_path, profile)
+
+    done = run_script(workdir, env, "export.sh", profile)
     assert done.returncode == 0, done.stderr + done.stdout
 
     lines = trace.read_text("utf-8").splitlines()
@@ -729,27 +1088,129 @@ def test_the_export_runs_the_steps_in_order_and_deletes_only_what_is_replaced(
     assert not (workdir / "output" / "merged").exists()  # deleted after the F16 file existed
     assert not (workdir / "gguf" / "model-F16.gguf").exists()  # deleted after all three quants
     artifacts = workdir / "artifacts"
+    # R17-8 (D-634): the quantizer writes where the files stay; there is no second copy on the disk
+    targets = (tmp_path / "quant_targets.log").read_text("utf-8").splitlines()
+    assert [Path(target).name for target in targets] == [
+        f"{profile}-Q4_K_M.gguf.part",
+        f"{profile}-Q5_K_M.gguf.part",
+        f"{profile}-Q8_0.gguf.part",
+    ]
+    assert {Path(target).parent for target in targets} == {artifacts / "gguf"}
+    assert list((workdir / "gguf").iterdir()) == []  # not even the F16 file is left
     assert sorted(p.name for p in (artifacts / "gguf").iterdir()) == [
-        "5090-14b-Q4_K_M.gguf",
-        "5090-14b-Q5_K_M.gguf",
-        "5090-14b-Q8_0.gguf",
+        f"{profile}-Q4_K_M.gguf",
+        f"{profile}-Q5_K_M.gguf",
+        f"{profile}-Q8_0.gguf",
     ]
     assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == b"adapter-weights"
     manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
-    assert manifest["run_id"] == "r-test-1" and manifest["profile"] == "5090-14b"
+    assert manifest["run_id"] == "r-test-1" and manifest["profile"] == profile
     assert manifest["template_version"] == "qwen3_nothink@llamafactory-0.9.5"
     assert manifest["persona_version"] == "v3" and manifest["dataset_version"] == "ds-test-01"
     assert [m["quant"] for m in manifest["models"]] == ["Q4_K_M", "Q5_K_M", "Q8_0", "lora"]
     listed = {f["path"] for f in manifest["files"]}
-    assert "gguf/5090-14b-Q4_K_M.gguf" in listed and "adapter/adapter_model.safetensors" in listed
+    assert f"gguf/{profile}-Q4_K_M.gguf" in listed and "adapter/adapter_model.safetensors" in listed
     export_call = next(
         c for c in cli_calls(tmp_path / "stubs" / "cli_calls.log") if c["mode"] == "export"
     )
     assert str(export_call["adapter"]).endswith("/output/sft")
+    # R17-49f (D-635): what is specific to the profile reached the merge
+    assert export_call["export_device"] == export_device
+    assert export_call["quantization_bit"] is None  # the merge loads the bf16 base, never 4-bit
+    assert PROFILES[profile].export_device == export_device
     # a second run has nothing left to do
-    again = run_script(workdir, env, "export.sh", "5090-14b")
+    again = run_script(workdir, env, "export.sh", profile)
     assert again.returncode == 0 and "already done" in again.stdout
     assert len(trace.read_text("utf-8").splitlines()) == 4
+
+
+@posix_only
+def test_a_merge_into_a_quantised_base_is_refused_like_llamafactory_does(tmp_path: Path) -> None:
+    """R17-49f (D-635): the fake command knows the rule, so a wrong export.yaml cannot slip by."""
+    workdir, env, _ = prepare_export(tmp_path, "5090-14b")
+    config = workdir / "config" / "export.yaml"
+    config.write_text(config.read_text("utf-8") + "quantization_bit: 4\n", encoding="utf-8")
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode != 0
+    assert "Cannot merge adapters to a quantized model" in done.stderr + done.stdout
+
+
+@posix_only
+def test_a_rerun_of_collect_keeps_the_quants(tmp_path: Path) -> None:
+    """R17-8 (D-634): the last step used to ``rm -rf artifacts/gguf``; now the quants live there.
+
+    Doing the last step again (the manifest, say) must not delete the finished quantizations or
+    run the quantizer again.
+    """
+    workdir, env, trace = prepare_export(tmp_path)
+    assert run_script(workdir, env, "export.sh", "5090-14b").returncode == 0
+    gguf = workdir / "artifacts" / "gguf"
+    before = {path.name: path.read_bytes() for path in gguf.iterdir()}
+    assert len(before) == 3
+    (workdir / "state" / "export.collect_artifacts").unlink()
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr
+    assert {path.name: path.read_bytes() for path in gguf.iterdir()} == before
+    assert len(trace.read_text("utf-8").splitlines()) == 4  # no quantizer run
+    assert (workdir / "artifacts" / "manifest.json").is_file()
+
+
+@posix_only
+def test_collect_stops_when_a_quantization_is_missing(tmp_path: Path) -> None:
+    """R17-8 (D-634): the manifest is only written for a complete set."""
+    workdir, env, _ = prepare_export(tmp_path)
+    assert run_script(workdir, env, "export.sh", "5090-14b").returncode == 0
+    (workdir / "artifacts" / "gguf" / "5090-14b-Q5_K_M.gguf").unlink()
+    (workdir / "artifacts" / "manifest.json").unlink()
+    (workdir / "state" / "export.collect_artifacts").unlink()
+    done = run_script(workdir, env, "export.sh", "5090-14b")
+    assert done.returncode == 1 and "5090-14b-Q5_K_M.gguf is missing" in done.stderr
+    assert not (workdir / "artifacts" / "manifest.json").exists()
+
+
+@posix_only
+def test_the_quantization_gate_is_the_size_of_the_file_it_writes(tmp_path: Path) -> None:
+    """R17-8 (D-634): ceil(F16 size x 0.55) + 2 GB free, not half the base model + 2 GB.
+
+    The F16 file of the test is 3000 bytes: 3 GB are needed.  The old gate asked for half of the
+    14B base model (15 GB) plus 2, which is too much for a small model and for 32B (35 GB for a
+    Q8_0 file of 34.8 GB) too little.
+    """
+    free = (
+        'if [ -s "$TWIN_HOME/gguf/model-F16.gguf" ]; then echo ${TEST_FREE_GB}; else echo 900; fi'
+    )
+    workdir, env, _ = prepare_export(tmp_path, free_gb=free)
+    short = run_script(workdir, {**env, "TEST_FREE_GB": "2"}, "export.sh", "5090-14b")
+    assert short.returncode == 1, short.stdout
+    assert (
+        "not enough free space before 'quantising Q4_K_M': 2 GB free, 3 GB needed" in short.stderr
+    )
+    assert "请到 AutoDL 控制台扩容数据盘" in short.stderr
+    assert not list((workdir / "artifacts" / "gguf").glob("*"))
+    enough = run_script(workdir, {**env, "TEST_FREE_GB": "3"}, "export.sh", "5090-14b")
+    assert enough.returncode == 0, enough.stderr
+
+
+@posix_only
+@pytest.mark.parametrize(
+    ("f16_gb", "needed"), [(0, 2), (0.0000028, 3), (16.4, 12), (29.6, 19), (65.6, 39), (100.5, 58)]
+)
+def test_the_free_space_a_quantization_needs(  # type: ignore[no-untyped-def]
+    env_for, f16_gb: float, needed: int
+) -> None:
+    """R17-8 (D-634): ceil(F16 size x 0.55) + 2, at least the largest quant (Q8_0, 0.53)."""
+    autodl, env = env_for("5090-8b")
+    size = int(f16_gb * 2**30)
+    done = call_function(autodl, env, f"quant_space_needed_gb {size}")
+    assert done.returncode == 0 and done.stdout.strip() == str(needed), done.stderr
+    assert needed >= f16_gb * max(QUANT_FACTORS.values()) + 2
+
+
+@posix_only
+def test_the_gate_factor_of_the_script_covers_the_largest_quantization(env_for) -> None:  # type: ignore[no-untyped-def]
+    autodl, env = env_for("5090-8b")
+    done = call_function(autodl, env, 'echo "${QUANT_SPACE_FACTOR}"')
+    assert float(done.stdout) >= max(QUANT_FACTORS.values())
 
 
 @posix_only

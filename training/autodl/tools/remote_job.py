@@ -14,6 +14,12 @@ Every command prints one JSON object.  A job lives in ``JOBS/NAME/``: ``log`` (o
 command), ``exit_code`` (written when it ends), ``heartbeat`` (touched while the supervisor
 runs), ``child_pid``.  ``start`` on a name whose job still runs does nothing and reports
 ``running``; on a finished job it starts a new run and truncates the log.
+
+The command is everything after the first ``--``, taken verbatim: this tool cuts the arguments
+there itself instead of leaving the ``--`` to ``argparse`` (a positional ``COMMAND...`` after
+options was rejected as "unrecognized arguments" by ``argparse`` before Python 3.12.7, and the
+instance runs the ``python3`` of its image, 3.11 or newer; ``scripts/check_remote_job.py`` runs
+the tool under the old interpreters, D-630).
 """
 
 from __future__ import annotations
@@ -175,6 +181,14 @@ def stop(directory: Path) -> dict[str, object]:
     return status(directory)
 
 
+def split_command(argv: list[str]) -> tuple[list[str], list[str]]:
+    """``(options, command)``: the arguments before the first ``--`` and the ones after it."""
+    if "--" not in argv:
+        return list(argv), []
+    index = argv.index("--")
+    return list(argv[:index]), list(argv[index + 1 :])
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["start", "status", "tail", "stop", "_supervise"])
@@ -184,16 +198,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--env", action="append", default=[])
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--limit", type=int, default=DEFAULT_TAIL_LIMIT)
-    parser.add_argument("command", nargs="*")
-    args = parser.parse_args(argv)
+    options, command = split_command(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(options)
 
     if args.action == "_supervise":
         return supervise(args.dir, args.name)
     if args.action == "start":
-        if not args.command:
+        if not command:
             sys.stderr.write("error: start needs a command after --\n")
             return 2
-        result = start(args.dir, args.name, args.command, args.cwd, args.env)
+        result = start(args.dir, args.name, command, args.cwd, args.env)
+    elif command:
+        sys.stderr.write(f"error: {args.action} takes no command\n")
+        return 2
     elif args.action == "status":
         result = status(job_dir(args.dir, args.name))
     elif args.action == "tail":
