@@ -218,6 +218,24 @@ def test_keyring_check_variants(tmp_path: Path) -> None:
     assert fine.status is CheckStatus.OK
 
 
+def test_the_file_store_on_windows_is_a_failure_unless_it_is_allowed_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-53b (D-744): FAIL without ``TWIN_ALLOW_FILE_KEYRING=1``, WARN with it (Windows)."""
+    fallback = SecretStore(
+        MemoryCredentials(), BackendInfo("EncryptedFileKeyring", "file", True, "fallback")
+    )
+    monkeypatch.delenv("TWIN_ALLOW_FILE_KEYRING", raising=False)
+    refused = doctor.check_keyring(context(tmp_path, secrets=fallback, platform="win32"))
+    assert refused.status is CheckStatus.FAIL
+    assert "TWIN_ALLOW_FILE_KEYRING=1" in refused.detail and "twin run" in refused.hint
+    linux = doctor.check_keyring(context(tmp_path, secrets=fallback, platform="linux"))
+    assert linux.status is CheckStatus.WARN and "encrypted file fallback" in linux.detail
+    monkeypatch.setenv("TWIN_ALLOW_FILE_KEYRING", "1")
+    allowed = doctor.check_keyring(context(tmp_path, secrets=fallback, platform="win32"))
+    assert allowed.status is CheckStatus.WARN and "allowed explicitly" in allowed.detail
+
+
 def test_keyring_check_builds_the_default_store_when_none_is_given(tmp_path: Path) -> None:
     result = doctor.check_keyring(context(tmp_path, secrets=None))
     assert result.status is CheckStatus.WARN  # the test environment forces the file backend

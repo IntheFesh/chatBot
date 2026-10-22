@@ -303,3 +303,42 @@ def test_secret_store_default_uses_environment(tmp_path: Path) -> None:
     store.set("smtp_password", VALUE)
     assert store.info.kind == "file"
     assert SecretStore.default().get("smtp_password") == VALUE
+
+
+# ------------------------------------------- the file store on Windows (D-744, R17-53b)
+
+
+def file_info() -> secrets_module.BackendInfo:
+    return secrets_module.BackendInfo("EncryptedFileKeyring", "file", True, "forced")
+
+
+def test_the_file_store_is_refused_on_windows_unless_the_switch_is_set() -> None:
+    refusal = secrets_module.file_keyring_refusal(file_info(), platform="win32", environ={})
+    assert refusal is not None and "Credential Manager" in refusal
+    assert "TWIN_ALLOW_FILE_KEYRING=1" in refusal
+    for value in ("", "0", "true", "yes", "2"):  # only the exact switch counts
+        assert secrets_module.file_keyring_refusal(
+            file_info(), platform="win32", environ={"TWIN_ALLOW_FILE_KEYRING": value}
+        )
+    assert (
+        secrets_module.file_keyring_refusal(
+            file_info(), platform="win32", environ={"TWIN_ALLOW_FILE_KEYRING": "1"}
+        )
+        is None
+    )
+
+
+def test_the_switch_is_never_inferred_from_the_environment_of_a_test() -> None:
+    """Not from ``TWIN_HOME`` (a test home), not from the backend variable itself."""
+    environ = {"TWIN_HOME": "C:/tmp/x", "TWIN_KEYRING_BACKEND": "file", "PYTEST_CURRENT_TEST": "t"}
+    assert secrets_module.file_keyring_refusal(file_info(), platform="win32", environ=environ)
+    assert not secrets_module.file_keyring_allowed(environ)
+
+
+def test_only_the_file_store_on_windows_is_refused() -> None:
+    system = secrets_module.BackendInfo("WinVault", "system", True, "system keyring")
+    assert secrets_module.file_keyring_refusal(system, platform="win32", environ={}) is None
+    for platform in ("linux", "darwin"):
+        assert (
+            secrets_module.file_keyring_refusal(file_info(), platform=platform, environ={}) is None
+        )

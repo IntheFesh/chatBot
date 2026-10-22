@@ -244,7 +244,13 @@ class IlinkStore:
         return BoundUser(user_id, now)
 
     def unbind(self) -> bool:
-        """Forget the bound user and everything tied to the conversation (R-CH-007)."""
+        """Forget the bound user, everything tied to the conversation (R-CH-007) and the login.
+
+        The bot token goes with it (D-127 and D-743): once nobody is bound there is nothing the
+        token is for, and a token that stays on disk after the user said "stop" is only a risk.
+        ``twin channel login`` makes a new one.  The cursor and the poll record belong to that
+        login and go with it.
+        """
         with self._state.transaction() as tx:
             had = tx.get(KEY_BOUND) is not None
             for key in (
@@ -254,6 +260,10 @@ class IlinkStore:
                 KEY_WINDOW,
                 KEY_INBOX,
                 KEY_QUOTES,
+                KEY_CREDENTIALS,
+                KEY_AUTH,
+                KEY_CURSOR,
+                KEY_POLL,
             ):
                 tx.delete(key)
             return had

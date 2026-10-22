@@ -90,6 +90,7 @@ def run_benchmark(
     os.environ["TWIN_HOME"] = str(workdir / "home")
     os.environ["TWIN_SECRETS_DIR"] = str(workdir / "secrets")
     os.environ["TWIN_KEYRING_BACKEND"] = "file"
+    os.environ["TWIN_ALLOW_FILE_KEYRING"] = "1"  # D-744: a development tool, not the bot
     (workdir / "home").mkdir(parents=True, exist_ok=True)
 
     from tests.support.synth_chat import ChatSpec, build_chat

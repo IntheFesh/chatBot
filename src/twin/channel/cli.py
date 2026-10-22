@@ -165,7 +165,10 @@ def channel_unbind() -> None:
         typer.echo("nothing changed")
         raise typer.Exit(1)
     store.unbind()
-    typer.echo(f"unbound {mask_user_id(bound.user_id)}; run `twin channel login` to bind again")
+    typer.echo(
+        f"unbound {mask_user_id(bound.user_id)} and forgot the login (the bot token is deleted); "
+        "run `twin channel login` to bind again"
+    )
 
 
 def describe_inbound(message: InboundMessage) -> str:

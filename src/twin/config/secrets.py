@@ -1,15 +1,20 @@
 """Secret storage (R-CFG-002, CLAUDE.md rule 10).
 
-Secrets (DeepSeek key, SMTP password, database master keys, AutoDL password,
-iLink credentials) live only in the operating system's credential store via
-``keyring`` (Windows Credential Manager on the target machine), service name
-``wechat-twin``.  They are never written to configuration files or logs.
+Secrets (DeepSeek key, SMTP password, database master keys, AutoDL password) live only in the
+operating system's credential store via ``keyring`` (Windows Credential Manager on the target
+machine), service name ``wechat-twin``.  They are never written to configuration files or logs.
+The iLink login credentials (the bot token) are kept with the state of the session in the
+encrypted ``channel_state`` table - AES-256-GCM, the master key in this store (D-127, agreed by the
+user in round 17).
 
 Linux/macOS without a usable keyring daemon (headless servers, CI, sandboxes)
 fall back to :class:`EncryptedFileKeyring`: a real AES-256-GCM encrypted file,
 keyed either by a passphrase (``TWIN_KEYRING_PASSPHRASE``, scrypt) or by a
 random key file kept next to it with mode 0600.  Windows always uses the native
-credential manager; if that is unavailable ``twin doctor`` reports a failure.
+credential manager; if that is unavailable ``twin doctor`` reports a failure.  The file store is
+a development and test switch on every platform (``TWIN_KEYRING_BACKEND=file``); on Windows it
+needs ``TWIN_ALLOW_FILE_KEYRING=1`` as well, otherwise ``twin run``, ``twin supervise`` and
+``twin service install`` refuse to start and ``twin doctor`` reports a failure (D-744).
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import base64
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -35,6 +41,8 @@ SERVICE_NAME = "wechat-twin"
 ENV_BACKEND = "TWIN_KEYRING_BACKEND"
 ENV_PASSPHRASE = "TWIN_KEYRING_PASSPHRASE"  # noqa: S105 - environment variable name, not a secret
 ENV_SECRETS_DIR = "TWIN_SECRETS_DIR"
+# the explicit switch that lets the encrypted-file fallback run on Windows (development, tests)
+ENV_ALLOW_FILE = "TWIN_ALLOW_FILE_KEYRING"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAGIC = b"TWSEC1"
@@ -215,6 +223,38 @@ class BackendInfo:
     kind: Literal["system", "file"]
     usable: bool
     detail: str
+
+
+def file_keyring_allowed(environ: Mapping[str, str] | None = None) -> bool:
+    """Is the explicit development/test switch for the file store set (``TWIN_ALLOW_FILE_KEYRING``)?
+
+    Not inferred from anything else (not from ``TWIN_HOME``, not from the platform): a test
+    fixture sets it on purpose, and so does a developer who runs the bot on Windows with it.
+    """
+    source = os.environ if environ is None else environ
+    return source.get(ENV_ALLOW_FILE, "").strip() == "1"
+
+
+def file_keyring_refusal(
+    info: BackendInfo, *, platform: str | None = None, environ: Mapping[str, str] | None = None
+) -> str | None:
+    """Why the application may not start with this credential store; ``None`` if it may.
+
+    The encrypted-file store (``TWIN_KEYRING_BACKEND=file``) is a development and test switch on
+    every platform and never the default.  On Windows - the machine the bot runs on - the key of
+    the file sits next to the file, protected by a file mode that Windows does not enforce, so
+    ``twin run``, ``twin supervise`` and ``twin service install`` refuse to start with it unless
+    ``TWIN_ALLOW_FILE_KEYRING=1`` says that this is a test or a development run (D-744).
+    """
+    plat = sys.platform if platform is None else platform
+    if plat != "win32" or info.kind != "file" or file_keyring_allowed(environ):
+        return None
+    return (
+        f"the credential store is the encrypted file fallback ({ENV_BACKEND}=file), which is a "
+        "development and test switch: on Windows the key file would sit next to secrets.enc, "
+        "unprotected. Remove the variable so that the Windows Credential Manager is used "
+        f"(or set {ENV_ALLOW_FILE}=1 if this really is a test or development run)"
+    )
 
 
 def _probe(backend: CredentialBackend) -> str | None:

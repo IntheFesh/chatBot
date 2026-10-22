@@ -27,7 +27,12 @@ import httpx
 from twin.channel.ilink.connectivity import EndpointProbe, probe_api, probe_cdn
 from twin.clock import now_utc
 from twin.config.loader import DataPaths, ensure_consent, resolve_paths
-from twin.config.secrets import SecretStore, SecretStoreError
+from twin.config.secrets import (
+    ENV_ALLOW_FILE,
+    SecretStore,
+    SecretStoreError,
+    file_keyring_refusal,
+)
 from twin.config.settings import Settings
 from twin.llm.official import VISION_MODELS
 from twin.llm.pricing import PeakCalendar
@@ -221,6 +226,21 @@ def check_keyring(ctx: DoctorContext) -> CheckResult:
     if readback != "ok":
         return CheckResult("keyring", CheckStatus.FAIL, f"{info.name}: read-back mismatch")
     if info.kind == "file":
+        refusal = file_keyring_refusal(info, platform=ctx.platform)
+        if refusal is not None:
+            # D-744: on Windows the file store is for tests and development only
+            return CheckResult(
+                "keyring", CheckStatus.FAIL, f"{info.name}: {refusal}", "twin run will not start"
+            )
+        if ctx.platform == "win32":
+            return CheckResult(
+                "keyring",
+                CheckStatus.WARN,
+                f"read/write ok via the encrypted file store, which is allowed explicitly "
+                f"({ENV_ALLOW_FILE}=1): {info.detail}",
+                "a development or test switch: the key file sits next to the secrets file; "
+                "production on Windows uses the Credential Manager (unset TWIN_KEYRING_BACKEND)",
+            )
         return CheckResult(
             "keyring",
             CheckStatus.WARN,

@@ -38,6 +38,7 @@ from twin.clock import Clock, SystemClock
 from twin.config.loader import ConfigError
 from twin.config.secrets import SecretStoreError
 from twin.ops.alert_delivery import AlertDelivery
+from twin.ops.credential_guard import require_credential_store
 from twin.ops.instance_lock import LOCK_RUN, LOCK_SUPERVISOR
 from twin.ops.jobobject import ProcessJob
 from twin.ops.logging import configure_logging, get_logger, shutdown_logging
@@ -229,6 +230,7 @@ def supervise_command(
 ) -> None:
     """Keep ``twin run`` running: restart it when it crashes (the scheduled task runs this)."""
     context = get_cli_context()
+    require_credential_store(context.secrets)  # D-744: not on the encrypted-file store (Windows)
     paths = context.paths()
     configure_logging(paths.logs_dir, level=context.log_level, role="supervise")
     try:
@@ -289,6 +291,7 @@ def service_install(
     if print_xml:
         typer.echo(build_task_xml(spec))
         return
+    require_credential_store(context.secrets)  # D-744: not on the encrypted-file store (Windows)
     scheduler = _need_windows("install")
     try:
         scheduler.install(spec)

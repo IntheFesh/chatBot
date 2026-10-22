@@ -201,12 +201,16 @@ jobs:
       - name: All shards arrived
         run: uv run --no-sync python scripts/shard_tests.py --check-shard-set .coverage.*
 
+      # D-741: the "# pragma: win32-only" statements are excluded from the count on Linux
+      # (pyproject.toml) and counted on Windows, where they run (ci/coverage-windows.toml).
       - name: Combine the shards
         run: |
-          uv run --no-sync coverage combine
-          uv run --no-sync coverage json -o coverage.json
+          rc=pyproject.toml
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then rc=ci/coverage-windows.toml; fi
+          uv run --no-sync coverage combine --rcfile="$rc"
+          uv run --no-sync coverage json --rcfile="$rc" -o coverage.json
 
-      - name: coverage gate (total >= 85%, each package >= 75%)
+      - name: coverage gate (total >= 85%, each package and each directory below one >= 75%)
         run: uv run --no-sync python scripts/coverage_gate.py
 
       - name: Keep the combined report

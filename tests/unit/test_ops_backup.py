@@ -98,6 +98,26 @@ def test_a_backup_holds_the_database_the_vectors_and_the_list_of_media(world: Ba
     assert [r.id for r in world.backup.ledger.usable()] == [view.id]
 
 
+def test_the_bot_token_of_the_login_is_not_readable_in_a_backup(world: BackupWorld) -> None:
+    """R17-53a (D-743): the iLink login lives in the encrypted ``channel_state``, so a backup of
+    the database holds it as ciphertext like every other value."""
+    from tests.support.ilink import BOT, TOKEN, USER
+    from twin.channel.ilink.store import Credentials, IlinkStore
+    from twin.channel.state import ChannelStateStore
+
+    services = world.services
+    store = IlinkStore(ChannelStateStore(services.db), services.clock)
+    saved_at = services.clock.now_utc().isoformat()
+    store.save_credentials(Credentials(TOKEN, BOT, USER, "https://ilink.example", saved_at))
+    assert store.credentials() is not None
+    view = world.backup.create("manual")
+    blobs = [world.backup.backups_dir / str(view.file_name)]
+    blobs += [world.backup.backups_dir / sidecar_name(str(view.file_name))]
+    for path in blobs:
+        raw = path.read_bytes()
+        assert TOKEN.encode() not in raw and BOT.encode() not in raw, path.name
+
+
 def test_nothing_readable_is_in_the_file(world: BackupWorld) -> None:
     view = world.backup.create("manual")
     blobs = [world.backup.backups_dir / str(view.file_name)]

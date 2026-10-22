@@ -84,6 +84,7 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Ite
     monkeypatch.setenv("TWIN_HOME", str(home))
     monkeypatch.setenv("TWIN_SECRETS_DIR", str(tmp_path / "secrets"))
     monkeypatch.setenv("TWIN_KEYRING_BACKEND", "file")  # never the real credential manager
+    monkeypatch.setenv("TWIN_ALLOW_FILE_KEYRING", "1")  # D-744: the explicit test switch (Windows)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("COLUMNS", "200")  # keep rich tables on one line in captured output
     previous_policy = get_offpeak_policy()  # building an application registers the real one

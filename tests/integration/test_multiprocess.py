@@ -125,6 +125,7 @@ def test_running_application_notices_a_cli_change_within_two_seconds_and_stops_g
         "TWIN_HOME": str(home),
         "TWIN_SECRETS_DIR": str(tmp_path / "secrets"),
         "TWIN_KEYRING_BACKEND": "file",
+        "TWIN_ALLOW_FILE_KEYRING": "1",  # D-744: the explicit test switch (Windows)
         "PYTHONUTF8": "1",
     }
     assert run_twin(["db", "upgrade"], env).returncode == 0
@@ -191,6 +192,7 @@ def test_cli_entry_points_work_as_a_module(tmp_path: Path) -> None:
         "TWIN_HOME": str(tmp_path),
         "TWIN_SECRETS_DIR": str(tmp_path / "secrets"),
         "TWIN_KEYRING_BACKEND": "file",
+        "TWIN_ALLOW_FILE_KEYRING": "1",  # D-744: the explicit test switch (Windows)
     }
     helped = run_twin(["--help"], env)
     assert helped.returncode == 0 and "doctor" in helped.stdout

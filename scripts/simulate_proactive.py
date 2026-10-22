@@ -70,6 +70,7 @@ def isolate(home: Path) -> None:
     os.environ["TWIN_HOME"] = str(home)
     os.environ["TWIN_SECRETS_DIR"] = str(home / "secrets")
     os.environ["TWIN_KEYRING_BACKEND"] = "file"
+    os.environ["TWIN_ALLOW_FILE_KEYRING"] = "1"  # D-744: a development tool, not the bot
     os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
     os.environ["COLUMNS"] = "160"
 

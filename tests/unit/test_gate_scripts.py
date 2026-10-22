@@ -59,6 +59,70 @@ def test_gate_fails_when_the_total_is_too_low() -> None:
     assert failures == ["total: 80.0% < 85%"]
 
 
+def test_nested_directories_are_found_below_their_package() -> None:
+    """R17-43 (D-740): every directory below a package is a group of its own."""
+    assert gate.nested_packages_of("src/twin/ops/backup/archive.py") == ["ops/backup"]
+    assert gate.nested_packages_of("src/twin/ops/a/b/c.py") == ["ops/a", "ops/a/b"]
+    assert gate.nested_packages_of("src\\twin\\channel\\ilink\\wire.py") == ["channel/ilink"]
+    assert gate.nested_packages_of("src/twin/ops/jobs.py") == []
+    assert gate.nested_packages_of("src/twin/cli.py") == []
+    assert gate.nested_packages_of("elsewhere/a/b.py") == []
+
+
+def test_a_weak_directory_below_a_strong_package_fails_the_gate() -> None:
+    """The parent as a whole is at 94 %, which used to hide the child that is at 60 %."""
+    data = report(
+        {
+            "src/twin/ops/jobs.py": (900, 900),
+            "src/twin/ops/backup/archive.py": (30, 50),
+            "src/twin/ops/health/collect.py": (80, 100),
+        }
+    )
+    lines, failures = gate.evaluate(data, 85.0, 75.0)
+    assert failures == ["package ops/backup: 60.0% < 75%"]
+    assert any(line.strip().startswith("ops/health") for line in lines)
+    assert gate.evaluate(data, 85.0, 75.0, nested=False)[1] == []  # the old gate saw nothing
+
+
+def test_the_total_counts_each_statement_once_whatever_the_groups_are() -> None:
+    data = report({"src/twin/ops/a/x.py": (50, 100), "src/twin/ops/y.py": (100, 100)})
+    per_group, total = gate.summarise(data, nested=True)
+    assert total == (150, 200)
+    assert per_group["ops"] == (150, 200) and per_group["ops/a"] == (50, 100)
+    assert gate.summarise(data)[0] == {"ops": (150, 200)}
+
+
+def test_main_gates_the_directories_unless_told_not_to(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "coverage.json"
+    path.write_text(
+        json.dumps(report({"src/twin/big/a.py": (990, 1000), "src/twin/big/weak/b.py": (6, 10)})),
+        encoding="utf-8",
+    )
+    assert gate.main(["--json", str(path)]) == 1
+    assert "package big/weak: 60.0% < 75%" in capsys.readouterr().out
+    assert gate.main(["--json", str(path), "--no-nested"]) == 0
+
+
+def test_the_windows_settings_count_the_win32_only_code_and_differ_in_nothing_else() -> None:
+    """R17-43 (D-741): ``ci/coverage-windows.toml`` is pyproject's coverage table minus one line."""
+    import tomllib
+
+    root = Path(__file__).resolve().parents[2]
+    pyproject = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    windows = tomllib.loads((root / "ci" / "coverage-windows.toml").read_text(encoding="utf-8"))
+    linux_table = pyproject["tool"]["coverage"]
+    windows_table = windows["tool"]["coverage"]
+    assert "# pragma: win32-only" in linux_table["report"]["exclude_also"]
+    assert "# pragma: win32-only" not in windows_table["report"]["exclude_also"]
+    trimmed = json.loads(json.dumps(linux_table))
+    trimmed["report"]["exclude_also"].remove("# pragma: win32-only")
+    assert windows_table == trimmed
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "ci/coverage-windows.toml" in workflow and "windows-latest" in workflow
+
+
 def test_empty_packages_cannot_fail() -> None:
     data = report({"src/twin/ok/a.py": (100, 100), "src/twin/channel/__init__.py": (0, 0)})
     lines, failures = gate.evaluate(data, 85.0, 75.0)

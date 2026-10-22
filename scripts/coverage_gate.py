@@ -5,9 +5,16 @@ groups ``src/twin/<package>/...`` by package; modules directly under ``src/twin`
 form the "(top-level)" group.  Packages without executable statements are
 reported but cannot fail.
 
+A package that has packages of its own (``ops/backup``, ``channel/ilink``, ``storage/migrations``
+...) is gated twice: as a whole, as before, and every directory below it on its own, with the same
+threshold (round 17, D-740) - a big, well-covered parent no longer hides a weak child.  The total
+is the sum of the top-level groups only, so nothing is counted twice.  ``--no-nested`` switches
+the second gate off.
+
 Usage::
 
     uv run python scripts/coverage_gate.py [--json coverage.json] [--total 85] [--package 75]
+        [--no-nested]
 """
 
 from __future__ import annotations
@@ -32,20 +39,41 @@ def package_of(path: str) -> str:
     return rest[0] if len(rest) > 1 else TOP_LEVEL
 
 
-def summarise(report: dict[str, Any]) -> tuple[dict[str, tuple[int, int]], tuple[int, int]]:
-    """``({package: (covered, statements)}, (covered_total, statements_total))``."""
+def nested_packages_of(path: str) -> list[str]:
+    """The directories below a package that hold ``path``: ``src/twin/ops/backup/x.py`` ->
+    ``["ops/backup"]``; one more level down adds ``ops/backup/sub``.  Empty for a module that
+    sits directly in its package (or in ``src/twin``)."""
+    parts = Path(path.replace("\\", "/")).parts
+    if "twin" not in parts:
+        return []
+    rest = parts[parts.index("twin") + 1 :]
+    directories = rest[:-1]
+    return ["/".join(directories[: depth + 1]) for depth in range(1, len(directories))]
+
+
+def summarise(
+    report: dict[str, Any], *, nested: bool = False
+) -> tuple[dict[str, tuple[int, int]], tuple[int, int]]:
+    """``({group: (covered, statements)}, (covered_total, statements_total))``.
+
+    The groups are the packages; with ``nested`` also every directory below a package (named
+    ``package/sub``).  The total counts each statement once, whatever the groups are.
+    """
     groups: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+    total = [0, 0]
     for path, data in report["files"].items():
         summary = data["summary"]
-        group = groups[package_of(path)]
-        group[0] += int(summary["covered_lines"])
-        group[1] += int(summary["num_statements"])
-    per_package = {name: (cov, stmts) for name, (cov, stmts) in groups.items()}
-    total = (
-        sum(cov for cov, _ in per_package.values()),
-        sum(stmts for _, stmts in per_package.values()),
-    )
-    return per_package, total
+        covered, statements = int(summary["covered_lines"]), int(summary["num_statements"])
+        names = [package_of(path)]
+        if nested:
+            names += nested_packages_of(path)
+        for name in names:
+            groups[name][0] += covered
+            groups[name][1] += statements
+        total[0] += covered
+        total[1] += statements
+    per_group = {name: (cov, stmts) for name, (cov, stmts) in groups.items()}
+    return per_group, (total[0], total[1])
 
 
 def percent(covered: int, statements: int) -> float:
@@ -53,10 +81,10 @@ def percent(covered: int, statements: int) -> float:
 
 
 def evaluate(
-    report: dict[str, Any], total_min: float, package_min: float
+    report: dict[str, Any], total_min: float, package_min: float, *, nested: bool = True
 ) -> tuple[list[str], list[str]]:
     """Return ``(report_lines, failures)``."""
-    per_package, (cov_total, stmt_total) = summarise(report)
+    per_package, (cov_total, stmt_total) = summarise(report, nested=nested)
     lines: list[str] = []
     failures: list[str] = []
     for name in sorted(per_package):
@@ -66,11 +94,11 @@ def evaluate(
         if statements and pct < package_min:
             mark = "FAIL"
             failures.append(f"package {name}: {pct:.1f}% < {package_min:.0f}%")
-        lines.append(f"  {name:<14} {pct:6.1f}%  ({covered}/{statements}) {mark}")
+        lines.append(f"  {name:<24} {pct:6.1f}%  ({covered}/{statements}) {mark}")
     total_pct = percent(cov_total, stmt_total)
     if total_pct < total_min:
         failures.append(f"total: {total_pct:.1f}% < {total_min:.0f}%")
-    lines.append(f"  {'TOTAL':<14} {total_pct:6.1f}%  ({cov_total}/{stmt_total})")
+    lines.append(f"  {'TOTAL':<24} {total_pct:6.1f}%  ({cov_total}/{stmt_total})")
     return lines, failures
 
 
@@ -79,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", type=Path, default=ROOT / "coverage.json")
     parser.add_argument("--total", type=float, default=85.0)
     parser.add_argument("--package", type=float, default=75.0)
+    parser.add_argument(
+        "--no-nested",
+        action="store_true",
+        help="gate the packages only, not the directories below them",
+    )
     args = parser.parse_args(argv)
     if not args.json.is_file():
         sys.stderr.write(
@@ -86,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     report = json.loads(args.json.read_text(encoding="utf-8"))
-    lines, failures = evaluate(report, args.total, args.package)
+    lines, failures = evaluate(report, args.total, args.package, nested=not args.no_nested)
     sys.stdout.write("coverage by package:\n" + "\n".join(lines) + "\n")
     if failures:
         sys.stdout.write("coverage gate FAILED:\n" + "\n".join(f"  - {f}" for f in failures) + "\n")

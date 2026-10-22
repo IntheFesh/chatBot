@@ -28,6 +28,7 @@ from twin.channel.base import AuthState
 from twin.channel.ilink.store import BatchCommit, Credentials, IlinkStore, PendingBinding
 from twin.channel.state import ChannelStateStore
 from twin.cli import app
+from twin.clock import SystemClock
 from twin.config.loader import load_settings, resolve_paths
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.process_model import CommandKind, get_spec, iter_commands
@@ -279,7 +280,10 @@ def test_unbind_needs_two_confirmations_and_forgets_the_conversation(svc: Servic
     assert result.exit_code == 0, result.output
     assert "unbound" in result.output and USER not in result.output
     assert store.bound_user() is None and store.context_token() is None
-    assert store.credentials() is not None  # the login stays
+    # R17-53a (D-743, user decision): the login goes with the binding - the bot token is deleted
+    assert store.credentials() is None and store.cursor() == ""
+    assert store.auth_record().state is AuthState.NOT_LOGGED_IN
+    assert "forgot the login" in result.output and TOKEN not in result.output
     assert read_state_version_of(svc) > before  # the running application is told
 
 
@@ -370,3 +374,68 @@ def test_listen_cannot_run_next_to_the_application(svc: Services) -> None:
     finally:
         lock.release()
     assert result.exit_code == 4 and "already running" in result.output
+
+
+# ----------------------------------------------- the token is nowhere in the clear (D-127, D-743)
+
+
+def test_the_token_is_in_no_output_and_no_log_of_the_commands(
+    svc: Services, api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R17-53a: login, status, send-test, config show and doctor never print or log the token."""
+    from twin.ops.logging import configure_logging, shutdown_logging
+
+    api.post(QR).respond(200, json={"qrcode": "Q", "qrcode_img_content": "https://qr.example/1"})
+    odd = httpx.Response(200, json={"status": "odd", "bot_token": TOKEN})  # logged by its status
+    confirmed = httpx.Response(
+        200,
+        json={
+            "status": "confirmed",
+            "bot_token": TOKEN,
+            "ilink_bot_id": BOT,
+            "baseurl": API,
+            "ilink_user_id": USER,
+        },
+    )
+    api.get(STATUS).mock(side_effect=[odd, confirmed])
+    api.post(SEND).respond(200, json={"ret": 0, "message_id": 77})
+
+    async def no_wait(self: object, seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(SystemClock, "sleep", no_wait)  # the poll gap of the login
+    store_of(svc).commit_batch(
+        BatchCommit(candidate=PendingBinding(USER, svc.clock.now_utc(), CTX, matches_expected=True))
+    )
+    configure_logging(svc.paths.logs_dir, level="DEBUG", role="run", console=False)
+    try:
+        outputs = [
+            runner.invoke(app, ["channel", "login", "--no-open"], input="y\n").output,
+            runner.invoke(app, ["channel", "status"]).output,
+            runner.invoke(app, ["channel", "send-test", "你好"]).output,
+            runner.invoke(app, ["config", "show"]).output,
+            runner.invoke(app, ["doctor"]).output,
+        ]
+    finally:
+        shutdown_logging()
+    assert store_of(svc).credentials() is not None  # (the login did store it)
+    for output in outputs:
+        assert TOKEN not in output
+    logs = [path.read_bytes() for path in svc.paths.logs_dir.rglob("*") if path.is_file()]
+    assert logs and b"unknown_login_status" in logs[0]  # (the log was written, and read)
+    assert all(TOKEN.encode() not in raw for raw in logs)
+
+
+def test_the_token_is_not_readable_in_the_database_file(svc: Services) -> None:
+    """R17-53a: it is kept (AES-256-GCM) in ``channel_state``; the file holds ciphertext only."""
+    from sqlalchemy import text
+
+    store = logged_in(svc)
+    assert store.credentials() is not None and store.credentials().bot_token == TOKEN  # type: ignore[union-attr]
+    with svc.db.session() as session:  # fold the write-ahead log into the file
+        session.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    files = [path for path in svc.paths.data_dir.glob("twin.db*") if path.is_file()]
+    assert files
+    for path in files:
+        raw = path.read_bytes()
+        assert TOKEN.encode() not in raw and BOT.encode() not in raw, path.name

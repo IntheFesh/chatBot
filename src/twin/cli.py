@@ -28,6 +28,7 @@ from twin.ops.backup.cli import backup_app
 from twin.ops.cli import jobs_app
 from twin.ops.console import ensure_utf8
 from twin.ops.cost_cli import cost_app
+from twin.ops.credential_guard import require_credential_store
 from twin.ops.doctor import CheckStatus, DoctorContext, exit_code, run_checks
 from twin.ops.drill import ops_app
 from twin.ops.health_cli import health_command
@@ -161,6 +162,7 @@ async def _serve(services: Services) -> None:
 def run() -> None:
     """Start the application: channel, schedule, reply engine, job queue, state watcher."""
     context = get_cli_context()
+    require_credential_store(context.secrets)  # D-744: not on the encrypted-file store (Windows)
     services = context.services()
     log_path = configure_logging(services.paths.logs_dir, level=context.log_level, role="run")
     # children (llama-server, round 14) end with this process, however it ends (R-OPS-001)

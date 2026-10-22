@@ -192,6 +192,7 @@ def _environment(home: Path) -> dict[str, str]:
             "TWIN_HOME": str(home),
             "TWIN_SECRETS_DIR": str(home / "secrets"),
             "TWIN_KEYRING_BACKEND": "file",
+            "TWIN_ALLOW_FILE_KEYRING": "1",  # D-744: a development tool, not the bot
             "PYTHONUTF8": "1",
             "NO_PROXY": "*",
         }
