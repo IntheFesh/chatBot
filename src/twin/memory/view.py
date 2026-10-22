@@ -15,6 +15,13 @@ anything unfiltered, and the moment cannot be changed after the view is made.
 The live memory block is built from the view of *now* (the assembler does not have a second
 set of rules), so what a training sample shows and what the running bot shows are produced by the
 same code.
+
+One thing differs, on purpose (D-731): a vector search that fails.  The running bot goes on with the
+keyword results and with everything that needs no vectors - the follow-ups, the facts of today and
+tomorrow, the life line, the recent days - and notes that the view is ``vectors_degraded``
+(``degrade_vectors``, which only the live assembler turns on).  A view made for the training export
+or the evaluation does not degrade: it raises, because a block that silently lacks what the vectors
+would have found is not the block of that moment (iron rule 13).
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from math import floor
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from twin.clock import ensure_aware, to_epoch
+from twin.clock import Clock, ensure_aware, to_epoch
 from twin.memory.blocks import MemoryBlock, MemoryQuery
 from twin.memory.memory import Memory
 from twin.memory.records import FactRecord, FollowupRecord, LifelineRecord, SummaryRecord
@@ -38,10 +45,15 @@ from twin.memory.visible import (
     project_followup,
     summary_visible,
 )
+from twin.ops.logging import get_logger
+from twin.retrieval.vector_store import VectorHit
 from twin.storage.vector_schema import VectorKind
+
+log = get_logger("twin.memory.view")
 
 VECTOR_OVERFETCH = 3  # vector hits asked for per wanted hit, as some are not visible
 MIN_KEYWORD_SCORE = 0.2  # a keyword hit must hold this share of the query's weight
+VECTOR_RETRY_AFTER_S = 300.0  # a vector backend that failed is not asked again for this long
 
 
 @dataclass(frozen=True)
@@ -68,6 +80,32 @@ class SummaryHit:
         return max(self.similarity, self.keyword)
 
 
+class VectorOutage:
+    """What the live memory remembers of a vector backend that failed (D-731).
+
+    A model that cannot be loaded or a table that cannot be read fails the same way on the next
+    reply, and a failing model load is slow: after one failure the backend is not asked again for
+    ``retry_after_s`` (five minutes), the views of that time are degraded at once, and the first
+    request after it tries the backend again.  One instance lives with the live assembler; the
+    views of the training export and the evaluation never get one.
+    """
+
+    def __init__(self, clock: Clock, retry_after_s: float = VECTOR_RETRY_AFTER_S) -> None:
+        self._clock = clock
+        self._retry_after_s = retry_after_s
+        self._failed_at: float | None = None
+
+    def blocked(self) -> bool:
+        failed_at = self._failed_at
+        return failed_at is not None and self._clock.monotonic() - failed_at < self._retry_after_s
+
+    def note_failure(self) -> None:
+        self._failed_at = self._clock.monotonic()
+
+    def note_success(self) -> None:
+        self._failed_at = None
+
+
 class ViewRenderer(Protocol):
     """Builds the memory block of a view (the assembler; injected by :func:`memory_view`)."""
 
@@ -87,11 +125,16 @@ class MemoryView:
         include_lifeline: bool = True,
         refresh: bool = True,
         renderer: ViewRenderer | None = None,
+        degrade_vectors: bool = False,
+        outage: VectorOutage | None = None,
     ) -> None:
         self._memory = memory
         self._as_of = ensure_aware(as_of)
         self._include_lifeline = include_lifeline
         self._renderer = renderer
+        self._degrade_vectors = degrade_vectors
+        self._outage = outage
+        self._vectors_degraded = False
         if refresh:
             memory.refresh()
         self._era: BotEra = memory.era()
@@ -118,6 +161,11 @@ class MemoryView:
 
     def zone(self) -> ZoneInfo:
         return self._memory.clock.zone_of(self.scope, self._as_of)
+
+    @property
+    def vectors_degraded(self) -> bool:
+        """True if a vector search of this view failed: its answers lack the vector hits."""
+        return self._vectors_degraded
 
     @property
     def vector_bound(self) -> int:
@@ -217,6 +265,34 @@ class MemoryView:
 
     # -------------------------------------------------------------------- searching
 
+    def _vector_hits(self, kind: VectorKind, text: str, limit: int) -> list[VectorHit]:
+        """The vector search, bounded by this view; only this call is guarded (D-731).
+
+        A view made with ``degrade_vectors`` turns a failure of the backend into "no vector hits"
+        (the keyword search that follows still answers) and marks itself degraded; any other view
+        lets the error through.  Only the search itself is covered: a bug in what is done with the
+        hits is not hidden.
+        """
+        vectors = self._memory.vectors
+        wanted = limit * VECTOR_OVERFETCH
+        if not self._degrade_vectors:
+            return vectors.search(kind, text, wanted, at_or_before=self.vector_bound)
+        outage = self._outage
+        if outage is not None and outage.blocked():
+            self._vectors_degraded = True
+            return []
+        try:
+            hits = vectors.search(kind, text, wanted, at_or_before=self.vector_bound)
+        except Exception as exc:  # the backend may fail in any way (model, disk, library)
+            self._vectors_degraded = True
+            if outage is not None:
+                outage.note_failure()
+            log.warning("memory_vectors_unavailable", kind=kind.value, reason=type(exc).__name__)
+            return []
+        if outage is not None:
+            outage.note_success()
+        return hits
+
     def search_facts(self, text: str, limit: int) -> list[FactHit]:
         """Visible facts that fit ``text`` by meaning or by keyword, best first.
 
@@ -228,9 +304,7 @@ class MemoryView:
         memory = self._memory
         floor = memory.services.settings.memory.recall_min_similarity
         found: dict[str, tuple[float, float]] = {}
-        for hit in memory.vectors.search(
-            VectorKind.FACT, text, limit * VECTOR_OVERFETCH, at_or_before=self.vector_bound
-        ):
+        for hit in self._vector_hits(VectorKind.FACT, text, limit):
             if hit.similarity >= floor and self.fact_visible(hit.id):
                 found[hit.id] = (hit.similarity, 0.0)
         for kw in memory.corpus.fact_index.search(text, limit, allowed=self.fact_visible):
@@ -252,9 +326,7 @@ class MemoryView:
         memory = self._memory
         floor = memory.services.settings.memory.recall_min_similarity
         found: dict[str, tuple[float, float]] = {}
-        for hit in memory.vectors.search(
-            VectorKind.SUMMARY, text, limit * VECTOR_OVERFETCH, at_or_before=self.vector_bound
-        ):
+        for hit in self._vector_hits(VectorKind.SUMMARY, text, limit):
             if hit.similarity >= floor and self.summary(hit.id) is not None:
                 found[hit.id] = (hit.similarity, 0.0)
         for kw in memory.corpus.summary_index.search(text, limit, allowed=self._summary_known):

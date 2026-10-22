@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -121,6 +122,88 @@ async def test_the_component_ticks_at_once_and_then_on_the_aligned_grid(calm: Wo
                 (moment.timestamp() - offset) % TICK_S
             ) < 2.0, moment
         assert component.health().status == HealthStatus.OK
+    finally:
+        await component.stop()
+
+
+class Gated:
+    """A scheduler tick that blocks until the test lets it go (a planner call that is slow)."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        self.clock = clock
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.calls = 0
+        self.finished = 0
+        self.cancelled = 0
+
+    async def __call__(self) -> TickReport:
+        self.calls += 1
+        self.entered.set()
+        try:
+            await self.gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        self.finished += 1
+        return TickReport(at=self.clock.now_utc())
+
+
+async def test_a_slow_first_tick_does_not_hold_up_the_start(calm: World) -> None:
+    """R17-36 (D-730): ``start`` returns while the first tick is still blocked on the planner."""
+    gated = Gated(calm.clock)
+    calm.scheduler.tick = gated  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await asyncio.wait_for(component.start(), timeout=10)  # before the fix: never returns
+    try:
+        await wait_until(lambda: gated.entered.is_set())  # the first tick runs, in the task
+        assert gated.calls == 1 and gated.finished == 0 and component.ticks == 0
+        assert component.health().status == HealthStatus.OK
+        gated.gate.set()
+        await wait_until(lambda: component.ticks == 1)  # it is counted when it is over
+        await asleep(calm)  # and then the loop waits for the grid, as before
+        assert gated.calls == 1
+        await calm.clock.advance(TICK_S + 1)
+        await wait_until(lambda: gated.calls == 2)
+        assert component.health().status == HealthStatus.OK
+    finally:
+        await component.stop()
+
+
+async def test_stopping_the_component_cancels_a_first_tick_that_is_blocked(calm: World) -> None:
+    """R17-36 (D-730): the blocked first tick is in the supervised task, so ``stop`` ends it."""
+    gated = Gated(calm.clock)
+    calm.scheduler.tick = gated  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await asyncio.wait_for(component.start(), timeout=10)
+    await wait_until(lambda: gated.entered.is_set())
+    await asyncio.wait_for(component.stop(), timeout=10)
+    assert gated.cancelled == 1 and gated.finished == 0
+    assert component.ticks == 0  # a cancelled tick is not a tick that was made
+    assert component.health().status == HealthStatus.OK  # and not a crash either
+    await calm.clock.advance(3 * TICK_S)
+    await calm.clock.settle()
+    assert gated.calls == 1  # nothing ticks after the stop
+
+
+async def test_the_first_tick_is_made_once_per_start_not_once_per_restart_of_the_loop(
+    calm: World,
+) -> None:
+    """R17-36 (D-730): the supervisor may restart the loop; it does not "open the day" again."""
+    counting = Counting(calm.clock)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await component.start()
+    try:
+        await asleep(calm, ticks=(counting, 1))
+        loop = component._loop  # type: ignore[attr-defined]
+        task = asyncio.ensure_future(loop())  # the loop as the supervisor would run it again
+        try:
+            await wait_until(lambda: calm.clock.pending_sleepers >= 2)
+            assert len(counting.times) == 1
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
     finally:
         await component.stop()
 

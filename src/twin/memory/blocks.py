@@ -44,6 +44,8 @@ class MemoryBlock:
     budget_tokens: int = 0  # the budget actually applied (after the budget level's factor)
     dropped: int = 0  # candidates that did not fit
     sections: tuple[str, ...] = field(default_factory=tuple)
+    # the vector search failed and the block was built from what needs no vectors (D-731)
+    degraded: bool = False
 
     def ids(self, kind: str) -> list[str]:
         return [item.item_id for item in self.items if item.kind == kind]

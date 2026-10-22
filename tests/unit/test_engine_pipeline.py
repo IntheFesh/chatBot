@@ -428,6 +428,25 @@ async def test_material_that_cannot_be_read_is_left_out_not_fatal(
     assert {a.step for a in draft.actions} >= {"memory_unavailable", "examples_unavailable"}
 
 
+async def test_a_memory_block_built_without_vectors_is_used_and_noted(
+    api: respx.MockRouter, pipeline: ReplyPipeline
+) -> None:
+    """R17-35 (D-731): the degraded block reaches the prompt, and the draft says it was degraded."""
+    route = route_of(api, ok(content="好呀"))
+    data = view(memory_text="【今天要留意的】\n她下午四点要考试", memory_degraded=True)
+    draft = await pipeline.run(context(), data)
+    assert draft.usable and [b.text for b in draft.bubbles] == ["好呀"]
+    steps = {a.step for a in draft.actions}
+    assert "memory_vectors_unavailable" in steps and "memory_unavailable" not in steps
+    assert "她下午四点要考试" in sent(route)[0]["messages"][-1]["content"]
+    api.reset()
+    route_of(api, ok(content="好呀"))
+    whole = await pipeline.run(context(), view(memory_text="【今天要留意的】\n她下午四点要考试"))
+    assert {"memory_vectors_unavailable", "memory_unavailable"}.isdisjoint(
+        a.step for a in whole.actions
+    )
+
+
 async def test_a_missing_persona_and_profile_still_give_a_reply(
     api: respx.MockRouter, pipeline: ReplyPipeline
 ) -> None:

@@ -159,6 +159,7 @@ class StaticDataView:
     )
     history_flags: list[bool] = field(default_factory=list)
     fail_memory: bool = False
+    memory_degraded: bool = False  # the block comes back built without the vector search (D-731)
     fail_examples: bool = False
     memory_queries: list[tuple[MemoryQuery, int | None]] = field(default_factory=list)
     example_queries: list[tuple[list[QueryTurn], int | None]] = field(default_factory=list)
@@ -188,9 +189,11 @@ class StaticDataView:
         if self.fail_memory:
             raise RuntimeError("the memory is not there")
         if not self.memory_text:
-            return MemoryBlock("")
+            return MemoryBlock("", degraded=self.memory_degraded)
         item = BlockItem("fact", "f1", "相关的事", 1.0, False, 10)
-        return MemoryBlock(self.memory_text, (item,), 10, budget_tokens or 0)
+        return MemoryBlock(
+            self.memory_text, (item,), 10, budget_tokens or 0, degraded=self.memory_degraded
+        )
 
     async def examples(self, turns: Sequence[QueryTurn], *, k: int | None = None) -> list[Example]:
         self.example_queries.append((list(turns), k))

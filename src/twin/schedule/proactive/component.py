@@ -4,7 +4,10 @@
 every ``proactive.tick_minutes``.  The ticks are aligned to the wall clock - a multiple of the
 tick length plus a fixed offset of the local day (drawn from the installation's salt), so that
 they do not coincide with the other jobs of the application that run on the full five minutes -
-and the first one is made at once when the component starts (it opens the day).
+and the first one is made at once when the component starts (it opens the day).  It is made in the
+supervised task, not in ``start``: a planner call that is slow (timeouts of 60 to 180 seconds and
+their retries) must not hold up the components after this one, so that the application receives
+messages within the 30 seconds of R-NFR-003 (D-730).
 
 :func:`register_proactive` builds the scheduler from the pieces the running engine is made of
 (``engine.kit``: the same reply pipeline, data source, sender, style model and DeepSeek client),
@@ -102,11 +105,10 @@ class ProactiveComponent:
         self._supervisor = TaskSupervisor(self.name, services.clock, services.alerts)
         self._tick_s = services.settings.proactive.tick_minutes * 60.0
         self._offsets: dict[date, float] = {}
+        self._opening_due = first_tick  # the first tick is made once per start, not per restart
         self.ticks = 0
 
     async def start(self) -> None:
-        if self._first_tick:
-            await self._tick()
         self._supervisor.spawn("tick", self._loop, restart_on_exit=True)
 
     async def stop(self) -> None:
@@ -132,6 +134,9 @@ class ProactiveComponent:
 
     async def _loop(self) -> None:
         clock = self._services.clock
+        if self._opening_due:
+            self._opening_due = False  # a cancelled or restarted loop does not open the day twice
+            await self._tick()
         while True:
             now = clock.now_utc()
             offset = await asyncio.to_thread(self._offset, now)

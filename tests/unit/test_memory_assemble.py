@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
+from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
 from tests.support.memory import (
     add_event,
@@ -315,3 +316,164 @@ async def test_building_can_run_off_the_event_loop(memory: Memory) -> None:
     add_fact(memory, "她喜欢吃火锅", utc(2026, 3, 1))
     block = await MemoryAssembler(memory).abuild(MemoryQuery("火锅"), NOW)
     assert "她喜欢吃火锅" in block.text
+
+
+# ------------------------------------------------- a vector backend that fails (D-731)
+
+
+class IndexDown(OSError):
+    """What a vector table that cannot be read raises (the message is not logged)."""
+
+
+def break_vectors(memory: Memory) -> list[str]:
+    """Make every vector search of ``memory`` fail; the list holds the searches that were made."""
+    searches: list[str] = []
+
+    def search(kind: object, text: str, *args: object, **kwargs: object) -> object:
+        searches.append(text)
+        raise IndexDown("the index cannot be read")
+
+    memory.vectors.search = search  # type: ignore[method-assign,assignment]
+    return searches
+
+
+def lived_memory(memory: Memory) -> dict[str, str]:
+    """A memory with what a block needs even without vectors: a follow-up, a birthday, a topic."""
+    memory.store.mark_bot_online(utc(2026, 3, 1))
+    ids = {
+        "followup": add_followup(
+            memory, "她下午四点要考试", utc(2026, 3, 10, 21), utc(2026, 3, 9)
+        ).id,
+        "birthday": add_fact(
+            memory,
+            "对方的生日",
+            utc(2025, 1, 1),
+            subject="user",
+            category="anniversary",
+            event_date=date(1999, 3, 10),
+            recurrence="yearly",
+            importance=4,
+        ).id,
+        "keyword": add_fact(memory, "她喜欢吃火锅", utc(2026, 3, 1), importance=2).id,
+        "summary": add_summary(memory, "real", date(2026, 2, 1), "那天他们聊了潜水课的事").id,
+    }
+    memory.refresh()
+    return ids
+
+
+def test_a_failing_vector_search_leaves_the_block_with_what_needs_no_vectors(
+    memory: Memory, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R17-35: the follow-up, the birthday, the keyword hits stay; the block says it is degraded."""
+    ids = lived_memory(memory)
+    healthy = MemoryAssembler(memory).build(MemoryQuery("火锅 潜水课"), NOW)
+    assert not healthy.degraded
+    assert {ids["followup"], ids["birthday"], ids["keyword"], ids["summary"]} <= {
+        item.item_id for item in healthy.items
+    }
+    searches = break_vectors(memory)
+    with caplog.at_level("INFO"):
+        block = MemoryAssembler(memory).build(MemoryQuery("火锅 潜水课"), NOW)
+    assert searches  # the backend was asked and it failed
+    assert block.degraded and not block.empty
+    assert block.ids("followup") == [ids["followup"]]  # due today: mandatory, no vectors needed
+    assert ids["birthday"] in block.ids("fact") and "对方的生日（就是今天）" in block.text
+    assert ids["keyword"] in block.ids("fact")  # the keyword search still finds it
+    assert block.ids("summary") == [ids["summary"]]  # and the summary of the topic
+    assert "memory_vectors_unavailable" in caplog.text
+    assert "火锅" not in caplog.text and "the index cannot be read" not in caplog.text
+
+
+def test_the_marker_of_a_healthy_block_is_not_set(memory: Memory) -> None:
+    lived_memory(memory)
+    assert MemoryAssembler(memory).build(MemoryQuery("想吃火锅"), NOW).degraded is False
+    assert MemoryAssembler(memory).build(MemoryQuery("  "), NOW).degraded is False  # nothing asked
+
+
+def test_a_view_made_for_a_past_moment_still_raises_when_the_vectors_fail(
+    services: Services, memory: Memory
+) -> None:
+    """R17-35, iron rule 13: the training export and the evaluation never get a thinner block."""
+    from twin.memory.api import memory_view
+    from twin.memory.asof import AsOfSource
+
+    lived_memory(memory)
+    break_vectors(memory)
+    query = MemoryQuery("想吃火锅")
+    view = MemoryAssembler(memory).view(NOW)
+    assert not view.vectors_degraded
+    with pytest.raises(IndexDown):
+        view.search_facts("想吃火锅", 5)
+    with pytest.raises(IndexDown):
+        view.search_summaries("想报潜水课", 5)
+    with pytest.raises(IndexDown):
+        view.render(query)
+    with pytest.raises(IndexDown):
+        memory_view(services, NOW, memory=memory).render(query)
+    source = AsOfSource(services, memory=memory)
+    with pytest.raises(IndexDown):
+        source.at(NOW).memory_block(query)
+    assert not view.vectors_degraded  # and nothing was quietly noted either
+
+
+def test_the_view_of_the_live_assembler_is_the_only_one_that_degrades(memory: Memory) -> None:
+    lived_memory(memory)
+    break_vectors(memory)
+    live = MemoryAssembler(memory).view(NOW, degrade_vectors=True)
+    assert live.search_facts("想吃火锅", 5)  # the keyword hit alone
+    assert live.vectors_degraded
+    again = MemoryAssembler(memory).view(NOW)
+    with pytest.raises(IndexDown):
+        again.search_facts("想吃火锅", 5)
+
+
+def test_a_backend_that_failed_is_not_asked_again_for_five_minutes(
+    services: Services, memory: Memory
+) -> None:
+    """D-731: a model that cannot be loaded does not cost its load time on every reply."""
+    clock = services.clock
+    assert isinstance(clock, ManualClock)
+    lived_memory(memory)
+    assembler = MemoryAssembler(memory)
+    original = memory.vectors.search
+    searches = break_vectors(memory)
+    first = assembler.build(MemoryQuery("火锅 潜水课"), NOW)
+    assert first.degraded and len(searches) == 1  # the summaries' search was not even tried
+    clock.tick(299)
+    second = assembler.build(MemoryQuery("火锅 潜水课"), NOW)
+    assert second.degraded and len(searches) == 1  # within the five minutes: not asked
+    assert second.ids("followup") == first.ids("followup")
+    assert second.ids("fact") == first.ids("fact")
+    memory.vectors.search = original  # type: ignore[method-assign]
+    clock.tick(2)  # five minutes have passed since the failure
+    third = assembler.build(MemoryQuery("火锅 潜水课"), NOW)
+    assert not third.degraded  # asked again, answered, and the block is whole again
+
+
+def test_a_backend_that_fails_again_after_the_wait_is_marked_again(
+    services: Services, memory: Memory
+) -> None:
+    clock = services.clock
+    assert isinstance(clock, ManualClock)
+    lived_memory(memory)
+    assembler = MemoryAssembler(memory)
+    searches = break_vectors(memory)
+    assert assembler.build(MemoryQuery("想吃火锅"), NOW).degraded
+    clock.tick(301)
+    assert assembler.build(MemoryQuery("想吃火锅"), NOW).degraded
+    assert len(searches) == 2  # one try per five minutes
+
+
+async def test_the_degraded_block_comes_through_the_data_source_of_the_running_bot(
+    services: Services, memory: Memory
+) -> None:
+    from twin.engine.dataview import LiveDataSource
+
+    ids = lived_memory(memory)
+    break_vectors(memory)
+    source = LiveDataSource(services, memory=memory)
+    try:
+        block = source.view(NOW).memory_block(MemoryQuery("想吃火锅"))
+        assert block.degraded and ids["followup"] in block.ids("followup")
+    finally:
+        await source.aclose()
