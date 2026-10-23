@@ -9,7 +9,10 @@
   are deleted once an hour;
 * turns a failing check into an alert the moment it starts failing (the category the check names),
   again every ``ops.health.remind_h`` hours while it goes on, and closes it with a "recovered"
-  notice when the check is good again (R-OPS-004);
+  notice when the check is good again (R-OPS-004).  What is open is read back from the alerts
+  table at the first look (``AlertService.open_alerts``, round 18, D-800): a problem announced
+  before a restart is closed by the next process, and one that goes on is reminded, not
+  announced afresh;
 * every Sunday at 03:30 local time runs the integrity check (:mod:`twin.ops.integrity`) in a
   task of its own - it can take minutes on a large database and must not delay the snapshots -
   keeps the result in the setting ``ops.integrity.last`` and raises ``integrity_failed`` if it is
@@ -98,6 +101,7 @@ class HealthMonitor:
         self._launch = launch or launch_kind()
         self._integrity = integrity or self._real_integrity
         self._open: dict[str, _Open] = {}
+        self._restored = False
         self._pruned_at: float | None = None
         self._supervisor = TaskSupervisor(self.name, self._clock, services.alerts)
         self.ticks = 0
@@ -141,7 +145,21 @@ class HealthMonitor:
                     record_history=False,
                 )
 
+    def _restore_open(self) -> None:
+        """The failing checks an earlier process announced and nobody closed (D-800).
+
+        A health alert names its check in ``detail["check"]`` (:func:`_check_facts`); the rows
+        come oldest first, so the newest announcement of a check is the one remembered.
+        """
+        for view in self._services.alerts.open_alerts():
+            name = (view.detail or {}).get("check")
+            if isinstance(name, str):
+                self._open[name] = _Open(view.category, view.created_at)
+        self._restored = True
+
     def _announce(self, report: HealthReport) -> None:
+        if not self._restored:
+            self._restore_open()
         alerts = self._services.alerts
         remind = timedelta(hours=self._config.remind_h)
         for check in report.checks:

@@ -473,6 +473,54 @@ async def test_a_failure_is_announced_once_reminded_later_and_closed(
     assert all(done for kind, done in kinds if kind == "alert")
 
 
+async def test_a_failure_announced_before_a_restart_is_closed_by_the_next_process(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8 (D-800): the open alerts are read back from the database, not kept in memory only.
+
+    Before: a new monitor started with nothing open, so a problem announced before a restart
+    and gone after it was never told "recovered" (and one that went on was announced again at
+    once instead of after ``remind_h``).
+    """
+    first = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    store.record_poll_success()
+    await first.tick()
+    clock.tick(6 * 60)  # no poll for six minutes
+    await first.tick()
+    (alert,) = [a for a in alerts_of(services) if a.kind == "alert"]
+    assert alert.category == "channel_poll_stale"
+
+    store.record_poll_success()  # the process restarts, and the poll works again
+    clock.tick(60)
+    second = make_monitor(services, clock, integrity=clean_integrity)
+    await second.tick()
+    rows = alerts_of(services)
+    recoveries = [a for a in rows if a.kind == "recovery"]
+    assert [(a.category, a.toast_state) for a in recoveries] == [("channel_poll_stale", "pending")]
+    assert all(a.resolved_at is not None for a in rows if a.kind == "alert")
+
+
+async def test_a_failure_that_goes_on_after_a_restart_is_reminded_not_announced_again(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8 (D-800): the new process knows the problem was told; it reminds after remind_h."""
+    first = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    store.record_poll_success()
+    await first.tick()
+    clock.tick(6 * 60)
+    await first.tick()
+    clock.tick(60)  # the process restarts; the problem is still there
+    second = make_monitor(services, clock, integrity=clean_integrity)
+    await second.tick()
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 1
+    clock.tick(6 * 3600)  # remind_h after the first announcement
+    store.state.put("ilink.poll_status", {"consecutive_failures": 0, "last_ok_at": None})
+    await second.tick()
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 2
+
+
 async def test_a_failure_that_changes_its_nature_is_announced_as_the_new_one(
     services: Services, clock: ManualClock
 ) -> None:
