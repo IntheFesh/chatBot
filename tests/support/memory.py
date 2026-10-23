@@ -417,8 +417,10 @@ def mark_days_replayed(services: Services, days: set[date] | None = None) -> set
     from twin.memory.replay import count_message_days
     from twin.memory.store import MemoryStore
 
-    chosen = days if days is not None else count_message_days(
-        services, MemoryClock.from_services(services)
+    chosen = (
+        days
+        if days is not None
+        else count_message_days(services, MemoryClock.from_services(services))
     )
     store = MemoryStore(services)
     for day in sorted(chosen):
