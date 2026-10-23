@@ -10,6 +10,12 @@ works on **character bigrams** of every run of Chinese text (a run of one charac
 itself unless it is a particle), plus lower-cased Latin words and numbers.  A query is
 tokenised the same way; a document's score is the share of the query's weight - each token
 weighs its inverse document frequency - that the document contains, a number in ``[0, 1]``.
+
+A search with a filter (``allowed``, how the as-of view hides what was not yet known) counts the
+document frequencies among the documents the filter lets through only (D-783): otherwise facts of
+the future would change the weights, and with them the hits and the block of a past moment
+(iron rule 13).  The filter is asked once per document and search: a search costs one pass over
+the documents plus the postings of the query's tokens, never documents times tokens.
 """
 
 from __future__ import annotations
@@ -81,35 +87,50 @@ class KeywordIndex:
         self._postings.clear()
         self._documents.clear()
 
-    def _weight(self, token: str) -> float:
-        """Inverse document frequency (always positive)."""
-        frequency = len(self._postings.get(token, ()))
-        return math.log(1.0 + len(self._documents) / (1.0 + frequency))
-
     def search(
         self, query: str, limit: int, *, allowed: Callable[[str], bool] | None = None
     ) -> list[KeywordHit]:
         """The best ``limit`` documents for ``query``; ``allowed`` drops documents up front.
 
         ``allowed`` is how the as-of view keeps documents of the future out *before* the limit
-        is applied, so a limit never leaves the view with fewer hits than there are.
+        is applied, so a limit never leaves the view with fewer hits than there are - and before
+        the weights are counted, so they never see them either (D-783).
         """
         query_tokens = tokens_of(query)
-        wanted = [t for t in query_tokens if t in self._postings]
-        if limit <= 0 or not wanted:
+        if limit <= 0 or not any(t in self._postings for t in query_tokens):
             return []
+        population, postings = self._population(query_tokens, allowed)
+        if not postings:
+            return []
+        weights = {t: _idf(population, len(postings.get(t, ()))) for t in query_tokens}
         # a query token that no document has still counts against the share, as it would for a
         # document that lacks it
-        total = sum(self._weight(t) for t in query_tokens)
+        total = sum(weights.values())
         scores: dict[str, float] = {}
-        for token in wanted:
-            weight = self._weight(token)
-            for doc_id in self._postings[token]:
-                scores[doc_id] = scores.get(doc_id, 0.0) + weight
-        hits = [
-            KeywordHit(doc_id, min(1.0, score / total))
-            for doc_id, score in scores.items()
-            if allowed is None or allowed(doc_id)
-        ]
+        for token, documents in postings.items():
+            for doc_id in documents:
+                scores[doc_id] = scores.get(doc_id, 0.0) + weights[token]
+        hits = [KeywordHit(doc_id, min(1.0, score / total)) for doc_id, score in scores.items()]
         hits.sort(key=lambda hit: (-hit.score, hit.doc_id))
         return hits[:limit]
+
+    def _population(
+        self, tokens: frozenset[str], allowed: Callable[[str], bool] | None
+    ) -> tuple[int, dict[str, set[str]]]:
+        """How many documents count, and the postings of ``tokens`` among them."""
+        if allowed is None:
+            return len(self._documents), {
+                t: self._postings[t] for t in tokens if t in self._postings
+            }
+        visible = {doc_id for doc_id in self._documents if allowed(doc_id)}
+        found: dict[str, set[str]] = {}
+        for token in tokens:
+            documents = self._postings.get(token, set()) & visible
+            if documents:
+                found[token] = documents
+        return len(visible), found
+
+
+def _idf(population: int, frequency: int) -> float:
+    """Inverse document frequency (always positive)."""
+    return math.log(1.0 + population / (1.0 + frequency))
