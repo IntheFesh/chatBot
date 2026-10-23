@@ -419,7 +419,7 @@ uv run twin train remote dpo            # 偏好对够 200 对才有；参考模
 uv run twin train remote eval           # 验证集 loss 与每个测试上下文的一条生成；有 DPO 适配器时比较 SFT 与 SFT+DPO，保留更好的
 uv run twin train remote export         # 合并保留的适配器栈、转 GGUF、量化 Q4_K_M / Q5_K_M / Q8_0
 uv run twin train remote download       # 下载到 data\models\<run_id>\ 并校验每个 sha256
-uv run twin train remote cleanup        # 安全删除实例上的数据集、解密目录和日志里的样本
+uv run twin train remote cleanup        # 下载之后：安全删除数据集、解密目录、日志、检查点与评估生成，删除 GGUF；只留下远程 vLLM 用的 artifacts/adapter
 uv run twin train remote status         # 列出所有运行，并提醒还有数据留在实例上的
 ```
 
@@ -430,7 +430,7 @@ uv run twin model register data\models\<run_id>     # 校验产物并登记，�
 uv run twin model list
 ```
 
-`twin train remote cleanup` 之后（`twin train remote status` 不再提醒），**到 AutoDL 控制台释放实例**。`training_runs` 记录清理完成的时间；本地侧的 `twin purge --training-only` 会列出还没确认清理的远程训练。
+`twin train remote cleanup` 之后（`twin train remote status` 不再提醒），**到 AutoDL 控制台释放实例**。清理后实例上还剩远程 vLLM（§8.2）要用的 `artifacts/adapter`、基座模型和装好的程序，不再有她的消息、日志、GGUF 和评估生成（第 18 轮，D-814）；释放实例后这些都随数据盘消失。同一台实例上再训练一次（重训、§8.2 保留实例时）没有问题：导出按运行号记录进度，新运行从头导出（D-812）；但没清理就换一个数据集时 `setup` 会拒绝解密，先下载并清理上一次运行。`train --again` 从基座重新训练（删除旧的 SFT 与在它之上的 DPO 适配器），`dpo --again` 重新做 DPO；不加 `--again` 重跑时，SFT 从最后一个检查点续训、已完成的 DPO 直接跳过（D-813）。`training_runs` 记录清理完成的时间；本地侧的 `twin purge --training-only` 会列出还没确认清理的远程训练。
 
 ### 6.7 继续训练与 DPO
 

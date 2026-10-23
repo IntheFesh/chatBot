@@ -261,6 +261,41 @@ stack_choice() {
     esac
 }
 
+# ------------------------------------------------------------------ one run at a time
+# An instance kept for the remote vLLM (R-SRV-003) trains again (R-TRN-012): what one run left
+# must not pass for the next run's (D-812).
+
+# reset_export_state: forget the export steps of the last run (export.sh starts afresh).  The mark
+# of the llama.cpp build stays: the build is a program, not a product of the run.
+reset_export_state() {
+    local state="${TWIN_HOME}/state" step
+    for step in "${EXPORT_STEPS[@]}"; do
+        if [ "${step}" != prepare_llama_cpp ]; then
+            rm -f "${state}/export.${step}"
+        fi
+    done
+    rm -f "${state}/export.adapter" "${state}/export.run"
+}
+
+# package_identity MANIFEST: "profile=<name> dataset=<version>" of a training package.
+package_identity() {
+    "${TWIN_PYTHON}" -c 'import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+print("profile=%s dataset=%s" % (manifest.get("profile"), manifest.get("dataset_version")))' "$1"
+}
+
+# training_output_present: success when output/ holds anything a training left.
+training_output_present() {
+    [ -d "${TWIN_HOME}/output" ] && [ -n "$(find "${TWIN_HOME}/output" -mindepth 1 -print -quit)" ]
+}
+
+# finished_without_checkpoint DIR: LLaMA-Factory saved the finished adapter in DIR and no
+# checkpoint-N (a run shorter than save_steps).  It refuses to train in such a directory again
+# ("Output directory already exists and is not empty", D-813).
+finished_without_checkpoint() {
+    [ -f "$1/adapter_model.safetensors" ] && ! compgen -G "$1/checkpoint-*" >/dev/null
+}
+
 # ------------------------------------------------------------------------- probes
 # The probes below read the machine.  When one of them misreads a container, point
 # TWIN_PROBE_OVERRIDES at a file that redefines it; the file is sourced after lib.sh.

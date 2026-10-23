@@ -656,6 +656,16 @@ def remote_download_command(run: Annotated[str | None, RUN_OPTION] = None) -> No
     typer.echo(f"register them with: twin model register {target}")
 
 
+# What `cleanup.sh --yes` erases and what it leaves for the remote vLLM (R-PRIV-003, R-SRV-003;
+# D-814): said as it is, the adapter included.
+CLEANUP_LINES = (
+    "cleanup finished: the training data, logs, checkpoints and evaluation generations on the "
+    "instance were overwritten and deleted, the GGUF files deleted",
+    "still on the instance until you release it: artifacts/adapter (the LoRA adapter a remote "
+    "vLLM serves), the base model and the installed programs",
+)
+
+
 @remote_app.command("cleanup")
 @command(CommandKind.LIGHT)
 def remote_cleanup_command(
@@ -669,7 +679,8 @@ def remote_cleanup_command(
     with _failures():
         chosen = _latest_or(RunStore(services.db), run)
     report = _run_remote(services, chosen, lambda steps: steps.cleanup(chosen.id, force=force))
-    typer.echo("cleanup finished: the data on the instance was overwritten and deleted")
+    for line in CLEANUP_LINES:
+        typer.echo(line)
     typer.echo(
         f"请到 AutoDL 控制台释放实例 ({report.detail}); the data disk is only reclaimed then"
     )
@@ -797,6 +808,8 @@ def remote_all_command(
             )
             if not keep_instance_data:
                 await steps.cleanup(chosen.id)
+                for line in CLEANUP_LINES:
+                    typer.echo(line)
                 typer.echo(
                     "请到 AutoDL 控制台释放实例 (release the instance in the AutoDL console)"
                 )

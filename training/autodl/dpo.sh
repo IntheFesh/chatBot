@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Preference training on top of the SFT model (R-TRN-009; D-650, D-651).
 #
-#   dpo.sh <profile>
+#   dpo.sh <profile> [--again]
 #
 # Runs only when the package holds at least TWIN_DPO_MIN_PAIRS preference pairs
 # (training.dpo_min_pairs, 200 by default); otherwise it says so and ends successfully without
@@ -22,6 +22,10 @@
 #             and says so loudly.  A failure that is not memory stops the script.
 # artifacts/dpo/dpo_reference.json says how the reference was chosen (and why a fall-back happened);
 # `twin train remote dpo` copies it into the run record.
+# A finished run leaves its adapter in output/dpo and no checkpoint (about 26 steps for 200 pairs,
+# save_steps 100), and LLaMA-Factory refuses to train in such a directory again.  So a rerun (a job
+# lost after it finished) says the run is done and keeps it; --again (`twin train remote dpo
+# --again`) deletes it - and the stack the evaluation kept - and trains anew (D-813).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +34,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 load_env_files "${SCRIPT_DIR}"
 require_profile "${1:-}"
+AGAIN=0
+for argument in "${@:2}"; do
+    case "${argument}" in
+        --again) AGAIN=1 ;;
+        *) die "unknown argument '${argument}'" ;;
+    esac
+done
 start_logging dpo
 use_data_disk
 
@@ -50,6 +61,14 @@ if [ "${pairs}" -lt "${MINIMUM}" ]; then
 fi
 [ -f "${TWIN_HOME}/output/sft/adapter_model.safetensors" ] || die "no SFT adapter; run train.sh first"
 [ -f "${CONFIG}" ] || die "${CONFIG} is missing; build the package from a dataset that has preference pairs"
+if [ "${AGAIN}" = "1" ]; then
+    log "--again: the earlier preference run (output/dpo) and the stack the evaluation kept are deleted; DPO starts anew"
+    rm -rf "${TWIN_HOME}/output/dpo"
+    rm -f "${TWIN_HOME}/state/stack_choice"
+elif finished_without_checkpoint "${TWIN_HOME}/output/dpo"; then
+    log "DPO already finished: output/dpo holds its adapter (how its reference was chosen: ${RECORD}); run it with --again (twin train remote dpo --again) to train it anew"
+    exit 0
+fi
 
 # The state of the reference model, written to RECORD.
 DPO_REFERENCE=sft

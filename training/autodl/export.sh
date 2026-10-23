@@ -18,7 +18,9 @@
 # space is checked before every step that writes a large file.  The quantized files are written
 # where they stay (no copy: at the peak the disk holds the base, the F16 file and the three
 # quantizations, 3.2 times the bf16 size, and not a fourth set).  Running the script again skips
-# the steps that are done (state/export.<step>); the adapters themselves stay for the remote vLLM.
+# the steps that are done (state/export.<step>) - for the same run: the steps are recorded with the
+# run id (state/export.run, D-812), and the export of another run starts afresh; --redo starts
+# afresh whatever the run.  The adapters themselves stay for the remote vLLM.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -63,6 +65,30 @@ mkdir -p "${STATE}" "${GGUF_DIR}" "${ARTIFACTS}/gguf"
 if [ "${REDO}" = "1" ]; then
     rm -f "${STATE}"/export.*
 fi
+
+# start_afresh: the marks and the products of an earlier export go (D-812).  The adapter the remote
+# vLLM may be serving (artifacts/adapter) is replaced by the collect step only, as before.
+start_afresh() {
+    reset_export_state
+    rm -rf "${MERGED}"
+    rm -f "${F16}" "${ARTIFACTS}/manifest.json" "${ARTIFACTS}"/gguf/*.gguf "${ARTIFACTS}"/gguf/*.part
+}
+
+# The export state belongs to one training run (state/export.run).  Another run - a second
+# training on an instance kept for the remote vLLM - starts afresh instead of finding the first
+# run's steps done; run without TWIN_RUN_ID (by hand) the script continues the export on the disk.
+RECORDED_RUN=""
+if [ -f "${STATE}/export.run" ]; then
+    RECORDED_RUN="$(head -n1 "${STATE}/export.run")"
+fi
+EXPORT_RUN="${TWIN_RUN_ID:-${RECORDED_RUN}}"
+if [ "${REDO}" = "1" ] || [ "${EXPORT_RUN}" != "${RECORDED_RUN}" ]; then
+    if [ "${REDO}" != "1" ] && [ -n "${RECORDED_RUN}" ]; then
+        log "the export on the disk belongs to run ${RECORDED_RUN}; run ${EXPORT_RUN} starts afresh"
+    fi
+    start_afresh
+fi
+printf '%s\n' "${EXPORT_RUN}" >"${STATE}/export.run"
 
 step_done() { [ -f "${STATE}/export.$1" ]; }
 mark_done() { touch "${STATE}/export.$1"; }
@@ -173,7 +199,7 @@ step_collect_artifacts() {
         --bundle-manifest "${TWIN_HOME}/manifest.json" \
         --quants "${TWIN_GGUF_QUANTS}" \
         --adapter-kind "${kept}" \
-        --run-id "${TWIN_RUN_ID:-}"
+        --run-id "${EXPORT_RUN}"
 }
 
 for step in "${EXPORT_STEPS[@]}"; do

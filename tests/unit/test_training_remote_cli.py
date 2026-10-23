@@ -340,6 +340,10 @@ def test_the_whole_procedure_step_by_step(instance: Instance) -> None:
     cleaned = instance.cli("train", "remote", "cleanup")
     assert cleaned.exit_code == 0, cleaned.output
     assert "请到 AutoDL 控制台释放实例" in cleaned.output
+    # R18-E10 (D-814): the output says what stays on the instance, not that everything is gone
+    assert "the data on the instance was overwritten and deleted" not in cleaned.output
+    assert "still on the instance until you release it: artifacts/adapter" in cleaned.output
+    assert "evaluation generations" in cleaned.output and "GGUF files deleted" in cleaned.output
     run = instance.latest_run()
     assert run.status == "cleaned" and run.cleaned_at is not None and not run.needs_cleanup
     after = instance.cli("train", "remote", "status")
@@ -459,6 +463,7 @@ def test_all_runs_every_step_and_leaves_the_instance_clean(instance: Instance) -
         instance.data_dir / "models" / run.id / "adapter" / "adapter_model.safetensors"
     ).is_file()
     assert "twin model register" in result.output and "请到 AutoDL 控制台释放实例" in result.output
+    assert "still on the instance until you release it: artifacts/adapter" in result.output
     assert PASSPHRASE not in result.output
     assert (instance.workdir / "state" / "cleanup.done").is_file()
 

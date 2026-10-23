@@ -8,6 +8,7 @@ the real ones leave, so the scripts' own logic runs for real.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -645,6 +646,22 @@ def test_the_trial_step_gives_up_when_a_batch_of_one_does_not_fit(tmp_path: Path
     assert not (workdir / "trial_data").exists()  # no copy of her messages is left behind
 
 
+@posix_only
+def test_the_trial_step_survives_the_output_of_an_interrupted_trial(tmp_path: Path) -> None:
+    """R18-E9 (D-813): a verification stopped right after its trial left ``output/trial``.
+
+    LLaMA-Factory refuses an output directory that holds a model and no checkpoint (the trial
+    saves none), so the next verification failed for good; the trial output is removed first.
+    """
+    workdir = prepared_workdir(tmp_path, "5090-8b")
+    add_template_check(workdir, 0)
+    install_fake_cli(tmp_path)
+    write_tiny_adapter(workdir / "output" / "trial")
+    done = run_script(workdir, script_env(workdir, tmp_path), "setup.sh", "5090-8b", "verify")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert not (workdir / "output" / "trial").exists()
+
+
 def sample_length(row: dict[str, Any]) -> int:
     return len(row["system"]) + sum(len(turn["value"]) for turn in row["conversations"])
 
@@ -1041,6 +1058,52 @@ def test_decrypt_needs_the_package_and_the_right_profile(tmp_path: Path) -> None
     assert "profile.env is for" in run_script(workdir, env, "decrypt.sh", "pro6000-14b").stderr
 
 
+@posix_only
+def test_decrypt_refuses_another_package_while_the_training_output_of_the_first_is_there(
+    tmp_path: Path,
+) -> None:
+    """R18-E3 (D-812): ``output/`` belongs to the package that was decrypted before it.
+
+    Without a cleanup in between (``twin train remote all --no-cleanup``) a new package used to
+    replace the data under the old ``output/``: LLaMA-Factory then resumed the new training from
+    the old checkpoints.  Another dataset (or profile) is refused until the old output is gone -
+    nothing is deleted on a guess; the same package again is fine.
+    """
+    workdir, env, _ = staged(tmp_path)
+    assert (
+        run_script(workdir, env, "decrypt.sh", "5090-8b", stdin=PASSPHRASE + "\n").returncode == 0
+    )
+    before = (workdir / "data" / "sft_train.jsonl").read_bytes()
+    write_tiny_adapter(workdir / "output" / "sft")
+    again = run_script(workdir, env, "decrypt.sh", "5090-8b", stdin=PASSPHRASE + "\n")
+    assert again.returncode == 0, again.stderr  # the same package: its own output stays
+    other = write_synthetic_dataset(tmp_path / "ds2", train=12, pairs=3, version="ds-test-02")
+    result = bundle.build_bundle(
+        other,
+        PROFILES["5090-8b"],
+        passphrase=PASSPHRASE,
+        out_dir=tmp_path / "out2",
+        created_at=datetime(2026, 10, 12, tzinfo=UTC),
+        kdf_log_n=10,
+    )
+    shutil.copyfile(result.path, workdir / "bundle.enc")
+    refused = run_script(workdir, env, "decrypt.sh", "5090-8b", stdin=PASSPHRASE + "\n")
+    assert refused.returncode == 1
+    assert "ds-test-01" in refused.stderr and "ds-test-02" in refused.stderr
+    assert "cleanup" in refused.stderr
+    assert (workdir / "data" / "sft_train.jsonl").read_bytes() == before
+    assert (workdir / "output" / "sft" / "adapter_model.safetensors").is_file()
+    assert not (workdir / ".unpack").exists()  # no decrypted copy is left behind
+    assert run_script(workdir, env, "cleanup.sh", "--yes").returncode == 0
+    (workdir / "bundle.enc").write_bytes(result.path.read_bytes())  # the cleanup erased it
+    after = run_script(workdir, env, "decrypt.sh", "5090-8b", stdin=PASSPHRASE + "\n")
+    assert after.returncode == 0, after.stderr
+    assert json.loads((workdir / "manifest.json").read_text("utf-8"))["dataset_version"] == (
+        "ds-test-02"
+    )
+
+
+# ----------------------------------------------------------------------------- cleanup
 # ----------------------------------------------------------------------------- cleanup
 
 
@@ -1057,6 +1120,19 @@ def populate_for_cleanup(workdir: Path, tmp_path: Path) -> None:
         "output/eval_generate_dpo/generated_predictions.jsonl",  # R17-49d: per-stack evaluation
         "artifacts/gguf/m.gguf",
         "artifacts/manifest.json",
+        "artifacts/eval/sft/eval_generations.jsonl",  # R18-E10: replies to her held-out contexts
+        "artifacts/eval/stack_choice.json",
+        "artifacts/adapters/sft/adapter_model.safetensors",
+        "artifacts/adapter/adapter_model.safetensors",
+        "artifacts/adapter/adapter_config.json",
+        "artifacts/train/metrics.json",
+        "artifacts/dpo/dpo_reference.json",
+        "state/stack_choice",
+        "state/export.merge_adapter",
+        "state/export.collect_artifacts",
+        "state/export.adapter",
+        "state/export.run",
+        "state/export.prepare_llama_cpp",
     ):
         path = workdir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1077,7 +1153,18 @@ def test_cleanup_refuses_without_confirmation(tmp_path: Path) -> None:
 
 
 @posix_only
-def test_cleanup_erases_the_data_and_keeps_the_artifacts_until_asked(tmp_path: Path) -> None:
+def test_cleanup_erases_the_data_and_keeps_only_the_adapter_vllm_serves_until_asked(
+    tmp_path: Path,
+) -> None:
+    """R-TRN-009, R-PRIV-003; R18-E10 (D-814): after the download nothing of the run stays but the
+    one adapter the remote vLLM serves (``artifacts/adapter``, R-SRV-003).
+
+    The cleanup used to keep the whole of ``artifacts/``: the three GGUF files, the adapter layers
+    and ``eval/*/eval_generations.jsonl`` - the model's replies to her held-out contexts - while
+    the command said the data on the instance was deleted.  The export state of the run goes as
+    well (R18-E3, D-812), so that a second run on the instance exports its own model; the
+    llama.cpp build is not data and stays.
+    """
     workdir = prepared_workdir(tmp_path)
     populate_for_cleanup(workdir, tmp_path)
     env = script_env(workdir, tmp_path)
@@ -1095,18 +1182,36 @@ def test_cleanup_erases_the_data_and_keeps_the_artifacts_until_asked(tmp_path: P
         "gguf",
         "trial_data",
         "trial_data_dpo",
+        "artifacts/gguf",
+        "artifacts/eval",
+        "artifacts/adapters",
+        "artifacts/manifest.json",
+        "artifacts/train",
+        "artifacts/dpo",
+        "state/stack_choice",
+        "state/export.merge_adapter",
+        "state/export.collect_artifacts",
+        "state/export.adapter",
+        "state/export.run",
     ):
         assert not (workdir / gone).exists(), gone
+    assert not list(workdir.rglob("*.gguf")) and not list(workdir.rglob("eval_generations*"))
     assert not (tmp_path / "disk" / "cache" / "huggingface" / "datasets").exists()
     assert not (tmp_path / "disk" / "tmp").exists()
     assert (tmp_path / "disk" / "cache" / "pip" / "keep").exists()  # not a data cache
-    assert (workdir / "artifacts" / "gguf" / "m.gguf").exists() and (workdir / "autodl").is_dir()
+    assert sorted(path.name for path in (workdir / "artifacts").iterdir()) == ["adapter"]
+    assert (workdir / "artifacts" / "adapter" / "adapter_model.safetensors").exists()
+    assert (workdir / "state" / "export.prepare_llama_cpp").exists() and (
+        workdir / "autodl"
+    ).is_dir()
     assert (workdir / "state" / "cleanup.done").read_text("utf-8").endswith("Z\n")
+    assert "kept: artifacts/adapter" in done.stdout
     assert "请到 AutoDL 控制台释放实例" in done.stdout
     again = run_script(workdir, env, "cleanup.sh", "--yes")  # nothing left to do, still fine
     assert again.returncode == 0
     final = run_script(workdir, env, "cleanup.sh", "--yes", "--all")
     assert final.returncode == 0 and not (workdir / "artifacts").exists()
+    assert "kept: nothing" in final.stdout
 
 
 # ----------------------------------------------------------------- train / eval / dpo
@@ -1132,6 +1237,64 @@ def test_train_needs_the_config_and_a_finished_setup(tmp_path: Path) -> None:
     install_scripts(workdir, "5090-8b")
     env = script_env(workdir, tmp_path)
     assert "run decrypt.sh first" in run_script(workdir, env, "train.sh", "5090-8b").stderr
+
+
+@posix_only
+def test_the_fake_training_command_follows_the_output_directory_rule_of_llamafactory(
+    tmp_path: Path,
+) -> None:
+    """R18-E9 (D-813): the stand-in refuses what LLaMA-Factory 0.9.5 refuses.
+
+    ``hparams/parser.py``: a training run whose ``output_dir`` holds a finished model and no
+    ``checkpoint-N`` stops ("Output directory already exists and is not empty") unless
+    ``overwrite_output_dir`` is set; with a checkpoint it resumes from the last one.
+    """
+    install_fake_cli(tmp_path)
+    output = tmp_path / "out"
+    config = tmp_path / "run.yaml"
+
+    def train(**extra: Any) -> subprocess.CompletedProcess[str]:
+        values = {"do_train": True, "output_dir": str(output), "resume_from_checkpoint": None}
+        config.write_text(json.dumps({**values, **extra}), encoding="utf-8")
+        cli = str(tmp_path / "stubs" / "llamafactory-cli")
+        return subprocess.run(
+            [cli, "train", str(config)], capture_output=True, text=True, check=False, timeout=60
+        )
+
+    assert train().returncode == 0  # nothing there yet
+    refused = train()  # a finished model, no checkpoint (save_steps never reached)
+    assert refused.returncode == 1 and "Output directory already exists" in refused.stderr
+    assert train(overwrite_output_dir=True).returncode == 0
+    for step in (2, 10):
+        (output / f"checkpoint-{step}").mkdir()
+    resumed = train()
+    assert resumed.returncode == 0 and f"Resuming training from {output}/checkpoint-10" in (
+        resumed.stdout
+    )
+
+
+@posix_only
+def test_train_again_starts_afresh_and_a_plain_rerun_resumes(tmp_path: Path) -> None:
+    """R18-E9 (D-813): SFT always leaves checkpoints (``save_steps`` = ``eval_steps``), so a plain
+    rerun of ``train.sh`` resumes from the last one; ``--again`` (``twin train remote train
+    --again``) trains anew - and drops what was built on the old SFT adapter: the DPO adapter and
+    the stack the evaluation kept."""
+    workdir = prepared_workdir(tmp_path)
+    log = install_fake_cli(tmp_path)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", "5090-8b").returncode == 0
+    assert list((workdir / "output" / "sft").glob("checkpoint-*"))
+    rerun = run_script(workdir, env, "train.sh", "5090-8b")
+    assert rerun.returncode == 0, rerun.stderr
+    assert cli_calls(log)[-1]["resumed"] is not None
+    add_dpo_adapter(workdir, "5090-8b", "dpo")
+    again = run_script(workdir, env, "train.sh", "5090-8b", "--again")
+    assert again.returncode == 0, again.stderr
+    assert cli_calls(log)[-1]["resumed"] is None  # a new training, not the old one continued
+    assert not (workdir / "output" / "dpo").exists()
+    assert not (workdir / "state" / "stack_choice").exists()
+    assert (workdir / "output" / "sft" / "adapter_model.safetensors").is_file()
+    assert run_script(workdir, env, "train.sh", "5090-8b", "--nope").returncode == 1
 
 
 def check_generations(workdir: Path, stack: str) -> None:
@@ -1370,6 +1533,36 @@ def test_the_4bit_profile_falls_back_to_the_base_as_the_reference_when_nothing_e
     again = run_script(workdir, env, "dpo.sh", "5090-14b")
     assert again.returncode == 0, again.stderr
     assert dpo_record(workdir)["fallback"] is True and dpo_record(workdir)["reference"] == "base"
+
+
+@posix_only
+@pytest.mark.parametrize("profile", ["5090-8b", "5090-14b"])
+def test_a_finished_dpo_run_is_skipped_by_a_rerun_and_trained_anew_with_again(
+    tmp_path: Path, profile: str
+) -> None:
+    """R18-E9 (D-813): 200 pairs make about 26 steps and ``save_steps`` is 100, so a finished
+    preference run leaves its adapter and no checkpoint - and LLaMA-Factory refuses to start
+    again in that directory.  A plain rerun (a job that was lost after it finished) says the run
+    is done and keeps its result; ``--again`` deletes it and trains anew (and the verdict of an
+    evaluation of the old adapter goes too)."""
+    workdir, env, log = trained_with_dpo(tmp_path, profile)
+    adapter = workdir / "output" / "dpo" / "adapter_model.safetensors"
+    assert adapter.is_file() and not list(adapter.parent.glob("checkpoint-*"))
+    record = dpo_record(workdir)
+    before = len(cli_calls(log))
+    (workdir / "state").mkdir(exist_ok=True)
+    rerun = run_script(workdir, env, "dpo.sh", profile)
+    assert rerun.returncode == 0, rerun.stderr
+    assert "already finished" in rerun.stdout and "--again" in rerun.stdout
+    assert len(cli_calls(log)) == before  # LLaMA-Factory was not started
+    assert dpo_record(workdir) == record
+    (workdir / "state" / "stack_choice").write_text("dpo\n", encoding="utf-8")
+    again = run_script(workdir, env, "dpo.sh", profile, "--again")
+    assert again.returncode == 0, again.stderr + again.stdout
+    calls = [c for c in cli_calls(log)[before:] if c["stage"] == "dpo"]
+    assert calls[-1]["config"] == "dpo.yaml" and calls[-1]["resumed"] is None
+    assert adapter.is_file() and not (workdir / "state" / "stack_choice").exists()
+    assert run_script(workdir, env, "dpo.sh", profile, "--nope").returncode == 1
 
 
 @posix_only
@@ -1746,6 +1939,63 @@ def test_a_rerun_of_collect_keeps_the_quants(tmp_path: Path) -> None:
     assert {path.name: path.read_bytes() for path in gguf.iterdir()} == before
     assert len(trace.read_text("utf-8").splitlines()) == 4  # no quantizer run
     assert (workdir / "artifacts" / "manifest.json").is_file()
+
+
+def served_sha(workdir: Path) -> str:
+    manifest = json.loads((workdir / "artifacts" / "manifest.json").read_text("utf-8"))
+    return {f["path"]: f["sha256"] for f in manifest["files"]}["adapter/adapter_model.safetensors"]
+
+
+@posix_only
+@pytest.mark.parametrize("cleaned", [True, False])
+def test_a_second_run_on_the_same_instance_exports_its_own_model(
+    tmp_path: Path, cleaned: bool
+) -> None:
+    """R18-E3 (D-812): the export state belongs to one run (``state/export.run``).
+
+    A second training on an instance that was kept for the remote vLLM (R-TRN-012) found the
+    ``state/export.*`` marks of the first run - the cleanup did not remove them - skipped all
+    seven steps and left the first run's GGUF files and manifest, so the download failed at the
+    sha256 of the new adapter.  Now another run id starts the export afresh (the llama.cpp build
+    is kept), with or without the cleanup in between; the same run again skips what is done, and
+    a hand-run without a run id continues the export on the disk.
+    """
+    profile = "pro6000-14b"
+    workdir, env, trace = prepare_export(tmp_path, profile)
+    assert run_script(workdir, env, "export.sh", profile).returncode == 0
+    first = served_sha(workdir)
+    if cleaned:
+        package = tmp_path / "package"  # what decrypt.sh of the second package puts back
+        for name in ("data", "config", "pylib"):
+            shutil.copytree(workdir / name, package / name)
+        shutil.copyfile(workdir / "manifest.json", tmp_path / "package.json")
+        assert run_script(workdir, env, "cleanup.sh", "--yes").returncode == 0
+        assert not (workdir / "output").exists() and not (workdir / "artifacts" / "gguf").exists()
+        for name in ("data", "config", "pylib"):
+            shutil.copytree(package / name, workdir / name)
+        shutil.copyfile(tmp_path / "package.json", workdir / "manifest.json")
+    write_tiny_adapter(
+        workdir / "output" / "sft",
+        rank=PROFILES[profile].lora_rank,
+        alpha=PROFILES[profile].lora_alpha,
+        seed=99,
+    )
+    second = run_script(workdir, {**env, "TWIN_RUN_ID": "r-test-2"}, "export.sh", profile)
+    assert second.returncode == 0, second.stderr + second.stdout
+    assert "step merge_adapter is already done" not in second.stdout
+    assert "step prepare_llama_cpp is already done" in second.stdout  # the build is reused
+    assert len(trace.read_text("utf-8").splitlines()) == 8  # converted and quantised again
+    manifest = json.loads((workdir / "artifacts" / "manifest.json").read_text("utf-8"))
+    assert manifest["run_id"] == "r-test-2"
+    new = hashlib.sha256((workdir / "output/sft/adapter_model.safetensors").read_bytes())
+    assert served_sha(workdir) == new.hexdigest() != first
+    # the same run again: every step is done (an interrupted export resumes, R-TRN-009)
+    rerun = run_script(workdir, {**env, "TWIN_RUN_ID": "r-test-2"}, "export.sh", profile)
+    assert rerun.returncode == 0 and "step merge_adapter is already done" in rerun.stdout
+    by_hand = run_script(workdir, {**env, "TWIN_RUN_ID": ""}, "export.sh", profile)
+    assert by_hand.returncode == 0 and "step collect_artifacts is already done" in by_hand.stdout
+    assert len(trace.read_text("utf-8").splitlines()) == 8
+    assert (workdir / "state" / "export.run").read_text("utf-8") == "r-test-2\n"
 
 
 @posix_only

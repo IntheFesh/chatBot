@@ -149,6 +149,9 @@ run_trial_step() {
     batch="$(yaml_get "${config}" per_device_train_batch_size)"
     accum="$(yaml_get "${config}" gradient_accumulation_steps)"
     trap 'rm -rf "${TWIN_HOME}/trial_data"' EXIT
+    # the output of a trial that was stopped before it was removed: LLaMA-Factory refuses a
+    # directory with a model and no checkpoint (D-813)
+    rm -rf "${TWIN_HOME}/output/trial"
     "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/make_trial_dataset.py" \
         --data-dir "${TWIN_HOME}/data" --dataset "$(yaml_get "${config}" dataset)" \
         --out-dir "${trial_data}" --count "${TRIAL_SAMPLES}" ||

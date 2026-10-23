@@ -369,6 +369,22 @@ async def test_export_records_the_files_of_the_manifest(rig: Rig) -> None:
     assert rig.jobs.runs[-1][1][-1] == "--redo"
 
 
+async def test_train_and_dpo_run_again_tell_the_script_to_start_anew(rig: Rig) -> None:
+    """R18-E9 (D-813): ``--again`` reaches ``train.sh`` and ``dpo.sh`` as ``--again``.
+
+    Without it the script cannot tell a rerun after a lost job (resume, or keep a finished DPO
+    run) from the user's request to train anew; LLaMA-Factory resumed SFT from its last
+    checkpoint and refused a finished DPO output directory.
+    """
+    for step, script in ((rig.steps.train, "train.sh"), (rig.steps.dpo, "dpo.sh")):
+        await step(RUN)
+        command = rig.jobs.runs[-1][1]
+        assert command[1].endswith(f"/{script}") and command[2:] == ["5090-8b"]
+        await step(RUN, again=True)
+        command = rig.jobs.runs[-1][1]
+        assert command[1].endswith(f"/{script}") and command[2:] == ["5090-8b", "--again"]
+
+
 async def test_a_step_run_again_stops_the_job_that_still_runs_first(rig: Rig) -> None:
     rig.jobs.states[f"{RUN}-train"] = JobStatus("running", None, 100)
     await rig.steps.train(RUN, again=True)

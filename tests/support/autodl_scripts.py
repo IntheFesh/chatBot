@@ -244,6 +244,8 @@ def write_tiny_adapter(
 FAKE_CLI = r'''
 """A stand-in for llamafactory-cli: leaves the files the real command leaves."""
 import json
+import math
+import re
 import sys
 from pathlib import Path
 
@@ -278,6 +280,25 @@ if config.get("dataset_dir"):
         rows_of(config["eval_dataset"])
 adapters = [part.strip() for part in str(config.get("adapter_name_or_path") or "").split(",")
             if part.strip()]
+# LLaMA-Factory 0.9.5, hparams/parser.py (get_train_args): a training run whose output_dir exists
+# resumes from its last checkpoint-N; with no checkpoint but the files of a finished model there it
+# refuses, unless overwrite_output_dir is set (R18-E9, D-813).
+CHECKPOINT_NAMES = ("adapter_model.safetensors", "adapter_model.bin", "model.safetensors",
+                    "model.safetensors.index.json", "pytorch_model.bin",
+                    "pytorch_model.bin.index.json")
+resumed = None
+if (mode == "train" and config.get("do_train") and config.get("resume_from_checkpoint") is None
+        and not config.get("overwrite_output_dir") and Path(config["output_dir"]).is_dir()):
+    previous = Path(config["output_dir"])
+    numbered = [path for path in previous.iterdir()
+                if path.is_dir() and re.fullmatch(r"checkpoint-[0-9]+", path.name)]
+    if numbered:
+        resumed = max(numbered, key=lambda path: int(path.name.split("-")[1])).name
+        sys.stdout.write(f"Resuming training from {previous / resumed}.\n")
+    elif any((previous / name).is_file() for name in CHECKPOINT_NAMES):
+        sys.stderr.write("ValueError: Output directory already exists and is not empty. "
+                         "Please set `overwrite_output_dir`.\n")
+        sys.exit(1)
 with LOG.open("a", encoding="utf-8") as log:
     log.write(json.dumps({"mode": mode, "config": config_path.name,
                           "batch": config.get("per_device_train_batch_size"),
@@ -295,6 +316,8 @@ with LOG.open("a", encoding="utf-8") as log:
                           "max_samples": config.get("max_samples"),
                           "export_device": config.get("export_device"),
                           "quantization_bit": config.get("quantization_bit"),
+                          "output_dir": config.get("output_dir"),
+                          "resumed": resumed,
                           "samples": samples}) + "\n")
 if config.get("predict_with_generate"):
     # LLaMA-Factory 0.9.5 (hparams/parser.py): these three are mandatory to generate replies
@@ -346,6 +369,16 @@ if config.get("do_train"):
     write_tiny_adapter(output, rank=int(config.get("lora_rank", 4)),
                        alpha=config.get("lora_alpha", 8),
                        seed=7 if config.get("stage") == "dpo" else 3)
+    # the trainer saves a checkpoint every save_steps steps: none when the run is shorter
+    save_steps = int(config.get("save_steps") or 0)
+    if config.get("save_strategy", "steps") != "no" and save_steps > 0:
+        per_step = (int(config.get("per_device_train_batch_size", 1))
+                    * int(config.get("gradient_accumulation_steps", 1)))
+        epochs = int(float(config.get("num_train_epochs", 1)))
+        total = int(config.get("max_steps") or 0) or (
+            math.ceil(len(samples or []) / per_step) * epochs)
+        if total >= save_steps:
+            (output / f"checkpoint-{total // save_steps * save_steps}").mkdir(exist_ok=True)
     (output / "training_loss.png").write_bytes(b"png")
     state = {"best_model_checkpoint": str(output / "checkpoint-8"), "best_metric": 1.25,
              "global_step": 12, "epoch": 3.0,
