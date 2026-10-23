@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import threading
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -717,3 +718,85 @@ async def test_a_message_without_content_still_renews_the_token_and_the_window(
     token = h.store.context_token()
     assert token is not None and token.token == "CTX-FRESH"
     assert h.channel.session_state().last_inbound_at == clock.now_utc()
+
+
+# ------------------------------------------- R18-A1: a server time that cannot be a time
+
+
+def raw_updates(body: dict[str, Any], **literals: str) -> bytes:
+    """``body`` as JSON with ``"__NAME__"`` placeholders swapped for raw literals (``NaN`` ...).
+
+    ``json.dumps`` cannot be told to write ``NaN`` or a 400-digit number into one chosen field;
+    a server can send them, so the literals go into the text after it is made.
+    """
+    text = json.dumps(body)
+    for name, literal in literals.items():
+        text = text.replace(f'"__{name}__"', literal)
+    return text.encode("utf-8")
+
+
+HUGE_INTEGER = "1" + "0" * 400  # no float can hold it
+
+IMPOSSIBLE_TIMES = [
+    "1e20",  # milliseconds far past the year 9999: OverflowError / OSError
+    "NaN",  # ValueError
+    "Infinity",
+    "-Infinity",
+    "-5",
+    pytest.param(HUGE_INTEGER, id="400-digits"),  # used to fail validation: the message was lost
+    "40000000000",  # seconds in the year 3237: fine on Linux, an OSError on Windows (gmtime)
+    "1000",  # 1970: would make the conversation window look 56 years old
+]
+
+
+@pytest.mark.parametrize("literal", IMPOSSIBLE_TIMES)
+async def test_r18_a1_an_impossible_message_time_neither_blocks_nor_loses_the_batch(
+    api: respx.MockRouter, h: Harness, clock: ManualClock, literal: str
+) -> None:
+    """R18-A1 (D-765): one ``create_time_ms`` the clock functions refuse used to raise out of
+    ``poll_once`` on every try - the cursor never moved and every later message was stuck behind
+    it for good.  Now the receive time stands in, the batch is committed and the value counted."""
+    good_ms = now_ms(clock, minus_s=30)
+    poison = message(text_item("坏时间"), mid=1)
+    poison["create_time_ms"] = "__POISON__"
+    good = message(text_item("后面的正常消息"), mid=2, created_ms=good_ms)
+    content = raw_updates(updates([poison, good], cursor="CURSOR-2"), POISON=literal)
+    api.post(GET_UPDATES).respond(
+        200, content=content, headers={"content-type": "application/json"}
+    )
+
+    assert await h.channel.poll_once() is PollOutcome.MESSAGES
+
+    assert h.store.cursor() == "CURSOR-2"
+    assert h.store.seen_ids() == ["1", "2"]
+    first, second = h.store.inbox()
+    assert (first.text, second.text) == ("坏时间", "后面的正常消息")
+    assert first.at == clock.now_utc()  # the receive time stands in for the impossible one
+    assert second.at.timestamp() == pytest.approx(good_ms / 1000)
+    assert h.store.item_stats().failures["implausible_create_time"] == 1
+    assert h.channel.session_state().last_inbound_at == clock.now_utc()
+
+
+@pytest.mark.parametrize(
+    ("literal", "next_read_s"),
+    [
+        ("1e12", 125.0),  # two minutes at most, plus the 5 s margin
+        ("Infinity", 40.0),  # not a finite number: ignored, the default stays (35 s + 5 s)
+        pytest.param(HUGE_INTEGER, 125.0, id="400-digits"),
+        ("1", 10.0),  # 1 ms: at least 5 s
+        ("NaN", 40.0),
+        ("-Infinity", 40.0),
+        ("true", 40.0),
+    ],
+)
+async def test_r18_a1_the_suggested_poll_timeout_stays_between_5_s_and_2_minutes(
+    api: respx.MockRouter, h: Harness, literal: str, next_read_s: float
+) -> None:
+    """R18-A1 (D-765): ``longpolling_timeout_ms`` was taken as it came (Infinity, 10^12 ...)."""
+    content = raw_updates(updates(cursor="C1", longpolling_timeout_ms="__HINT__"), HINT=literal)
+    route = api.post(GET_UPDATES).respond(
+        200, content=content, headers={"content-type": "application/json"}
+    )
+    assert await h.channel.poll_once() is PollOutcome.EMPTY
+    assert await h.channel.poll_once() is PollOutcome.EMPTY
+    assert route.calls[1].request.extensions["timeout"]["read"] == next_read_s

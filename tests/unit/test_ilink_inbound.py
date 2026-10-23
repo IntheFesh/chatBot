@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 import respx
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from tests.support.alerts import RecordingAlerts
 from tests.support.clock import ManualClock
@@ -39,7 +42,12 @@ from twin.channel.base import (
     InboundMessage,
     MessageKind,
 )
-from twin.channel.ilink.inbound import InboundConverter, extract_partial, message_time
+from twin.channel.ilink.inbound import (
+    EARLIEST_MESSAGE_TIME,
+    InboundConverter,
+    extract_partial,
+    message_time,
+)
 from twin.channel.ilink.wire import PartialText, WireMessage
 from twin.storage.db import Database
 from twin.storage.media import MediaIntegrityError, MediaKind, MediaStore
@@ -325,6 +333,34 @@ def test_message_times_accept_milliseconds_seconds_and_nothing(clock: ManualCloc
     assert message_time(in_seconds, received).timestamp() == 1_790_000_000
     assert message_time(WireMessage(), received) == received
     assert message_time(WireMessage(create_time_ms=0), received) == received
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    value=st.one_of(
+        st.floats(allow_nan=True, allow_infinity=True),
+        st.integers(min_value=-(10**30), max_value=10**30),
+        st.sampled_from([1e20, 4e10, 3.3e10, 1000, -1, 946_684_799, 10**400]),
+    )
+)
+def test_r18_a1_message_time_is_total_and_keeps_to_plausible_times(value: float | int) -> None:
+    """R18-A1 (D-765): whatever number the server sends, a time comes out - never an exception -
+    and it lies between 2000 and one day after the receipt, or it is the receive time itself."""
+    received = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    wire = WireMessage.model_validate({"create_time_ms": value})
+    at = message_time(wire, received)
+    assert at.tzinfo is not None
+    assert at == received or EARLIEST_MESSAGE_TIME <= at <= received + timedelta(days=1)
+
+
+@pytest.mark.parametrize("value", ["soon", [1], {"ms": 1}, True])
+def test_r18_a1_a_time_that_is_not_a_number_counts_as_missing(value: object) -> None:
+    """R18-A1 (D-765): a malformed ``create_time_ms`` no longer makes the whole message invalid
+    (an invalid message is dropped); it is read as "no time" and the receive time is used."""
+    received = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    wire = WireMessage.model_validate({"create_time_ms": value, "message_id": 5})
+    assert wire.create_time_ms is None
+    assert message_time(wire, received) == received
 
 
 # ----------------------------------------------------------------- quotes

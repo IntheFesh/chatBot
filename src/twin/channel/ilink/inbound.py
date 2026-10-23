@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 
 from twin.channel.base import (
     FLAG_CONVERT_FAILED,
@@ -86,13 +87,54 @@ class Converted:
     quote_entries: list[tuple[str, str]] = field(default_factory=list)
 
 
-def message_time(wire: WireMessage, received_at: datetime) -> datetime:
-    """``create_time_ms`` as UTC; values that look like seconds are accepted too."""
+EARLIEST_MESSAGE_TIME = datetime(2000, 1, 1, tzinfo=UTC)
+"""A server time before this cannot be the time of a WeChat message (R18-A1, D-765)."""
+LATEST_MESSAGE_LEAD = timedelta(days=1)
+"""How far after its receipt a message may claim to have been written (clock skew, D-765)."""
+FAILURE_IMPLAUSIBLE_TIME = "implausible_create_time"
+
+
+def server_time(wire: WireMessage, received_at: datetime) -> datetime | None:
+    """``create_time_ms`` as UTC, or ``None`` when the server sent no usable time (D-765).
+
+    Values that look like seconds are accepted too.  The function is total: ``NaN``, infinities,
+    negative numbers, numbers the platform's clock functions refuse (Windows stops at the year
+    3000) and times before 2000 or more than a day after the receipt all give ``None`` - one such
+    value used to raise out of the poll and hold the cursor, and every later message, for good.
+    """
     value = wire.create_time_ms
-    if value is None or value <= 0:
-        return received_at
+    if value is None or value == 0:
+        return None
+    if not math.isfinite(value) or value < 0:
+        return None
     millis = value if value > 1e12 else value * 1000
-    return from_epoch(millis / 1000)
+    try:
+        at = from_epoch(millis / 1000)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if not EARLIEST_MESSAGE_TIME <= at <= received_at + LATEST_MESSAGE_LEAD:
+        return None
+    return at
+
+
+def implausible_time(wire: WireMessage, received_at: datetime) -> bool:
+    """The server sent a time, but not one that can be a message time (counted, D-765)."""
+    present = wire.create_time_ms is not None and wire.create_time_ms != 0
+    return present and server_time(wire, received_at) is None
+
+
+def message_time(wire: WireMessage, received_at: datetime) -> datetime:
+    """The time of the message: the server's when usable, the receive time otherwise."""
+    at = server_time(wire, received_at)
+    return received_at if at is None else at
+
+
+def _note_time(wire: WireMessage, received_at: datetime, result: Converted) -> datetime:
+    """:func:`message_time`, counting a time that had to be replaced (no content is logged)."""
+    if implausible_time(wire, received_at):
+        result.failures[FAILURE_IMPLAUSIBLE_TIME] += 1
+        log.warning("inbound_time_implausible", item_types=len(wire.items()))
+    return message_time(wire, received_at)
 
 
 def _nth(haystack: str, needle: str, n: int, start: int = 0) -> int:
@@ -149,9 +191,9 @@ class InboundConverter:
 
     async def convert(self, wire: WireMessage, message_id: str) -> Converted:
         received_at = self._clock.now_utc()
-        at = message_time(wire, received_at)
         items = _content_items(wire)
         result = Converted(item_types=[item.type for item in wire.items() if item.type is not None])
+        at = _note_time(wire, received_at, result)
         quote: QuoteInfo | None = None
         quote_index: int | None = None
         for index, item in enumerate(items):
@@ -182,9 +224,9 @@ class InboundConverter:
         moved on by the time anyone could ask for the message again, so this is the only chance
         to keep it.
         """
-        at = message_time(wire, self._clock.now_utc())
         items = _content_items(wire)
         result = Converted(item_types=[item.type for item in wire.items() if item.type is not None])
+        at = _note_time(wire, self._clock.now_utc(), result)
         for index, item in enumerate(items):
             suffix = message_id if len(items) == 1 else f"{message_id}#{index}"
             message = _degraded_item(item, suffix, at)
