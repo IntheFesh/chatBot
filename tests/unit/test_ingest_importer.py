@@ -371,6 +371,35 @@ def test_an_older_export_does_not_overwrite_a_newer_version(
         assert stored.source_export_id == "newer"
 
 
+def test_the_first_and_last_use_of_a_sticker_are_hers(services: Services, tmp_path: Path) -> None:
+    """R18-C9 (D-786): R-STK-002 keeps *her* last use; the user's uses used to count too."""
+    export = make_export(tmp_path, target_messages=240, media=False)
+    items = json.loads(export.messages_path.read_text("utf-8"))["messages"]
+    emojis = sorted((m for m in items if m["renderType"] == "emoji"), key=lambda m: m["createTime"])
+    hers = next(m for m in emojis if not m["isSent"])
+    users = [m for m in emojis if m["isSent"] and m["createTime"] > hers["createTime"]]
+    later_user, only_user = users[0], users[1]
+    shared, user_only = "a" * 32, "b" * 32
+
+    def assign(messages: list[dict[str, Any]]) -> None:
+        for item in messages:
+            if item["id"] in (hers["id"], later_user["id"]):
+                item["emojiMd5"] = shared
+            elif item["id"] == only_user["id"]:
+                item["emojiMd5"] = user_only
+
+    rewrite_export(export, assign)
+    run_import(services, export)
+    her_moment = datetime.fromtimestamp(hers["createTime"], UTC)
+    with services.db.session() as session:
+        both = session.get(Sticker, shared)
+        assert both is not None and (both.her_uses, both.user_uses) == (1, 1)
+        assert both.first_used_at == both.last_used_at == her_moment  # not the user's later use
+        mine = session.get(Sticker, user_only)
+        assert mine is not None and (mine.her_uses, mine.user_uses) == (0, 1)
+        assert (mine.first_used_at, mine.last_used_at) == (None, None)
+
+
 def recall_in_newer_export(export: SynthExport, message_id: str) -> None:
     """A newer export in which the message ``message_id`` is a recall notice."""
 
@@ -821,8 +850,9 @@ def test_stickers_uses_and_local_files(services: Services, tmp_path: Path) -> No
             mine = [u for u in uses if u.sticker_md5 == sticker.md5]
             assert sticker.her_uses == sum(1 for u in mine if u.by_her)
             assert sticker.user_uses == sum(1 for u in mine if not u.by_her)
-            assert sticker.first_used_at == min(u.used_at for u in mine)
-            assert sticker.last_used_at == max(u.used_at for u in mine)
+            hers = [u.used_at for u in mine if u.by_her]  # R-STK-002: her first and last use
+            assert sticker.first_used_at == (min(hers) if hers else None)
+            assert sticker.last_used_at == (max(hers) if hers else None)
         message_row = session.get(Message, uses[0].message_id)
         assert message_row is not None and message_row.sticker_md5 == uses[0].sticker_md5
         assert uses[0].used_at == message_row.create_time_utc
