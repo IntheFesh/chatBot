@@ -219,6 +219,7 @@ class HealthMonitor:
                 detail={
                     "database_ok": report.database_ok,
                     "orphans": sum(check.orphans for check in report.vectors),
+                    "missing": sum(check.missing for check in report.vectors),
                 },
                 dedup_key="integrity",
             )

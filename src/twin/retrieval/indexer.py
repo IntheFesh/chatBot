@@ -40,7 +40,7 @@ from twin.retrieval.embedder import (
     EncodeKind,
     cpu_speed_warning,
     embedding_service,
-    read_manifest,
+    weights_unchanged,
 )
 from twin.retrieval.records import load_messages
 from twin.retrieval.texts import SCHEME, encoding_text, turn_text
@@ -298,8 +298,9 @@ def run_index(
 
 def _weights_unchanged(services: Services, meta: IndexMeta) -> bool:
     """False if the model files on disk are not the ones the index was made with."""
-    record = read_manifest(services.paths.embeddings_dir, services.settings.retrieval.model)
-    return record is None or record.get("weights_sha256") == meta.weights_sha256
+    return weights_unchanged(
+        services.paths.embeddings_dir, services.settings.retrieval.model, meta.weights_sha256
+    )
 
 
 def _run_locked(

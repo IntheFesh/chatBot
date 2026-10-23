@@ -25,6 +25,7 @@ from twin.memory.visible import BotEra
 from twin.retrieval.embedder import EmbeddingService
 from twin.schedule.time_service import TimeService
 from twin.services import Services
+from twin.storage.vector_schema import VectorKind
 
 
 class Memory:
@@ -60,21 +61,32 @@ class Memory:
         facts: Sequence[FactRecord] = (),
         summaries: Sequence[SummaryRecord] = (),
     ) -> VectorSync:
-        """Encode the given records and every record that has no vector yet.
+        """Encode the given records and every record whose vector is not in the current table.
 
-        The embedding model is only loaded when there is something to encode.  A table made
-        with another model than the configured one is dropped by the first sync that touches
-        it; :meth:`reindex` redoes everything on purpose.
+        It is called after something new was stored, so it loads the embedding model.  Besides
+        the given records it encodes every record without a vector of the configured model's
+        encoding (``embed_version``) - and, when a table is missing or was made with another
+        model, every record of that kind: the first sync after a model switch drops the old
+        table and the old records must not be left without a vector (D-781).
+        :meth:`reindex` redoes everything on purpose.
         """
         self.refresh()
+        vectors = self.vectors
+        encoding = vectors.encoding()
         wanted_facts = {f.id: f for f in facts}
         wanted_summaries = {s.id: s for s in summaries}
-        for fact in self.corpus.facts.values():
-            if fact.embedding_id is None:
-                wanted_facts.setdefault(fact.id, fact)
-        for summary in self.corpus.summaries.values():
-            if summary.embedding_id is None:
-                wanted_summaries.setdefault(summary.id, summary)
+        for fact in vectors.pending_facts(
+            list(self.corpus.facts.values()),
+            encoding,
+            table_current=vectors.made_with(VectorKind.FACT, encoding),
+        ):
+            wanted_facts.setdefault(fact.id, fact)
+        for summary in vectors.pending_summaries(
+            list(self.corpus.summaries.values()),
+            encoding,
+            table_current=vectors.made_with(VectorKind.SUMMARY, encoding),
+        ):
+            wanted_summaries.setdefault(summary.id, summary)
         first = self.vectors.sync_facts(list(wanted_facts.values()))
         second = self.vectors.sync_summaries(list(wanted_summaries.values()))
         if first.encoded or second.encoded:

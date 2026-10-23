@@ -38,7 +38,9 @@ def test_a_clean_database_and_index_are_ok(services: Services, embedder: Hashing
     assert report.at == now
     (facts,) = report.vectors  # only the tables that exist are checked
     assert facts == TableCheck("memory_facts", 3, 0) and facts.ok
-    assert report.to_json()["vectors"] == [{"table": "memory_facts", "rows": 3, "orphans": 0}]
+    assert report.to_json()["vectors"] == [
+        {"table": "memory_facts", "rows": 3, "orphans": 0, "missing": 0}
+    ]
     assert report.to_json()["ok"] is True
 
 
@@ -64,6 +66,36 @@ def test_vector_ids_without_a_database_row_are_reported_with_the_repair(
     (line,) = report.problems()
     assert line == "memory_facts: 4 id(s) not in the database; run twin memory reindex"
     assert report.to_json()["ok"] is False
+
+
+def test_records_whose_vector_is_missing_from_the_index_are_reported_with_the_repair(
+    services: Services, embedder: HashingBackend
+) -> None:
+    """R18-C2 (D-781): the other direction - the database says a vector exists, the index lacks it.
+
+    Only orphans were counted, so a model switch that dropped every old vector, or a restore
+    without the vector folder, passed the weekly check.  A record still waiting for its first
+    vector is not a problem (the next write encodes it).
+    """
+    memory = make_memory(services)
+    facts = [add_fact(memory, f"合成事实 {n} 号", utc(2026, 3, 10 + n)) for n in range(3)]
+    add_fact(memory, "还没有向量的合成事实", utc(2026, 3, 20), embed=False)
+    lost = facts[1]
+    store = VectorStore(services.paths.vectors_dir)
+    store.table(FACT_SCHEMA).delete_ids([lost.id])
+    checks = check_vectors(services.db, store)
+    assert checks == (TableCheck("memory_facts", 2, 0, 1),)
+    report = run_integrity(services.db, store, services.clock.now_utc())
+    assert not report.ok
+    (line,) = report.problems()
+    assert line == (
+        "memory_facts: 1 record(s) have no vector in the index; run twin memory reindex"
+    )
+    assert report.to_json()["vectors"] == [
+        {"table": "memory_facts", "rows": 2, "orphans": 0, "missing": 1}
+    ]
+    memory.vectors.rebuild_reset()  # the whole folder is gone
+    assert check_vectors(services.db, store) == (TableCheck("memory_facts", 0, 0, 3),)
 
 
 def test_every_vector_table_names_the_command_that_repairs_it() -> None:

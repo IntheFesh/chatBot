@@ -7,7 +7,12 @@ Every Sunday at 03:30 local time the monitor runs :func:`run_integrity`:
   it was made from (``example_windows``, ``facts``, ``daily_summaries``, ``stickers``).  An index
   row whose source is gone only wastes space, but it means the index and the database drifted
   apart - a restored backup, a crash between the two writes - so it is reported with the command
-  that repairs it.
+  that repairs it;
+* the other direction (D-781): every row the database marks as having a vector (its encoding is
+  stamped on it) must be in the index.  One that is not - the old vectors of a model switch, a
+  restore without the vector folder - is missing from every search; it is reported with the same
+  repair command, also when the table itself is gone.  A row still waiting for its first vector
+  is not a problem: the next write or index run encodes it.
 
 The result is one :class:`IntegrityReport`; the monitor keeps it in the ``ops.integrity.last``
 setting and raises ``integrity_failed`` when it is not clean.
@@ -15,6 +20,7 @@ setting and raises ``integrity_failed`` when it is not clean.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -22,7 +28,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import InstrumentedAttribute
+from sqlalchemy.sql.elements import ColumnElement
 
+from twin.retrieval.indexer import vector_holders
 from twin.retrieval.vector_store import VectorStore
 from twin.storage.chat_models import Sticker
 from twin.storage.db import Database
@@ -47,34 +55,58 @@ REPAIRS = {
 
 @dataclass(frozen=True)
 class VectorSource:
-    """A vector table and the database column its ids must be found in."""
+    """A vector table, the database column its ids must be found in, and the rows of that table
+    the database marks as having a vector (they must be found in the index)."""
 
     schema: VectorTableSchema
     column: InstrumentedAttribute[str]
+    holders: Callable[[], Sequence[ColumnElement[bool]]]
+
+
+def _fact_holders() -> list[ColumnElement[bool]]:
+    return [Fact.status == "active", Fact.embed_version.is_not(None)]
+
+
+def _summary_holders() -> list[ColumnElement[bool]]:
+    return [DailySummary.is_current.is_(True), DailySummary.embed_version.is_not(None)]
+
+
+def _sticker_holders() -> list[ColumnElement[bool]]:
+    return [
+        Sticker.her_uses > 0,
+        Sticker.description_ct.is_not(None),
+        Sticker.desc_encoding.is_not(None),
+    ]
 
 
 VECTOR_SOURCES = (
-    VectorSource(WINDOW_SCHEMA, ExampleWindow.id),
-    VectorSource(FACT_SCHEMA, Fact.id),
-    VectorSource(SUMMARY_SCHEMA, DailySummary.id),
-    VectorSource(STICKER_SCHEMA, Sticker.md5),
+    VectorSource(WINDOW_SCHEMA, ExampleWindow.id, vector_holders),
+    VectorSource(FACT_SCHEMA, Fact.id, _fact_holders),
+    VectorSource(SUMMARY_SCHEMA, DailySummary.id, _summary_holders),
+    VectorSource(STICKER_SCHEMA, Sticker.md5, _sticker_holders),
 )
 
 
 @dataclass(frozen=True)
 class TableCheck:
-    """One vector table: how many rows it holds and how many have no source row."""
+    """One vector table: its rows, those without a source row, and source rows without a row."""
 
     table: str
     rows: int
     orphans: int
+    missing: int = 0  # rows of the database marked as having a vector that the index lacks
 
     @property
     def ok(self) -> bool:
-        return self.orphans == 0
+        return self.orphans == 0 and self.missing == 0
 
     def to_json(self) -> dict[str, Any]:
-        return {"table": self.table, "rows": self.rows, "orphans": self.orphans}
+        return {
+            "table": self.table,
+            "rows": self.rows,
+            "orphans": self.orphans,
+            "missing": self.missing,
+        }
 
 
 @dataclass(frozen=True)
@@ -96,9 +128,14 @@ class IntegrityReport:
             f"database: {message}" for message in self.database_messages if not self.database_ok
         ]
         for check in self.vectors:
-            if not check.ok:
-                fix = REPAIRS.get(check.table, "rebuild the index")
+            fix = REPAIRS.get(check.table, "rebuild the index")
+            if check.orphans:
                 lines.append(f"{check.table}: {check.orphans} id(s) not in the database; run {fix}")
+            if check.missing:
+                lines.append(
+                    f"{check.table}: {check.missing} record(s) have no vector in the index; "
+                    f"run {fix}"
+                )
         return lines
 
     def to_json(self) -> dict[str, Any]:
@@ -127,17 +164,20 @@ def check_database(db: Database) -> tuple[bool, tuple[str, ...]]:
 
 
 def check_vectors(db: Database, store: VectorStore) -> tuple[TableCheck, ...]:
-    """Every vector id of every existing table must be a row of its source table."""
+    """Every vector id of every existing table must be a row of its source table, and every row
+    marked as having a vector must be in the index (a table that is gone lacks them all)."""
     checks: list[TableCheck] = []
     for source in VECTOR_SOURCES:
         table = store.table(source.schema)
-        if not table.exists():
-            continue
-        indexed = table.ids()
+        exists = table.exists()
+        indexed = table.ids() if exists else []
         with db.session() as session:
             known = set(session.scalars(select(source.column)))
+            holders = set(session.scalars(select(source.column).where(*source.holders())))
         orphans = sum(1 for value in indexed if value not in known)
-        checks.append(TableCheck(source.schema.name, len(indexed), orphans))
+        missing = len(holders - set(indexed))
+        if exists or missing:
+            checks.append(TableCheck(source.schema.name, len(indexed), orphans, missing))
     return tuple(checks)
 
 

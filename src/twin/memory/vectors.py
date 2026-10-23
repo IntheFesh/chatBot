@@ -10,6 +10,12 @@ A table is tied to one encoding (model, size, weights, scheme).  A record rememb
 of its vector (``embed_version``); a record whose vector was made with another encoding is
 encoded again, and a table made with another model is dropped first, so vectors of two models
 are never mixed (R-RET-006).
+
+A table of another encoding than the configured model's is not searched:
+:meth:`MemoryVectors.search` raises :class:`StaleVectorsError` instead of finding nothing (D-781),
+so the live block notes that it was built without vectors (D-731) and a view of a past moment
+stops (iron rule 13).  The next write re-encodes every record
+(:meth:`twin.memory.memory.Memory.sync_vectors`), and so does ``twin memory reindex``.
 """
 
 from __future__ import annotations
@@ -22,7 +28,13 @@ from twin.clock import to_epoch
 from twin.memory.records import FactRecord, SummaryRecord
 from twin.memory.store import MemoryStore
 from twin.ops.logging import get_logger
-from twin.retrieval.embedder import EmbedderInfo, EmbeddingService, EncodeKind, embedding_service
+from twin.retrieval.embedder import (
+    EmbedderError,
+    EmbedderInfo,
+    EmbeddingService,
+    EncodeKind,
+    embedding_service,
+)
 from twin.retrieval.vector_store import IndexMeta, VectorHit, VectorStore, VectorTable
 from twin.services import Services
 from twin.storage.vector_schema import FACT_SCHEMA, SUMMARY_SCHEMA, VectorKind, VectorTableSchema
@@ -39,6 +51,10 @@ _WRITE_LOCK = threading.RLock()
 def encoding_of(info: EmbedderInfo) -> str:
     """The identity of an encoding of memory texts (stored on each record)."""
     return f"{info.model}|{info.dimension}|{info.weights_sha256[:16]}|{SCHEME}"
+
+
+class StaleVectorsError(EmbedderError):
+    """The vector table was made with another embedding model than the configured one (D-781)."""
 
 
 @dataclass(frozen=True)
@@ -71,13 +87,35 @@ class MemoryVectors:
 
     # ---------------------------------------------------------------- syncing
 
-    def pending_facts(self, facts: Sequence[FactRecord], encoding: str) -> list[FactRecord]:
-        return [f for f in facts if f.status == "active" and f.embed_version != encoding]
+    def encoding(self) -> str:
+        """The encoding of the configured model (loads the model)."""
+        return encoding_of(self.embedder().info)
+
+    def made_with(self, kind: VectorKind, encoding: str) -> bool:
+        """True if the table of ``kind`` exists and its vectors were made with ``encoding``."""
+        meta = self.table(kind).read_meta()
+        return meta is not None and meta.encoding == encoding
+
+    def pending_facts(
+        self, facts: Sequence[FactRecord], encoding: str, *, table_current: bool = True
+    ) -> list[FactRecord]:
+        """Facts that need a vector: none of ``encoding`` yet, or every one if the table is not
+        (``table_current`` False: missing, or made with another model)."""
+        return [
+            f
+            for f in facts
+            if f.status == "active" and (not table_current or f.embed_version != encoding)
+        ]
 
     def pending_summaries(
-        self, summaries: Sequence[SummaryRecord], encoding: str
+        self, summaries: Sequence[SummaryRecord], encoding: str, *, table_current: bool = True
     ) -> list[SummaryRecord]:
-        return [s for s in summaries if s.is_current and s.embed_version != encoding]
+        """Current summaries that need a vector (as :meth:`pending_facts`)."""
+        return [
+            s
+            for s in summaries
+            if s.is_current and (not table_current or s.embed_version != encoding)
+        ]
 
     def _prepare(self, kind: VectorKind) -> tuple[VectorTable, EmbedderInfo, str, bool]:
         """The table for ``kind`` made ready for the configured model (dropped if it differs)."""
@@ -174,8 +212,7 @@ class MemoryVectors:
         table = self.table(kind)
         if not table.exists() or table.count() == 0:
             return False
-        meta = table.read_meta()
-        return meta is not None and meta.encoding == encoding_of(self.embedder().info)
+        return self.made_with(kind, self.encoding())
 
     def search(
         self,
@@ -186,11 +223,24 @@ class MemoryVectors:
         at_or_before: int | None = None,
         encode_as: EncodeKind = EncodeKind.QUERY,
     ) -> list[VectorHit]:
-        """The ``limit`` records nearest to ``text`` (cosine), oldest-bound by ``at_or_before``."""
-        if limit <= 0 or not text.strip() or not self.usable(kind):
+        """The ``limit`` records nearest to ``text`` (cosine), oldest-bound by ``at_or_before``.
+
+        An empty or missing table finds nothing.  A table made with another model than the
+        configured one raises :class:`StaleVectorsError` (D-781): its vectors cannot be compared
+        with the query's, and "nothing found" would hide that the memory is searched without them.
+        """
+        if limit <= 0 or not text.strip():
             return []
+        table = self.table(kind)
+        if not table.exists() or table.count() == 0:
+            return []
+        if not self.made_with(kind, self.encoding()):
+            raise StaleVectorsError(
+                f"the {kind.value} vectors of the memory were made with another embedding model; "
+                "the next memory write encodes them again, `twin memory reindex` does it now"
+            )
         vector = self.embedder().encode_one(text, encode_as)
-        return self.table(kind).search(vector, limit, at_or_before=at_or_before)
+        return table.search(vector, limit, at_or_before=at_or_before)
 
     def rebuild_reset(self) -> None:
         """Forget every vector (the next sync encodes everything again)."""
