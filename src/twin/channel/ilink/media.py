@@ -23,9 +23,11 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from twin.channel.ilink.http import (
     TIMEOUT_SEND_S,
     ApiAuth,
+    BodyTooLarge,
     IlinkError,
     IlinkHttp,
     IlinkTransportError,
+    read_limited,
 )
 from twin.channel.ilink.wire import CDN_BASE, MEDIA_IMAGE, CdnMedia
 from twin.clock import Clock
@@ -211,24 +213,29 @@ class CdnClient:
         self._cdn_base = cdn_base
 
     async def download(self, url: str, *, attempts: int = 3) -> bytes:
-        """GET the ciphertext (no custom headers); 4xx is final, other failures retry."""
+        """GET the ciphertext (no custom headers); 4xx is final, other failures retry.
+
+        The body is read as a stream and given up as soon as it passes :data:`MAX_DOWNLOAD_BYTES`
+        (a declared ``Content-Length`` above it is refused before the first byte): the address
+        and the size come from the server, and the whole body used to be held in memory before
+        it was measured (R18-A6, D-768).
+        """
         last = MediaTransferError("no attempt was made")
         for attempt in range(attempts):
             try:
-                response = await self._http.client.get(
-                    url, timeout=CDN_TIMEOUT_S, follow_redirects=True
-                )
+                async with self._http.client.stream(
+                    "GET", url, timeout=CDN_TIMEOUT_S, follow_redirects=True
+                ) as response:
+                    if 200 <= response.status_code < 300:
+                        return await read_limited(response, MAX_DOWNLOAD_BYTES)
+                    status = response.status_code
+            except BodyTooLarge:
+                raise MediaTransferError("the file is too large", retryable=False) from None
             except httpx.HTTPError as exc:
                 last = MediaTransferError(type(exc).__name__)
             else:
-                if 200 <= response.status_code < 300:
-                    if len(response.content) > MAX_DOWNLOAD_BYTES:
-                        raise MediaTransferError("the file is too large", retryable=False)
-                    return response.content
-                retryable = response.status_code >= 500
-                last = MediaTransferError(
-                    f"HTTP {response.status_code}", retryable=retryable, status=response.status_code
-                )
+                retryable = status >= 500
+                last = MediaTransferError(f"HTTP {status}", retryable=retryable, status=status)
                 if not retryable:
                     raise last
             if attempt + 1 < attempts:
