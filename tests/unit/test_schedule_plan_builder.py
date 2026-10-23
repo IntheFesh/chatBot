@@ -24,12 +24,15 @@ from tests.support.routine import (
     sleep_window,
     student_model,
 )
-from twin.config.settings import ScheduleConfig
-from twin.profile.activity_model import ActivityModel
+from twin.config.settings import ActivityConfig, ScheduleConfig
+from twin.profile.activity_model import ActivityModel, SleepWindow
+from twin.profile.circular import CircularStats
 from twin.profile.overrides import OverrideView
 from twin.schedule.plan_builder import (
     PlanRequest,
     QuotaRange,
+    _Notes,
+    _sample_episode,
     build_plan,
     draw_count,
     duration_bounds,
@@ -553,3 +556,70 @@ def test_a_fingerprint_changes_with_anything_that_decides_the_plan() -> None:
     )
     assert model_fingerprint(None) == "no-model"
     assert fingerprint("a", 1, [2]) == fingerprint("a", 1, [2]) != fingerprint("a", 1, [3])
+
+
+# ------------------------------------------------ R18-F5 (D-757): an irregular sleeper's nights
+
+WIDE = {-360.0: 1, -240.0: 2, -120.0: 3, 0.0: 4, 120.0: 3, 240.0: 2, 360.0: 1}  # +- 6 hours
+MIN_SLEEP_MINUTES = ActivityConfig().sleep_min_hours * 60  # the default of activity.sleep_min_hours
+
+
+def irregular_window(spread: float, seed: int) -> SleepWindow:
+    """Falls asleep around 01:00 and wakes around 09:00, the two drawn ``spread`` apart (36)."""
+    rng = random.Random(seed)
+    onsets = [(60 + rng.gauss(0, spread)) % 1440 for _ in range(36)]
+    wakes = [(540 + rng.gauss(0, spread)) % 1440 for _ in range(36)]
+    return SleepWindow(
+        CircularStats.from_values(onsets), CircularStats.from_values(wakes), 36, "days"
+    )
+
+
+@pytest.mark.parametrize("spread", [180.0, 240.0, 360.0])
+def test_r18_f5_a_drawn_night_is_never_shorter_than_her_shortest_sleep(spread: float) -> None:
+    """R18-F5: the onset and the wake-up are drawn apart; their difference could be negative.
+
+    Before: the 5th percentile of those lengths was the lower bound, below zero for an irregular
+    sleeper, so some nights ended before they began (the plan was "free" all night) and more
+    lasted minutes.  Now no night is shorter than ``activity.sleep_min_hours`` (3 h).
+    """
+    window = irregular_window(spread, int(spread))
+    low, high = duration_bounds(window)
+    assert MIN_SLEEP_MINUTES <= low <= high
+    for seed in range(1000):
+        episode = _sample_episode(
+            window,
+            date(2026, 10, 24),  # no clock change near: wall-clock lengths are real lengths
+            random.Random(seed),
+            _Notes(CHICAGO),
+            edge_minutes=30,
+            onset_not_before=None,
+        )
+        assert episode.wake - episode.onset >= timedelta(minutes=MIN_SLEEP_MINUTES), seed
+
+
+def test_r18_f5_the_nights_of_the_plans_of_an_irregular_sleeper_are_never_inverted() -> None:
+    """R18-F5: the same through ``build_plan`` (the morning and the night of 60 days)."""
+    model = make_model({"all": sleep_window(1.0, 9.0, spread=WIDE)})
+    low, _ = duration_bounds(model.sleep.window_for("workday"))
+    assert low >= MIN_SLEEP_MINUTES
+    for offset in range(60):
+        plan = build_plan(request(date(2026, 9, 1) + timedelta(days=offset), model))
+        for episode in plan.episodes:
+            length = episode.wake - episode.onset
+            assert length >= timedelta(minutes=MIN_SLEEP_MINUTES), (plan.local_date, episode)
+
+
+def test_r18_f5_the_floor_is_the_setting_and_never_above_her_usual_length() -> None:
+    """R18-F5: the floor follows ``activity.sleep_min_hours``; a short usual night keeps its
+    own length (the floor is never above the median); a fixed night has one length."""
+    window = irregular_window(240.0, 240)
+    assert duration_bounds(window, min_minutes=300.0)[0] >= 300.0
+    short = sleep_window(3.0, 5.0, spread=WIDE)  # a two-hour usual night
+    low, high = duration_bounds(short, min_minutes=MIN_SLEEP_MINUTES)
+    assert low == 120.0 and high >= low
+    assert duration_bounds(sleep_window(23.5, 7.5), min_minutes=600.0) == (480.0, 480.0)
+    request_floor = replace(
+        request(date(2026, 10, 9), make_model({"all": window})), min_sleep_minutes=300.0
+    )
+    for episode in build_plan(request_floor).episodes:
+        assert episode.wake - episode.onset >= timedelta(minutes=300)
