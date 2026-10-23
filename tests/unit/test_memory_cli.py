@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from typer.testing import CliRunner
 
 from tests.support.embedding import HashingBackend
@@ -16,6 +17,10 @@ from tests.support.memory import add_fact, add_followup
 from tests.support.synth_chat import MessageWriter
 from twin.cli import app
 from twin.config.loader import load_settings, resolve_paths
+from twin.llm.budget import LEVEL_KEY
+from twin.llm.ledger import LedgerRecord
+from twin.llm.runtime import build_llm_runtime
+from twin.llm.types import CostBreakdown, Usage
 from twin.memory.jobs import (
     REINDEX_JOB,
     handle_memory_reindex,
@@ -28,6 +33,8 @@ from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.jobs import HandlerRegistry, JobQueue
 from twin.ops.process_model import CommandKind, ExitCode, get_spec, iter_commands
 from twin.services import Services, build_services
+from twin.storage.models import Alert
+from twin.storage.settings_store import get_setting, put_setting
 
 runner = CliRunner()
 BASE = datetime(2026, 3, 5, 15, 0, tzinfo=UTC)  # 09:00 in Chicago
@@ -181,6 +188,52 @@ def test_the_block_command_shows_what_a_reply_about_a_topic_would_remember(
     assert naive.exit_code == int(ExitCode.USAGE) and "UTC offset" in naive.output
     junk = cli("memory", "block", "火锅", "--at", "yesterday")
     assert junk.exit_code == int(ExitCode.USAGE) and "--at must look like" in junk.output
+
+
+def test_the_block_command_reads_the_budget_level_without_writing_it(data_dir: Path) -> None:
+    """R18-D4 (D-798): ``twin memory block`` is a read-only command.
+
+    Before: it asked the running budget manager for its limits, which announces a new level (an
+    alert and the ``budget.level`` setting) - after a degraded day, or with the application
+    stopped, the command exited with "declared read-only but attempted a database write".  Now it
+    computes the level from the ledger without side effects, and the block still shrinks with it.
+    """
+
+    def degraded_yesterday(services: Services) -> None:
+        with services.db.transaction(bump_state=False) as session:
+            put_setting(session, LEVEL_KEY, 2, clock=services.clock, record_history=False)
+
+    with_services(degraded_yesterday)
+    calm = cli("memory", "block", "火锅", "--budget", "800")
+    assert calm.exit_code == 0, calm.output
+    assert "/800 tokens" in calm.output  # nothing was spent today: level 0, the full budget
+
+    def overspend(services: Services) -> None:
+        build_llm_runtime(services).ledger.record(
+            LedgerRecord(
+                provider="deepseek",
+                model="deepseek-flash",
+                purpose="reply",
+                usage=Usage(prompt_tokens=1, completion_tokens=1, cache_miss_tokens=1),
+                cost=CostBreakdown(50.0, 0.0, 0.0, True, 1.0),
+                thinking=False,
+                latency_ms=1,
+                at=services.clock.now_utc(),
+            )
+        )
+
+    with_services(overspend)
+    tight = cli("memory", "block", "火锅", "--budget", "800")
+    assert tight.exit_code == 0, tight.output
+    assert "/200 tokens" in tight.output  # level 4: a quarter of the memory budget
+
+    def stored(services: Services) -> tuple[object, int]:
+        with services.db.session() as session:
+            level = get_setting(session, LEVEL_KEY)
+            alerts = session.scalar(select(func.count()).select_from(Alert))
+        return level, int(alerts or 0)
+
+    assert with_services(stored) == (2, 0)  # nothing was announced, nothing was written
 
 
 def test_remembering_without_an_api_key_stores_the_words_as_they_are(data_dir: Path) -> None:

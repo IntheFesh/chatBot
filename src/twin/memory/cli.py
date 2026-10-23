@@ -222,8 +222,12 @@ def memory_block(
             raise CliError("--at needs a UTC offset, e.g. -06:00 or +08:00", ExitCode.USAGE)
         moment = parsed.astimezone(UTC)
     runtime = build_llm_runtime(services)
+    manager = runtime.budget
+    # read only: the level from the ledger, with no announcement and no write (D-798)
     assembler = MemoryAssembler(
-        Memory(services), estimator=runtime.estimator, limits=runtime.budget.limits
+        Memory(services),
+        estimator=runtime.estimator,
+        limits=lambda: manager.limits_of(manager.compute()),
     )
     block = assembler.build(MemoryQuery(topic), moment, budget)
     if block.empty:

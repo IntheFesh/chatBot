@@ -241,7 +241,16 @@ class BudgetManager:
         return True
 
     def limits(self) -> BudgetLimits:
-        level = self.current_level()
+        """The limits of the current level; a level change is announced (alert, setting)."""
+        return self.limits_of(self.status())
+
+    def limits_of(self, status: BudgetStatus) -> BudgetLimits:
+        """The limits ``status`` allows - no side effects.
+
+        A read-only command passes :meth:`compute` here (``limits_of(compute())``, D-798): it may
+        not write the ``budget.level`` setting or raise the alerts :meth:`status` announces.
+        """
+        level = status.level
         style_ready = level >= BudgetLevel.STYLE_OR_MINIMAL and self._style.available()
         minimal = level >= BudgetLevel.STYLE_OR_MINIMAL and not style_ready
         if level >= BudgetLevel.STYLE_OR_MINIMAL:
