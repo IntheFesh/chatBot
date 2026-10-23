@@ -267,15 +267,42 @@ async def test_the_picture_that_was_sent_is_the_stored_one(
 async def test_a_failed_description_is_retried_and_finished_ones_are_kept(
     services: Services, imported: SynthExport, api: respx.MockRouter
 ) -> None:
+    """A picture the model could not describe makes the job retry; the finished ones stay.
+
+    R18-D1 (D-795): the failure used to be a 401.  A rejected key is no longer this picture's
+    failure - the job goes back to the queue without an attempt (next test) - so the failure
+    here is one that is about the request: a 400.
+    """
     plan = plan_caption_batches(services, days=90)
     runtime = build_llm_runtime(services)
     runtime.batches.approve(plan.batches[0].batch_id)
     route = api.post(API)
-    route.side_effect = [caption_reply("第一张")] + [error(401, "bad key")] * 100
+    route.side_effect = [caption_reply("第一张")] + [error(400, "invalid image input")] * 100
     summary = await run_queue(services)
     assert summary.retried >= 1 and summary.failed == 0
     stored = [c for c in captions(services).values() if c]
     assert stored == ["第一张"]
+
+
+@pytest.mark.parametrize(("status", "message"), [(401, "bad key"), (402, "Insufficient Balance")])
+async def test_a_rejected_key_or_an_empty_account_hands_the_job_back(
+    services: Services, imported: SynthExport, api: respx.MockRouter, status: int, message: str
+) -> None:
+    """R18-D1 (D-795): before, every picture of the job counted as failed, the job was retried
+    twice and then failed for good; now the job waits an hour, keeps what it already finished,
+    and costs no attempt."""
+    plan = plan_caption_batches(services, days=90)
+    runtime = build_llm_runtime(services)
+    runtime.batches.approve(plan.batches[0].batch_id)
+    route = api.post(API)
+    route.side_effect = [caption_reply("第一张")] + [error(status, message)] * 100
+    summary = await run_queue(services)
+    assert summary.deferred >= 1 and summary.retried == 0 and summary.failed == 0
+    assert [c for c in captions(services).values() if c] == ["第一张"]
+    queue = JobQueue(services.db, services.clock)
+    waiting = queue.list_jobs(job_type=CAPTION_JOB, status="pending")
+    assert waiting and all(job.attempts == 0 for job in waiting)
+    assert queue.list_jobs(job_type=CAPTION_JOB, status="failed") == []
 
 
 async def test_when_the_daily_budget_is_exhausted_a_single_request_is_still_described(

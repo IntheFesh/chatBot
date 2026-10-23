@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -19,6 +19,7 @@ from tests.support.eval_world import (
     serve,
 )
 from tests.support.export_world import World
+from tests.support.policies import AlwaysOffPeak
 from twin.engine.types import Bubble
 from twin.eval import blind, memory_test
 from twin.eval.blind import (
@@ -41,8 +42,20 @@ from twin.eval.memory_test import (
 )
 from twin.eval.sandbox import SandboxKit, SandboxReply
 from twin.eval.store import EvalStore, NewItem
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
-from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, JobQueue, JobView
+from twin.llm.errors import (
+    AuthenticationFailedError,
+    BudgetDeniedError,
+    CircuitOpenError,
+    InsufficientBalanceError,
+)
+from twin.ops.jobs import (
+    BatchTooLargeError,
+    HandlerRegistry,
+    JobContext,
+    JobQueue,
+    JobView,
+    Worker,
+)
 from twin.services import Services
 
 WHEN = datetime(2026, 9, 1, 12, tzinfo=UTC)
@@ -105,11 +118,20 @@ def job_context(world: World, job_type: str, payload: dict[str, Any]) -> JobCont
 
 @pytest.mark.parametrize(
     ("error", "wait"),
-    [(BudgetDeniedError("eval", 3), 3600.0), (CircuitOpenError(30.0), 300.0)],
+    [
+        (BudgetDeniedError("eval", 3), 3600.0),
+        (CircuitOpenError(30.0), 300.0),
+        (InsufficientBalanceError("DeepSeek balance exhausted", status=402), 3600.0),
+        (AuthenticationFailedError("DeepSeek rejected the API key", status=401), 3600.0),
+    ],
 )
 async def test_a_job_that_meets_the_budget_or_the_breaker_goes_back_to_the_queue(
     world: World, monkeypatch: pytest.MonkeyPatch, error: Exception, wait: float
 ) -> None:
+    """R18-D1 (D-795): the handlers no longer convert the error into ``JobDeferred``
+    themselves; they let it through and the worker hands the job back, in one place, without
+    counting an attempt.  A rejected key and an empty account are handed back too."""
+
     async def refuse(*args: object, **kwargs: object) -> None:
         raise error
 
@@ -119,9 +141,24 @@ async def test_a_job_that_meets_the_budget_or_the_breaker_goes_back_to_the_queue
         (handle_eval_generate, EVAL_GENERATE_JOB),
         (handle_eval_memory, EVAL_MEMORY_JOB),
     ):
-        with pytest.raises(JobDeferred) as raised:
+        with pytest.raises(type(error)):
             await handler(job_context(world, job_type, {"run_id": "r", "item_ids": []}))
-        assert raised.value.retry_in_s == wait
+    services = world.services
+    queue = JobQueue(services.db, services.clock)
+    registry = HandlerRegistry()
+    registry.register(EVAL_GENERATE_JOB, handle_eval_generate)
+    registry.register(EVAL_MEMORY_JOB, handle_eval_memory)
+    ids = [
+        queue.enqueue(job_type, {"run_id": "r", "item_ids": []})
+        for job_type in (EVAL_GENERATE_JOB, EVAL_MEMORY_JOB)
+    ]
+    worker = Worker(queue, registry, services.clock, services=services, offpeak=AlwaysOffPeak())
+    summary = await worker.run_until_idle()
+    assert (summary.deferred, summary.retried, summary.failed) == (2, 0, 0)
+    for job_id in ids:
+        job = queue.get(job_id)
+        assert job is not None and job.status == "pending" and job.attempts == 0
+        assert job.run_after == services.clock.now_utc() + timedelta(seconds=wait)
     for handler, job_type in (
         (handle_eval_generate, EVAL_GENERATE_JOB),
         (handle_eval_memory, EVAL_MEMORY_JOB),

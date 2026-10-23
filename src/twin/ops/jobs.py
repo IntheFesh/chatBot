@@ -7,7 +7,9 @@
   round's code before its handler module is loaded.
 * :class:`Worker` runs handlers with bounded concurrency, retries failures with
   exponential backoff, marks a job ``failed`` and raises an alert once its
-  attempts are used up, and after a restart returns ``running`` jobs to
+  attempts are used up.  A failure that only says DeepSeek cannot do the work now (budget,
+  circuit breaker, rejected key, empty account) is not counted: the job is handed back and asked
+  again later (round 18, D-795).  After a restart the worker returns ``running`` jobs to
   ``pending`` (:meth:`Worker.recover`) - except a job whose worker is still alive in another
   process (:mod:`twin.ops.liveness`, D-712).
 * Off-peak scheduling is decided by an injected :class:`OffPeakPolicy`.  The
@@ -40,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from sqlalchemy import and_, func, or_, select
 
 from twin.clock import Clock
+from twin.llm.errors import unavailable_retry_s
 from twin.ops.alerts import AlertSink
 from twin.ops.liveness import ProcessProbe
 from twin.ops.logging import (
@@ -70,8 +73,10 @@ class JobDeferred(Exception):
 
     Used when the work cannot continue for a reason that is neither a failure nor a
     completion, for example when the job's one-time batch was paused for overspending
-    (R-LLM-014) or the budget level forbids the work until the next day (R-LLM-008).
-    The job is claimable again after ``retry_in_s`` seconds.
+    (R-LLM-014).  The job is claimable again after ``retry_in_s`` seconds.  A handler does not
+    convert the LLM layer's "cannot do this now" errors (budget, breaker, rejected key, empty
+    account) itself: the worker hands those jobs back in one place
+    (:func:`twin.llm.errors.unavailable_retry_s`, D-795).
     """
 
     def __init__(self, reason: str, *, retry_in_s: float = 300.0) -> None:
@@ -418,6 +423,15 @@ class JobQueue:
 
     # -- user actions ------------------------------------------------------
 
+    @staticmethod
+    def _requeue(job: Job, now: datetime) -> None:
+        job.status = "pending"
+        job.attempts = 0
+        job.run_after = now
+        job.finished_at = None
+        job.last_error = None
+        job.last_error_detail = None
+
     def retry(self, job_id: str) -> bool:
         """Put a failed or cancelled job back in the queue with a fresh attempt budget."""
         now = self._clock.now_utc()
@@ -425,13 +439,24 @@ class JobQueue:
             job = session.get(Job, job_id)
             if job is None or job.status not in ("failed", "cancelled"):
                 return False
-            job.status = "pending"
-            job.attempts = 0
-            job.run_after = now
-            job.finished_at = None
-            job.last_error = None
-            job.last_error_detail = None
+            self._requeue(job, now)
             return True
+
+    def retry_failed(self, *, job_type: str | None = None) -> list[str]:
+        """Put every ``failed`` job (of ``job_type``) back in the queue, as :meth:`retry` does.
+
+        For after an outage (a key or a balance that was fixed, D-795): cancelled jobs stay
+        cancelled - somebody meant that.  Returns the ids, oldest first.
+        """
+        now = self._clock.now_utc()
+        stmt = select(Job).where(Job.status == "failed").order_by(Job.created_at, Job.id)
+        if job_type is not None:
+            stmt = stmt.where(Job.type == job_type)
+        with self._db.transaction() as session:
+            jobs = list(session.execute(stmt).scalars())
+            for job in jobs:
+                self._requeue(job, now)
+            return [job.id for job in jobs]
 
     def cancel(self, job_id: str) -> bool:
         """Cancel a pending or running job (a running handler's result is discarded)."""
@@ -722,20 +747,13 @@ class Worker:
             await asyncio.shield(asyncio.to_thread(self._queue.release, job.id, self._worker_id))
             raise
         except JobDeferred as deferred:
-            retry_at = self._clock.now_utc() + timedelta(seconds=deferred.retry_in_s)
-            await asyncio.to_thread(
-                partial(self._queue.release, job.id, self._worker_id, run_after=retry_at)
-            )
-            self._summary.deferred += 1
-            log.info(
-                "job_deferred",
-                job_id=job.id,
-                job_type=job.type,
-                reason=exception_summary(deferred.__cause__ or deferred),
-                retry_in_s=deferred.retry_in_s,
-            )
+            await self._defer(job, deferred.retry_in_s, deferred.__cause__ or deferred)
         except Exception as exc:
-            await self._record_failure(job, exc)
+            wait = unavailable_retry_s(exc)
+            if wait is not None:  # DeepSeek cannot do it now: not the job's fault (D-795)
+                await self._defer(job, wait, exc)
+            else:
+                await self._record_failure(job, exc)
         else:
             recorded = await asyncio.to_thread(self._queue.complete, job.id, self._worker_id)
             if recorded:
@@ -743,6 +761,21 @@ class Worker:
                 log.info("job_done", job_id=job.id, job_type=job.type)
             else:
                 self._summary.discarded += 1
+
+    async def _defer(self, job: JobView, retry_in_s: float, reason: BaseException) -> None:
+        """Hand the job back unchanged: claimable again in ``retry_in_s``, no attempt counted."""
+        retry_at = self._clock.now_utc() + timedelta(seconds=retry_in_s)
+        await asyncio.to_thread(
+            partial(self._queue.release, job.id, self._worker_id, run_after=retry_at)
+        )
+        self._summary.deferred += 1
+        log.info(
+            "job_deferred",
+            job_id=job.id,
+            job_type=job.type,
+            reason=exception_summary(reason),
+            retry_in_s=retry_in_s,
+        )
 
     async def _record_failure(self, job: JobView, exc: Exception) -> None:
         error = describe_failure(exc)

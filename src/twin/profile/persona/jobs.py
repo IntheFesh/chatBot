@@ -23,7 +23,6 @@ from datetime import datetime
 from typing import Any
 
 from twin.ingest.transcript import MESSAGE_CHAR_CAP
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.onetime import BatchItem
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.types import LedgerTag
@@ -258,14 +257,9 @@ async def handle_persona_generate(ctx: JobContext) -> None:
     batch_id = payload.get("batch_id")
     tag = LedgerTag("one_time", str(batch_id)) if batch_id else LedgerTag()
     runtime = build_llm_runtime(services)
-    try:
-        await generate_scope(
-            services, runtime, str(payload["scope"]), seed=int(payload.get("seed", 0)), tag=tag
-        )
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    await generate_scope(
+        services, runtime, str(payload["scope"]), seed=int(payload.get("seed", 0)), tag=tag
+    )
 
 
 # ---------------------------------------------------------------------- refreshing

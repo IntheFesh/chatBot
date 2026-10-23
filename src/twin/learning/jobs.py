@@ -19,9 +19,8 @@ from datetime import datetime, timedelta
 from twin.engine.feedback import FeedbackStore
 from twin.engine.turns import BotTurnStore
 from twin.learning.rules import RuleConsolidator
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import build_llm_runtime
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.services import Services
 from twin.storage.settings_store import get_setting, put_setting
@@ -99,9 +98,4 @@ async def handle_rules(ctx: JobContext) -> None:
         FeedbackStore(services.db, services.clock),
         BotTurnStore(services.db, services.clock),
     )
-    try:
-        await consolidator.run()
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    await consolidator.run()

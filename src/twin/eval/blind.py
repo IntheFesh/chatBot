@@ -49,11 +49,10 @@ from twin.eval.sandbox import (
 )
 from twin.eval.stats import ProportionTest, Rate, group_rates, two_proportion_test
 from twin.eval.store import EvalStore, ItemView, NewItem, RunView
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.onetime import BatchItem
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.memory.recent import Turn
-from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import BatchTooLargeError, JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.profile.api import holdout_cutoff, load_activity_model, load_profile
 from twin.profile.holdout import HoldoutError
@@ -548,17 +547,12 @@ async def handle_eval_generate(ctx: JobContext) -> None:
         raise RuntimeError("eval_generate needs the services container")
     payload = ctx.job.payload
     batch_id = payload.get("batch_id")
-    try:
-        summary = await generate_items(
-            services,
-            str(payload["run_id"]),
-            [str(i) for i in payload.get("item_ids", [])],
-            str(batch_id) if batch_id else None,
-        )
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    summary = await generate_items(
+        services,
+        str(payload["run_id"]),
+        [str(i) for i in payload.get("item_ids", [])],
+        str(batch_id) if batch_id else None,
+    )
     log.info(
         "eval_pairs_generated",
         generated=summary.generated,

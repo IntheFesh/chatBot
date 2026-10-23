@@ -25,13 +25,13 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import select
 
 from twin.llm.deepseek import DeepSeekClient
-from twin.llm.errors import ApiError, BudgetDeniedError, CircuitOpenError, ImageError, LlmError
+from twin.llm.errors import SERVICE_UNAVAILABLE, ApiError, ImageError, LlmError
 from twin.llm.images import ImageInput
 from twin.llm.onetime import BatchItem
 from twin.llm.redaction import redact
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.types import DAILY, ChatMessage, LedgerTag, Purpose
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.services import Services
 from twin.storage.chat_models import MediaAsset, Message
@@ -316,10 +316,8 @@ async def handle_caption_job(ctx: JobContext) -> None:
                 await service.caption_asset(str(asset_id), tag)
             except ImageError:
                 log.warning("caption_skipped_unreadable_image", asset_id=str(asset_id))
-            except BudgetDeniedError as exc:
-                raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-            except CircuitOpenError as exc:
-                raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+            except SERVICE_UNAVAILABLE:  # not this picture's fault: the job goes back (D-795)
+                raise
             except ApiError:
                 failures += 1
     finally:

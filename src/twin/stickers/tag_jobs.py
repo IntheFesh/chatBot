@@ -19,11 +19,11 @@ from dataclasses import dataclass, field
 
 from sqlalchemy import func, select
 
-from twin.llm.errors import ApiError, BudgetDeniedError, CircuitOpenError, ImageError, LlmError
+from twin.llm.errors import SERVICE_UNAVAILABLE, ApiError, ImageError, LlmError
 from twin.llm.onetime import BatchItem
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.types import DAILY, LedgerTag
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.profile.holdout import HoldoutError, holdout_cutoff
 from twin.profile.prompt_templates import STICKER_CONTEXT, STICKER_TAG, TemplateStore
@@ -272,7 +272,7 @@ async def run_tagging(
             tagged += int(await tagger.tag_sticker(md5, tag))
         except ImageError:
             log.warning("sticker_picture_unreadable", md5=md5)
-        except (BudgetDeniedError, CircuitOpenError):
+        except SERVICE_UNAVAILABLE:  # the job goes back to the queue (D-795)
             raise
         except LlmError:
             failures += 1
@@ -281,7 +281,7 @@ async def run_tagging(
             corrected += int(await tagger.correct_with_context(md5, tag))
         except ImageError:
             log.warning("sticker_picture_unreadable", md5=md5)
-        except (BudgetDeniedError, CircuitOpenError):
+        except SERVICE_UNAVAILABLE:
             raise
         except LlmError:
             failures += 1
@@ -300,12 +300,7 @@ async def handle_sticker_tag(ctx: JobContext) -> None:
     context = [str(m) for m in payload.get("context", [])]
     runtime = build_llm_runtime(services)
     tagger = StickerTagger(services, runtime.client)
-    try:
-        tagged, corrected, failures = await run_tagging(services, tagger, vision, context, tag)
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    tagged, corrected, failures = await run_tagging(services, tagger, vision, context, tag)
     synced = await asyncio.to_thread(StickerVectors(services).sync)
     await asyncio.to_thread(StickerCatalog(services).announce_changes)  # R17-51: the new tags
     log.info(

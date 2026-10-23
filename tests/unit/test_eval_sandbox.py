@@ -46,7 +46,12 @@ from twin.eval.sandbox import (
     with_backend,
 )
 from twin.eval.store import EvalStore
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
+from twin.llm.errors import (
+    AuthenticationFailedError,
+    BudgetDeniedError,
+    CircuitOpenError,
+    InsufficientBalanceError,
+)
 from twin.llm.tokens import CALIBRATION_KEY
 from twin.memory.asof import AsOfSource, AsOfView
 from twin.memory.recent import Turn
@@ -304,8 +309,17 @@ async def test_the_sandbox_is_the_one_reply_pipeline_with_an_in_memory_channel(
     sample = sample_of(world)[0]
     await kit.sandbox.reply(request_for(sample))
     assert len(seen) == 1 and isinstance(seen[0], AsOfView) and seen[0].at == sample.at
-    # R17-21 (D-660): what the evaluation hands back to its job instead of failing the pair
-    assert propagated == [(JobDeferred, CircuitOpenError, BudgetDeniedError)]
+    # R17-21 (D-660): what the evaluation hands back to its job instead of failing the pair;
+    # R18-D1 (D-795): a rejected key and an empty account as well, not a pair saved as failed
+    assert propagated == [
+        (
+            JobDeferred,
+            BudgetDeniedError,
+            CircuitOpenError,
+            AuthenticationFailedError,
+            InsufficientBalanceError,
+        )
+    ]
     # nothing in the evaluation produces a reply except through the pipeline
     for path in sorted((SRC / "eval").glob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))

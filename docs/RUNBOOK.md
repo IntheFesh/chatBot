@@ -222,6 +222,7 @@ uv run twin jobs approve <批次号>               # 确认提示；加 --yes �
 uv run twin jobs run --until-idle              # 应用没在运行时，在前台执行已批准的任务
 uv run twin jobs show <任务号>                  # 一个任务的详情（加 --payload 看载荷，--detail 看失败时的错误消息）
 uv run twin jobs retry <任务号>                 # 重新排队失败或取消的任务
+uv run twin jobs retry --failed                # 一次重新排队所有失败的任务（加 --type <类型> 只排某一类），例如 Key 或余额修好之后
 uv run twin jobs cancel <任务号>
 ```
 
@@ -677,7 +678,7 @@ uv run twin purge --all
 | 睡眠时段落在白天的警告 | 多半是 `time.source_timezone` 设错（第 4.1 节）；用 `/作息` 或 `uv run twin routine add sleep` 修正 |
 | 邮件收不到 | `uv run twin setup` 重走 SMTP 一步并发测试邮件；Gmail 要应用专用密码，QQ/163 要授权码 |
 | 导入很慢或卡住 | `uv run twin import status` 看阶段；`uv run twin import --resume` 续传；表情包下载失败不阻塞导入，`uv run twin stickers download --retry-failed` 重试 |
-| 任务队列积压 | `uv run twin jobs list --status failed` 看失败的任务；`uv run twin jobs retry <任务号>`；DeepSeek 不可用时离线任务会等 |
+| 任务队列积压 | `uv run twin jobs list --status failed` 看失败的任务；`uv run twin jobs retry <任务号>`，或 `uv run twin jobs retry --failed` 一次全部重排；DeepSeek 不可用时（预算、熔断、Key 被拒、余额用完）离线任务不算失败，会交还队列等着（Key/余额问题一小时再问一次） |
 | 一次性批任务暂停 | 实际费用超过估算 20%：检查后 `uv run twin jobs approve <批次号>` 重新批准，或取消 |
 | 想让运行中的应用重读人设卡等 | 不用重启：轻量修改命令写库后应用 2 秒内感知 |
 
@@ -751,7 +752,7 @@ uv run twin purge --all
 | `twin jobs approve` | 轻量修改 | Approve a one-time batch of jobs after reviewing its cost estimate (R-LLM-014). |
 | `twin jobs cancel` | 轻量修改 | Cancel a pending or running job. |
 | `twin jobs list` | 只读 | List jobs, newest first. |
-| `twin jobs retry` | 轻量修改 | Re-queue a failed or cancelled job with a fresh attempt budget. |
+| `twin jobs retry` | 轻量修改 | Re-queue a failed or cancelled job (or every failed one) with a fresh attempt budget. |
 | `twin jobs run` | 重任务（入队，由运行中的应用执行） | Execute queued jobs here (used when the application is not running). |
 | `twin jobs show` | 只读 | Show one job (the payload and the error message are hidden unless asked for). |
 | `twin llm probe` | 轻量修改 | Run the M0 checks against the real DeepSeek API and write docs/LLM_REPORT.md. |

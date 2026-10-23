@@ -59,7 +59,7 @@ from twin.eval.channel import InMemoryChannel, SentMessage
 from twin.eval.isolation import isolated_writes
 from twin.eval.liveview import EvalLiveSource
 from twin.eval.render import Candidate, candidate_from_bubbles
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
+from twin.llm.errors import SERVICE_UNAVAILABLE
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.scope import call_scope
 from twin.llm.types import ChatMessage, LedgerTag, Purpose
@@ -81,8 +81,9 @@ STYLE_BACKENDS = ("style", "hybrid")
 CONTEXT_TURNS = 8  # merged turns of the conversation every backend is given (R-EVAL-009)
 SEED_MODULUS = 2**31
 # What the evaluation hands back to its job instead of saving the pair as failed (R17-21, D-660):
-# a paused batch (``BatchPausedError`` is a ``JobDeferred``), the open breaker, a refusing budget.
-DEFERRALS: tuple[type[Exception], ...] = (JobDeferred, CircuitOpenError, BudgetDeniedError)
+# a paused batch (``BatchPausedError`` is a ``JobDeferred``), the open breaker, a refusing budget,
+# and since round 18 a rejected key or an empty account (D-795) - DeepSeek cannot do it now.
+DEFERRALS: tuple[type[Exception], ...] = (JobDeferred, *SERVICE_UNAVAILABLE)
 
 
 class SandboxMode(StrEnum):
@@ -269,9 +270,9 @@ class EvalSandbox:
     async def reply(self, request: SandboxRequest) -> SandboxReply:
         """Make the reply the bot would have given, deliver it to the in-memory channel.
 
-        A paused batch, an open breaker or a refusing budget is **raised** (``JobDeferred``,
-        ``CircuitOpenError``, ``BudgetDeniedError``) instead of becoming a fallback draft: the
-        job of the evaluation goes back to the queue and the pair stays pending (R17-21).
+        A paused batch, an open breaker, a refusing budget, a rejected key or an empty account
+        is **raised** (:data:`DEFERRALS`) instead of becoming a fallback draft: the job of the
+        evaluation goes back to the queue and the pair stays pending (R17-21, D-795).
         """
         self._clock.set(request.at)
         context = self.context(request)

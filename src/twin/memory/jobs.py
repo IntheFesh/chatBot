@@ -5,7 +5,9 @@
     one-time batch waiting for ``twin jobs approve`` (R-LLM-014); its model calls are recorded
     on the ``one_time`` account of the batch, so a paused batch (spend above 120 % of the
     estimate) makes the next call raise :class:`~twin.llm.onetime.BatchPausedError`, a
-    :class:`~twin.ops.jobs.JobDeferred`: the job goes back to the queue.
+    :class:`~twin.ops.jobs.JobDeferred`: the job goes back to the queue.  So does every job that
+    meets a refusing budget, an open breaker, a rejected key or an empty account: the worker
+    hands it back without counting an attempt (D-795).
 ``memory_summary``
     summarises one local day of one scope (R-MEM-002).  The scheduler (round 08) queues it with
     :func:`queue_daily_summary` before she "wakes", off peak.  The ``bot`` scope reads the bot's
@@ -31,7 +33,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import build_llm_runtime
 from twin.llm.types import DAILY, LedgerTag
 from twin.memory.dayload import day_lines
@@ -43,7 +44,7 @@ from twin.memory.recent import BotMessage, bot_turn_reader
 from twin.memory.replay import REPLAY_JOB, MemoryReplayer
 from twin.memory.summarize import DailySummarizer
 from twin.memory.writer import MemoryWriter
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.profile.prompt_templates import TemplateStore
 from twin.services import Services
@@ -171,17 +172,12 @@ async def handle_memory_replay(ctx: JobContext) -> None:
     days = [date.fromisoformat(str(d)) for d in payload.get("dates", [])]
     runtime = build_llm_runtime(services)
     replayer = MemoryReplayer(Memory(services), runtime.client)
-    try:
-        run = await replayer.replay_days(
-            days,
-            tag,
-            force=bool(payload.get("force", False)),
-            batch_id=str(batch_id) if batch_id else None,
-        )
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    run = await replayer.replay_days(
+        days,
+        tag,
+        force=bool(payload.get("force", False)),
+        batch_id=str(batch_id) if batch_id else None,
+    )
     log.info(
         "memory_replayed",
         days=len(days),
@@ -208,14 +204,9 @@ async def handle_memory_summary(ctx: JobContext) -> None:
     lines = await asyncio.to_thread(day_lines, services, memory.clock, scope, day, reader)
     runtime = build_llm_runtime(services)
     summarizer = DailySummarizer(memory, runtime.client)
-    try:
-        result = await summarizer.summarize(
-            scope, day, lines, DAILY, force=bool(payload.get("force", False))
-        )
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    result = await summarizer.summarize(
+        scope, day, lines, DAILY, force=bool(payload.get("force", False))
+    )
     log.info(
         "memory_summary_job",
         scope=scope,
@@ -257,18 +248,13 @@ async def handle_memory_extract(ctx: JobContext) -> None:
     templates = TemplateStore(services.db, services.clock)
     extractor = FactExtractor(services, runtime.client, memory.clock, templates=templates)
     writer = MemoryWriter(memory, runtime.client, templates=templates)
-    try:
-        open_followups = await asyncio.to_thread(
-            lambda: FollowupStore(memory).open()[:OPEN_FOLLOWUPS_SHOWN]
-        )
-        extraction = await extractor.extract(
-            lines, mode="bot", tag=DAILY, open_followups=open_followups
-        )
-        report = await writer.write(extraction, DAILY)
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    open_followups = await asyncio.to_thread(
+        lambda: FollowupStore(memory).open()[:OPEN_FOLLOWUPS_SHOWN]
+    )
+    extraction = await extractor.extract(
+        lines, mode="bot", tag=DAILY, open_followups=open_followups
+    )
+    report = await writer.write(extraction, DAILY)
     log.info(
         "memory_extracted",
         facts=report.facts_added,
