@@ -115,6 +115,9 @@ class SendReport:
     skipped: list[OutBubble] = field(default_factory=list)
     stop: StopReason | None = None
     rest: list[OutBubble] = field(default_factory=list)  # bubbles that were not sent
+    # with ``stop`` FAILED: what the channel answered last (``None``: it raised, or its state
+    # could not be read); ``NETWORK`` is a send that never left the machine, also when repeated
+    failed_kind: OutboundKind | None = None
 
 
 Wait = Callable[[float], Awaitable[bool]]  # sleeps; True when the user wrote in the meantime
@@ -198,7 +201,7 @@ class BubbleSender:
             quote_for_bubble = quote_pending if bubble.kind == "text" else None
             if on_sending is not None:
                 await on_sending(bubble)
-            outcome = await self._deliver(bubble, quote_for_bubble, wait, urgent)
+            outcome = await self._deliver(bubble, quote_for_bubble, wait, urgent, report)
             if isinstance(outcome, StopReason):
                 await self._typing(False)
                 report.stop, report.rest = outcome, rest
@@ -249,9 +252,17 @@ class BubbleSender:
     # ----------------------------------------------------------------------- sending
 
     async def _deliver(
-        self, bubble: OutBubble, quote: QuoteTarget | None, wait: Wait, urgent: bool
+        self,
+        bubble: OutBubble,
+        quote: QuoteTarget | None,
+        wait: Wait,
+        urgent: bool,
+        report: SendReport,
     ) -> _Delivered | StopReason | None:
-        """Send one bubble; the result, a reason to stop, or ``None`` for a skipped sticker."""
+        """Send one bubble; the result, a reason to stop, or ``None`` for a skipped sticker.
+
+        A send that fails notes what the channel answered in ``report.failed_kind``.
+        """
         for attempt in range(NETWORK_RETRIES + 1):
             try:
                 result = await self._once(bubble, quote, urgent)
@@ -288,6 +299,7 @@ class BubbleSender:
             if bubble.kind == "sticker":
                 log.warning("sticker_not_sent", kind=kind.value, reason=result.reason)
                 return None
+            report.failed_kind = kind
             return self._block(StopReason.FAILED, ALERT_SEND, f"{kind.value}: {result.reason}")
         return self._block(StopReason.FAILED, ALERT_SEND, "the send was repeated and failed")
 

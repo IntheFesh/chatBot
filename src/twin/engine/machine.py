@@ -46,14 +46,19 @@ States
                 alert is written (R-ENG-010).  Nothing but her words is ever sent.
 ``SENDING``     :class:`~twin.engine.sender.BubbleSender` sends the bubbles at her pace.  A message
                 of the user stops it: what is out stays, the rest is dropped and the round goes on
-                at DECIDING with "what she already said" (R-ENG-009).
+                at DECIDING with "what she already said" (R-ENG-009).  A first bubble that never
+                left the machine (the network) makes the round try again 2 to 10 minutes later,
+                like a failed generation (D-751); a probe that begins before the first bubble is
+                out sends the round back to wait for it (D-752).
 
 Recovery after a restart (and on ``Resumed``, R-SCH-005): ``COLLECTING`` starts its quiet window
 afresh (the messages that piled up in the channel while the process was away join the same round);
 ``DECIDING`` keeps a planned time that lies ahead (the "after she wakes" queue survives) and draws a
 new one when it has passed - never a reply the moment the machine wakes; ``GENERATING`` goes to
 ``DECIDING`` for a fresh draw; ``SENDING`` goes on with the bubbles that were not out, or, if the
-user wrote meanwhile, continues like an interruption.
+user wrote meanwhile, continues like an interruption - but the rest of a reply that is partly out
+is dropped when she is in deep sleep now or its last bubble is more than ``STALE_REST_S`` ago
+(D-753).
 
 A step of the driver that fails is tried again after a few seconds (alert ``engine_error``); after
 five failures in a row the round is given up: one short answer of hers goes out first, once per
@@ -156,6 +161,9 @@ STEP_FAILURES_BEFORE_RESET = 5
 STOP_GRACE_S = 10.0  # real seconds a stop waits for a bubble that is being handed over (D-721)
 LEAD_MAX_S = 30.0  # the reply is begun at most this long before her delay ends (D-723)
 LEAD_SMOOTHING = 0.3  # weight of the newest reply in the running estimate of its lead
+# the rest of a reply that a stop cut in two is not sent after this long a silence (D-753): the
+# conversation has gone quiet by then (the default ``memory.quiet_minutes`` of R-MEM-007)
+STALE_REST_S = 30 * 60.0
 SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
 CORRECTION_TIMEOUT_S = 30.0  # the question after a correction in plain words may not hold her up
@@ -167,6 +175,7 @@ CRISIS_CONTEXT_TURNS = 4
 STATE_IDLE, STATE_COLLECTING, STATE_DECIDING = "IDLE", "COLLECTING", "DECIDING"
 STATE_GENERATING, STATE_SENDING = "GENERATING", "SENDING"
 DEFAULT_BACKEND = "deepseek"
+FALLBACK_BACKEND = "fallback"  # her short answer of the last resort (never a style sample)
 
 
 class DraftWriter(Protocol):
@@ -1282,33 +1291,42 @@ class ConversationEngine:
         snap = await self._load()
         data = RoundData.of(snap)
         if data.retries < MAX_RETRIES:
-            decision = self._decider.retry(self._clock.now_utc())
-            log.warning(
-                "reply_failed_will_retry",
-                reason=reason,
-                attempt=data.retries + 1,
-                in_s=round(decision.delay_s),
-            )
-
-            def build(current: ConversationSnapshot) -> Change:
-                fresh = RoundData.of(current)
-                return Change(
-                    STATE_DECIDING,
-                    {
-                        "data": replace(
-                            fresh,
-                            retries=fresh.retries + 1,
-                            decision=decision,
-                            decided_for=len(current.pending),
-                            answering=(),
-                        ).to_json(),
-                        "planned_send_at": decision.send_at,
-                    },
-                )
-
-            await self._apply(build)
+            await self._retry_later(reason, data)
             return
         await self._short_answer(reason, draft, data)
+
+    async def _retry_later(self, reason: str, data: RoundData) -> None:
+        """The round is tried again in 2 to 10 minutes, a new draft (R-ENG-010; also D-751).
+
+        A draft that was made and could not be sent is dropped with it.
+        """
+        decision = self._decider.retry(self._clock.now_utc())
+        log.warning(
+            "reply_failed_will_retry",
+            reason=reason,
+            attempt=data.retries + 1,
+            in_s=round(decision.delay_s),
+        )
+        self._reasoning = None
+
+        def build(current: ConversationSnapshot) -> Change:
+            fresh = RoundData.of(current)
+            return Change(
+                STATE_DECIDING,
+                {
+                    "data": replace(
+                        fresh,
+                        retries=fresh.retries + 1,
+                        decision=decision,
+                        decided_for=len(current.pending),
+                        answering=(),
+                        outgoing=None,
+                    ).to_json(),
+                    "planned_send_at": decision.send_at,
+                },
+            )
+
+        await self._apply(build)
 
     async def _short_answer(self, reason: str, draft: ReplyDraft | None, data: RoundData) -> None:
         """The last resort: one of her short answers (never an error text), and an alert."""
@@ -1326,7 +1344,7 @@ class ConversationEngine:
             await self._complete(data.answering or await self._pending_ids())
             return
         meta = ReplyMeta(
-            "fallback",
+            FALLBACK_BACKEND,
             cost_usd=draft.cost_usd if draft else None,
             timings_ms=dict(draft.timings_ms) if draft else None,
             actions=tuple(action.to_json() for action in draft.actions) if draft else (),
@@ -1475,17 +1493,18 @@ class ConversationEngine:
         if outgoing is None or not outgoing.unsent:
             await self._finish_reply(data)
             return
+        if outgoing.reply_id is not None:
+            stale = await self._stale_rest(snap)
+            if stale is not None:
+                await self._drop_stale_rest(outgoing, stale)
+                return
         if any(p not in data.answering for p in snap.pending):
             await self._interrupted(snap, data, outgoing)
             return
         if outgoing.reply_id is None and (
             await self._active_pause() is not None or await self._probe_running()
         ):
-            await self._edit(
-                lambda d: replace(d, outgoing=None, decision=None),
-                state=STATE_DECIDING,
-                planned_send_at=None,
-            )
+            await self._draft_back_to_deciding()
             return
         pacing = await self._pacing_model()
         items = await asyncio.to_thread(self._rounds.inbound_items, data.answering)
@@ -1538,6 +1557,40 @@ class ConversationEngine:
             await asyncio.to_thread(self._store.reject_reply, thrown)  # a bubble that was in flight
             return
         await self._after_send(report, snap)
+
+    async def _draft_back_to_deciding(self) -> None:
+        """Nothing of the reply is out and it may not go out now (``/暂停``, a probe): the draft
+        is dropped and the round decided again when it may (D-686; D-752)."""
+        self._reasoning = None
+        await self._edit(
+            lambda d: replace(d, outgoing=None, decision=None),
+            state=STATE_DECIDING,
+            planned_send_at=None,
+        )
+
+    async def _stale_rest(self, snap: ConversationSnapshot) -> str | None:
+        """Is the rest of a reply that is partly out too late to send? (D-753)
+
+        ``"deep_sleep"``: by her plan she is asleep now; ``"gap"``: the last bubble is longer ago
+        than :data:`STALE_REST_S` (the process was stopped, the machine slept).  ``None``:
+        the reply goes on.  Asked when the sending of a reply begins or begins again - after a
+        restart, a wake-up of the machine or a failed step - never between two of its bubbles.
+        """
+        now = self._clock.now_utc()
+        state = await asyncio.to_thread(self._decider.her_state, now)
+        if state is not None and state.kind == "deep_sleep":
+            return "deep_sleep"
+        last = snap.last_outbound_at
+        if last is not None and (now - last).total_seconds() > STALE_REST_S:
+            return "gap"
+        return None
+
+    async def _drop_stale_rest(self, outgoing: Outgoing, why: str) -> None:
+        """The rest of the reply is dropped and noted on it; the round ends (D-753)."""
+        log.info("send_dropped_stale", unsent=len(outgoing.unsent), reason=why)
+        noted = {"step": "send_dropped_stale", "count": len(outgoing.unsent), "detail": why}
+        await self._edit(lambda d: _with_extra(d, noted))
+        await self._finish_reply(RoundData.of(await self._load()), aborted=True)
 
     async def _settle_in_doubt(self, data: RoundData, outgoing: Outgoing) -> None:
         """The process stopped while a bubble was being handed to the channel: it counts as sent.
@@ -1619,10 +1672,35 @@ class ConversationEngine:
             data = RoundData.of(current)
             if data.outgoing is not None:
                 await self._interrupted(current, data, data.outgoing)
-        else:  # the session, the login, the count or the channel ended the reply
+        else:  # the session, the login, the count, the channel or a probe ended the reply
+            data = RoundData.of(await self._load())
+            out = data.outgoing
+            if out is not None and out.reply_id is None:  # nothing of it is out
+                if report.stop is StopReason.PROBE:  # the probe began meanwhile: wait for it
+                    log.info("reply_held_for_probe_before_first_bubble")
+                    await self._draft_back_to_deciding()
+                    return
+                if self._send_retryable(report, data, out):
+                    await self._retry_later("send_failed", data)
+                    return
             stopped = {"step": "send_stopped", "detail": report.stop.value}
             await self._edit(lambda d: _with_extra(d, stopped))
             await self._finish_reply(RoundData.of(await self._load()), aborted=True)
+
+    @staticmethod
+    def _send_retryable(report: SendReport, data: RoundData, outgoing: Outgoing) -> bool:
+        """Is a reply none of whose bubbles left the machine tried again later? (D-751)
+
+        Only when the channel could not reach the platform (``NETWORK``, also after the sender
+        repeated it), while the round has retries left, and never her short answer of the last
+        resort (it ends the round as before: no loop).
+        """
+        return (
+            report.stop is StopReason.FAILED
+            and report.failed_kind is OutboundKind.NETWORK
+            and data.retries < MAX_RETRIES
+            and outgoing.meta.backend != FALLBACK_BACKEND
+        )
 
     async def _interrupted(
         self, snap: ConversationSnapshot, data: RoundData, outgoing: Outgoing

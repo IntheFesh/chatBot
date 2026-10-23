@@ -7,6 +7,11 @@ import heapq
 from datetime import UTC, datetime, timedelta
 
 DEFAULT_START = datetime(2026, 10, 9, 12, 0, 0, tzinfo=UTC)
+# The wall clock counts whole microseconds (``datetime``), the sleepers a float of seconds: a
+# moment said as a ``datetime`` (``engine.waiting_until``) can lie up to half a microsecond before
+# the sleeper it stands for.  ``advance`` wakes a sleeper that is due within this much after the
+# target, so that moving the clock "to the moment said" always ends that wait (R18, D-751).
+RESOLUTION_S = 1e-6
 
 
 class ManualClock:
@@ -80,7 +85,7 @@ class ManualClock:
         """Advance time, waking every sleeper whose wake-up point is passed."""
         target = self._mono + seconds
         await self.settle()
-        while self._waiters and self._waiters[0][0] <= target:
+        while self._waiters and self._waiters[0][0] <= target + RESOLUTION_S:
             wake, _, future = heapq.heappop(self._waiters)
             step = max(0.0, wake - self._mono)
             self._now += timedelta(seconds=step)
