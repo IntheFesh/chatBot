@@ -227,9 +227,9 @@ uv run twin jobs cancel <任务号>
 
 ### 3.4 增量导入（以后）
 
-以后想补充新记录：再导出一份，同样 `uv run twin import "D:\新的导出目录"`，或者在微信里发 `/导入 D:\新的导出目录`（先用 CLI 做过第一次导入，聊天里不能选目标会话）。按消息 id 幂等：重复的跳过，同 id 内容不同时以较新的导出为准并记录差异数。应用在运行时导入结束后她会用一条系统消息报一次条数。导入完成后画像、检索库、记忆回放等对新日期范围自动排队，并检查要不要提醒重训。
+以后想补充新记录：再导出一份，同样 `uv run twin import "D:\新的导出目录"`，或者在微信里发 `/导入 D:\新的导出目录`（先用 CLI 做过第一次导入，聊天里不能选目标会话）。按消息 id 幂等：重复的跳过，同 id 内容不同时以较新的导出为准并记录差异数。应用在运行时导入结束后她会用一条系统消息报一次条数。导入完成后画像、检索库、记忆回放等对新日期范围自动排队，并检查要不要提醒重训。但检索库只编码留出切分点**之前**的窗口：切分点不随导入移动，新日期范围在下面的重切之前都属于留出集，不进检索库、也不进训练集（第 18 轮，D-818）。
 
-> 留出集切分点（评估和训练测试集用的最近 10%）由唯一函数 `holdout_cutoff()` 给出，**导入新数据不会自动移动它**。想把它移到今天数据的最新 10%：`uv run twin retrieval resplit`（评估结果前后不可比，会先问你）。
+> 留出集切分点（评估和训练测试集用的最近 10%）由唯一函数 `holdout_cutoff()` 给出，**导入新数据不会自动移动它**。想把它移到今天数据的最新 10%：`uv run twin retrieval resplit`（评估结果前后不可比，会先问你）。`uv run twin profile show` 显示切分点之后现在有多少回复块、占多少；明显超过配置比例（超过两倍且多出 10 个百分点以上）时，它、导入报告的“数据质量提示”、`twin train retrain-check` 与 `twin train export` 都会提示先重切。
 
 ---
 
@@ -354,7 +354,7 @@ uv run twin settings history backend.fallback   # 某个设置谁在什么时候
 
 ### 6.1 前提
 
-- 聊天记录已导入；`pre_holdout` 范围的画像、作息、人设卡已生成（`uv run twin profile rebuild`、`uv run twin persona regenerate`）；记忆回放覆盖要导出的日期范围（`uv run twin memory replay start` 并批准）。缺了哪个，`twin train export` 会直接告诉你先做什么。
+- 聊天记录已导入；`pre_holdout` 范围的画像、作息、人设卡（含 DeepSeek 写的 `[自动-描述]`，不只是统计规则）已生成（`uv run twin profile rebuild`、`uv run twin persona regenerate --scope pre_holdout`）；记忆回放覆盖要导出的日期范围（`uv run twin memory replay start` 并批准）。缺了哪个，`twin train export` 会停下并告诉你先做什么（第 18 轮起也检查回放与描述，D-817）；确实要先导出看看时加 `--allow-incomplete`，数据集的统计里会记下缺了什么（`derived_data`）。
 - 想做 DPO：用 `/不像 <正确说法>` 攒偏好对，≥ 200 对才有意义（`training.dpo_min_pairs`）。
 
 ### 6.2 在 AutoDL 租卡并扩容数据盘
@@ -434,7 +434,7 @@ uv run twin model list
 
 ### 6.7 继续训练与 DPO
 
-她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
+她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = （先 `uv run twin retrieval resplit`，见下）→ 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。训练集只取留出切分点之前的样本，切分点不随导入移动：不重切，上次之后导入的聊天全在留出集里，新导出的训练集与上次几乎一样（`retrain-check` 与 `export` 在切分点明显落后时会提示，第 18 轮 D-818）。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
 
 **DPO 的参考模型与适配器栈（第 17 轮，DECISIONS D-650 至 D-657）**：DPO 的参考模型是 SFT 模型，不是基座。bf16 三档（`5090-8b`、`pro6000-14b`、`pro6000-32b`）在合并了 SFT 的模型上新建一个 DPO 适配器（不多占显存和磁盘），所以模型是 `sft` + `dpo` 两个适配器叠加；`5090-14b`（4 比特）继续 SFT 适配器，参考是显式的 4 比特 SFT 模型，`dpo.sh` 先用最长的 64 条偏好对试跑 1 步，显存不够就降批大小，仍放不下才**仅这一档**退回“基座”作参考——退回时 `twin train remote dpo` 与 `twin train remote status` 会用大写的 `FALLBACK` 告诉你，`artifacts/dpo/dpo_reference.json`、训练报告（`artifacts/dpo/metrics.json`）和登记后的 `twin model show` 里也有。`twin train remote eval` 在有 DPO 适配器时用同一批留出样本评估 SFT 与 SFT+DPO 两个栈，按“风格指标在 ±30% 内的个数、偏差、验证集 loss”的顺序比较（全平保留 SFT），把更好的写回实例；`export` 合并的就是保留的那个（有 DPO 适配器却还没有评估的裁决时 `export.sh` 会停下，不会猜）。远程 vLLM 把两个适配器按秩拼接成一个适配器服务（`--max-lora-rank` 随之读自适配器配置）；`twin model register` 逐层核对哈希并记录适配器栈。第一次真实运行请留意：5090-14b 的试跑结果、`dpo_reference.json` 里的 `fallback`、两个栈的评估数字。
 

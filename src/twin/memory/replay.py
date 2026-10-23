@@ -557,6 +557,30 @@ def count_message_days(services: Services, clock: MemoryClock) -> set[date]:
     return days
 
 
+def days_not_replayed(
+    services: Services,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    *,
+    clock: MemoryClock | None = None,
+) -> tuple[date, ...]:
+    """Her local days with messages in ``[since, until)`` the replay has not done yet, oldest first.
+
+    Dates only (no text): what ``twin train export`` checks before it builds prompts that carry
+    ``memory_view(t)`` (R18-F7, D-817).  A day whose messages changed since its replay counts as
+    done here; ``twin memory replay start`` does it again.
+    """
+    calendar = clock or MemoryClock.from_services(services)
+    first = calendar.real_date(since) if since else None
+    last = calendar.real_date(until - ONE_MICROSECOND) if until else None
+    wanted = {
+        day
+        for day in count_message_days(services, calendar)
+        if (first is None or day >= first) and (last is None or day <= last)
+    }
+    return tuple(sorted(wanted - set(_replayed_days(services))))
+
+
 def replay_status(
     services: Services, *, runtime: LlmRuntime | None = None, clock: MemoryClock | None = None
 ) -> ReplayStatus:

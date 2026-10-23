@@ -435,6 +435,7 @@
 5. **重训提醒**
    - 每次导入后自动检查，也可以手动 `uv run twin train retrain-check`：她的新消息达到上次训练数据的 10% 时发 `retrain_suggested` 告警，`/状态` 的“重训提醒”显示百分比。第一次训练完成之前没有基线，不会提醒。
    - 重训 = 重新 `twin train export`（新版本号）→ `bundle` → `remote all`，从基座全量训练，不在旧适配器上叠加。
+   - **注意（第 18 轮，D-818）：** 留出切分点不会自动移动，训练集只取切分点之前的样本，所以上次之后导入的新聊天在 `twin retrieval resplit` 之前都落在留出集里——不进训练集、也不进检索库，不重切就重训，训练集与上次几乎一样。切分点之后的回复块明显超过配置的留出比例（超过两倍且多出 10 个百分点以上）时，`twin train retrain-check`、`twin train export`、导入报告“数据质量提示”和 `twin profile show` 都会提示先运行 `twin retrieval resplit`（重切后之前的评估结果与之后不可比）。是否让程序在导入时自动重切，等你决定。
 
 6. **没有做、也不属于这一步的**
    - `twin train export-dpo` 和“偏好对 ≥ 200 的提示”在第 11 轮（读 `preference_pairs`）；服务、激活与上线门槛在第 14 轮。

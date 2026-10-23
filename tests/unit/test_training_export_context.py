@@ -20,7 +20,7 @@ import pytest
 from tests.support.embedding import HashingBackend
 from tests.support.export_plans import run_with_plans
 from tests.support.export_world import World, build_world
-from tests.support.memory import add_fact
+from tests.support.memory import add_fact, mark_days_replayed
 from tests.support.style_models import ScriptedStyleClient, register_model
 from tests.support.synth_chat import ChatSpec, MessageWriter
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
@@ -68,6 +68,7 @@ def put(world: World, lines: list[tuple[datetime, bool, str]]) -> None:
     for when, hers, text in lines:
         writer.add(when, hers, "text", text)
     writer.store(append=True)
+    mark_days_replayed(world.services)  # the replay covers the new days as well (R18-F7)
 
 
 def export(world: World, directory: Path, *, ratio: float = 0.0) -> tuple[ExportResult, DatasetDir]:

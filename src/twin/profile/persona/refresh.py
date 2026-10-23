@@ -84,6 +84,13 @@ def count_her_messages(services: Services, scope: str, *, split: bool = True) ->
         return int(session.scalar(her_message_count(before)) or 0)
 
 
+def has_description(services: Services, scope: str) -> bool:
+    """Whether the card in force for ``scope`` has statements in ``[自动-描述]`` (a first card has
+    the statistics rules only).  A yes or no, no text (R18-F7: ``twin train export`` asks)."""
+    card = persona_store(services).active(scope)
+    return card is not None and bool(compose.description_lines(card.sections))
+
+
 def description_due(services: Services, scope: str, *, split: bool = True) -> Due:
     """Is the description of ``scope`` due; ``split=False`` for read-only commands."""
     try:

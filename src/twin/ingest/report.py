@@ -18,6 +18,7 @@ from twin.ingest.events import KINDS
 from twin.ingest.runs import RunView
 from twin.ingest.stats import RunStats
 from twin.ingest.times import SourceTime
+from twin.profile.holdout import drift_warning, holdout_share
 from twin.profile.report_section import style_change_lines
 from twin.stickers.download_summary import load_download_summary
 from twin.storage.chat_models import MediaAsset, Message, Sticker, StickerUse
@@ -152,7 +153,7 @@ def build_report(
     lines += report_sticker_section(services, run.stats)
 
     lines += ["", "## 数据质量提示", ""]
-    notes = _quality_notes(run)
+    notes = _quality_notes(run) + _holdout_notes(services)
     lines += [f"- {note}" for note in notes] if notes else ["- 无"]
 
     lines += ["", "## 风格变化", ""]
@@ -223,6 +224,14 @@ def report_sticker_section(services: Services, stats: RunStats) -> list[str]:
             "- 还没有下载过：下载作业完成时，这里会补上尝试、可用、MD5 不符、不可用的数目与原因"
         )
     return lines
+
+
+def _holdout_notes(services: Services) -> list[str]:
+    """The hold-out cut-off does not move with an import: say it when it has fallen behind
+    (R18-C3, D-818)."""
+    share = holdout_share(services)
+    warning = drift_warning(share) if share is not None else None
+    return [warning] if warning is not None else []
 
 
 def _quality_notes(run: RunView) -> list[str]:

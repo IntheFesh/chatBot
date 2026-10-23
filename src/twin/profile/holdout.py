@@ -18,6 +18,14 @@ would silently change which part of the data the evaluation has seen).  :func:`r
 recomputes it on purpose, records the change, and tells every registered listener — the profile
 rebuild of the pre-holdout scope is queued automatically; later rounds register theirs with
 :func:`on_holdout_change`.
+
+Drift (R18-C3, D-818).  Because the cut-off stays, everything imported later is held out: kept
+from the example library and from the training split.  :func:`holdout_share` counts, without
+storing anything, the share of her reply blocks at or after the stored cut-off *now*;
+:func:`drift_warning` turns a share clearly above ``retrieval.holdout_ratio`` (more than twice the
+ratio and more than ten points above it) into the one sentence that ``twin profile show``, the
+retraining check, the export and the import report print: run ``twin retrieval resplit``.
+Moving the cut-off by itself is not done here (the user decides).
 """
 
 from __future__ import annotations
@@ -26,7 +34,7 @@ import importlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from twin.ingest.corpus import conversation_timeline
 from twin.ingest.events import REPRODUCIBLE_KINDS
@@ -39,6 +47,10 @@ if TYPE_CHECKING:
 
 HOLDOUT_KEY = "retrieval.holdout"
 MIN_BLOCKS = 2
+DRIFT_FACTOR: Final = 2.0
+DRIFT_MARGIN: Final = 0.10
+"""The share after the cut-off has drifted when it is above both ``ratio * DRIFT_FACTOR`` and
+``ratio + DRIFT_MARGIN`` (with the default 10 %: above 20 %; D-818)."""
 
 
 class HoldoutError(RuntimeError):
@@ -71,6 +83,24 @@ class Holdout:
             int(data["held_out_blocks"]),
             datetime.fromisoformat(data["computed_at"]),
         )
+
+
+@dataclass(frozen=True)
+class HoldoutShare:
+    """Where the stored cut-off stands in the data now (counts only; nothing is stored)."""
+
+    cutoff: datetime
+    ratio: float  # retrieval.holdout_ratio, the share the cut-off was meant to hold out
+    blocks: int  # her reply blocks now
+    held_out_blocks: int  # of them at or after the stored cut-off
+
+    @property
+    def share(self) -> float:
+        return self.held_out_blocks / self.blocks if self.blocks else 0.0
+
+    @property
+    def drifted(self) -> bool:
+        return self.share > max(self.ratio * DRIFT_FACTOR, self.ratio + DRIFT_MARGIN)
 
 
 @dataclass(frozen=True)
@@ -172,6 +202,35 @@ def holdout_cutoff(services: Services) -> datetime:
     computed = compute_holdout(services)
     _store(services, computed, by="holdout_cutoff")
     return computed.cutoff
+
+
+def holdout_share(services: Services) -> HoldoutShare | None:
+    """The share of her reply blocks at or after the stored cut-off now (a pure read).
+
+    ``None`` before the cut-off was first needed.  The blocks are the ones of the cut-off itself
+    (:func:`_reply_block_starts`), so the numbers agree with what it was computed from.
+    """
+    stored = get_holdout(services)
+    if stored is None:
+        return None
+    starts = _reply_block_starts(services)
+    edge = stored.cutoff.timestamp()
+    held = sum(1 for start in starts if start >= edge)
+    return HoldoutShare(stored.cutoff, services.settings.retrieval.holdout_ratio, len(starts), held)
+
+
+def drift_warning(share: HoldoutShare) -> str | None:
+    """The sentence about a cut-off that has fallen behind the data; ``None`` while it has not."""
+    if not share.drifted:
+        return None
+    return (
+        f"留出集已占她回复块的 {share.share:.0%}（{share.held_out_blocks:,} / {share.blocks:,}；"
+        f"配置的留出比例 {share.ratio:.0%}，"
+        f"切分点 {share.cutoff:%Y-%m-%d %H:%M} UTC 不会自动移动）："
+        "切分点之后导入的聊天都在留出集里，既不进检索库也不进训练集，重训也学不到它们。"
+        "先运行 `twin retrieval resplit` 把切分点移到现在数据的最新部分"
+        "（之前的评估结果与之后不可比）"
+    )
 
 
 def resplit_holdout(services: Services, *, by: str = "user") -> ResplitResult:

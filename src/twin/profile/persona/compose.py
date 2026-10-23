@@ -72,6 +72,12 @@ def pre_holdout_manual(live_text: str | None) -> str:
     return manual_block(manual_style_lines(split_card(live_text)), None)
 
 
+def description_lines(card: CardText) -> list[str]:
+    """The statements of ``[自动-描述]``; empty until a description was generated (stats only)."""
+    parts = split_subsections(card.body(AUTO))
+    return [line for lines in parts.values() for line in content_lines(lines)]
+
+
 def correction_lines(card: CardText) -> list[str]:
     """The corrections written in ``[不要这样]`` (round 11), as plain lines."""
     return content_lines(card.body(DONT).splitlines())

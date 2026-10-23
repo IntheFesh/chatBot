@@ -48,6 +48,7 @@ from twin.learning.pairs import PreferencePairStore, dpo_hint
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.profile.holdout import drift_warning, holdout_share
 from twin.services import Services, get_cli_context
 from twin.training import bundle_crypto
 from twin.training.bundle import BundleError, build_bundle, verify_bundle
@@ -350,6 +351,18 @@ async def _export_in_foreground(services: Services) -> None:
         typer.echo(f"the export did not finish: {'; '.join(summary.failures) or 'see the log'}")
 
 
+def _warn_about_the_holdout(services: Services) -> None:
+    """Say so when the stored hold-out cut-off has fallen behind the data (R18-C3, D-818).
+
+    The training set only takes the samples before the cut-off, which never moves by itself:
+    without a re-split, a new export (and a retraining) would not see what was imported since.
+    """
+    share = holdout_share(services)
+    warning = drift_warning(share) if share is not None else None
+    if warning is not None:
+        typer.echo(f"warning: {warning}")
+
+
 @train_app.command("export")
 @command(CommandKind.HEAVY)
 def export_command(
@@ -365,6 +378,13 @@ def export_command(
     foreground: Annotated[
         bool, typer.Option("--foreground", help="Run here when the application is stopped")
     ] = False,
+    allow_incomplete: Annotated[
+        bool,
+        typer.Option(
+            "--allow-incomplete",
+            help="Export although the memory replay or the persona description is missing",
+        ),
+    ] = False,
 ) -> None:
     """Export the training set from her real reply blocks (queued as a job, resumable)."""
     services = get_cli_context().services()
@@ -372,10 +392,11 @@ def export_command(
     if start and end and end < start:
         raise CliError("--to is before --from", ExitCode.USAGE)
     since, until = local_range(services, start, end)
-    request = ExportRequest(since, until, out, tokenizer)
+    request = ExportRequest(since, until, out, tokenizer, allow_incomplete=allow_incomplete)
     queued = queue_export(services, request)
     verb = "an export is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id})")
+    _warn_about_the_holdout(services)
     if not foreground:
         typer.echo("the running application executes it; see `twin train export-status`")
         return
@@ -461,6 +482,7 @@ def retrain_check_command() -> None:
     typer.echo(status.describe())
     if status.suggested:
         typer.echo("export the data again with `twin train export`, then train from the base model")
+    _warn_about_the_holdout(services)
     pairs = PreferencePairStore(services.db, services.clock).count()
     typer.echo(f"preference pairs: {pairs}")
     hint = dpo_hint(pairs, services.settings.training.dpo_min_pairs)

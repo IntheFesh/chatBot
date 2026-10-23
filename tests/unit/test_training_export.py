@@ -26,8 +26,9 @@ from tests.support.export_world import (
     PAST_MARKER,
     World,
     build_world,
+    past_card,
 )
-from tests.support.memory import add_fact
+from tests.support.memory import add_fact, mark_days_replayed
 from tests.support.synth_chat import MessageWriter
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.engine.style_prompt import (
@@ -43,6 +44,7 @@ from twin.llm.redaction import ConsistentRedactor
 from twin.memory.asof import AsOfSource
 from twin.profile.api import load_profile
 from twin.profile.holdout import holdout_cutoff
+from twin.profile.persona import compose
 from twin.retrieval.windows import window_id_of
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
@@ -326,7 +328,6 @@ def test_the_card_the_profile_and_the_routine_are_the_pre_holdout_ones(
 def test_the_export_needs_the_pre_holdout_derivatives(
     services: Services, embedder: HashingBackend, tmp_path: Path
 ) -> None:
-    from tests.support.export_world import past_card
     from tests.support.synth_chat import ChatSpec, build_chat
     from twin.profile.builder import rebuild
     from twin.profile.persona.store import PersonaStore
@@ -339,7 +340,55 @@ def test_the_export_needs_the_pre_holdout_derivatives(
     with pytest.raises(ExportError, match="profile or routine"):
         TrainingSetExporter(services, TOKENIZER)
     rebuild(services, "all")
+    mark_days_replayed(services)
     TrainingSetExporter(services, TOKENIZER)  # now it can start
+
+
+def test_r18_f7_the_export_needs_the_memory_replay_and_the_persona_description(
+    world: World, tmp_path: Path
+) -> None:
+    """R18-F7 (D-817): RUNBOOK §6.1 promises that the export names what is missing - the replay
+    of the memory over the export range and the description part of the pre-holdout card were not
+    checked at all (a card with statistics rules only counted as a card).  Both now stop the export
+    with the command to run; ``allow_incomplete`` (``--allow-incomplete``) exports anyway and the
+    statistics of the dataset record what was missing."""
+    from twin.memory.localdate import MemoryClock
+    from twin.memory.replay import count_message_days
+    from twin.storage.memory_models import MemoryReplayDay
+
+    services = world.services
+    days = sorted(count_message_days(services, MemoryClock.from_services(services)))
+    with services.db.transaction() as session:
+        for row in session.scalars(select(MemoryReplayDay)).all():
+            if row.local_date in (days[0], days[-1]):
+                session.delete(row)
+    with pytest.raises(ExportError, match="twin memory replay start") as caught:
+        TrainingSetExporter(services, TOKENIZER)
+    message = str(caught.value)
+    assert "2 days" in message and str(days[0]) in message and str(days[-1]) in message
+    assert "--allow-incomplete" in message
+    # a range that leaves out the two days needs no more than its own days
+    clock = MemoryClock.from_services(services)
+    since = clock.real_bounds(days[1])[0]
+    until = clock.real_bounds(days[-2])[1]
+    TrainingSetExporter(services, TOKENIZER, ExportOptions(since=since, until=until))
+    mark_days_replayed(services, {days[0], days[-1]})
+    TrainingSetExporter(services, TOKENIZER)  # everything replayed: it starts
+    stats_only = compose.stats_block(["几乎不用逗号"]) + compose.empty_auto_block()
+    world.store.add_version("pre_holdout", stats_only + compose.manual_block([], None), reason="x")
+    with pytest.raises(ExportError, match="twin persona regenerate --scope pre_holdout"):
+        TrainingSetExporter(services, TOKENIZER)
+    result = run_export(services, tmp_path / "ds", allow_incomplete=True)
+    assert result.dataset is not None
+    assert result.dataset.meta.stats["derived_data"] == {
+        "complete": False,
+        "memory_days_not_replayed": 0,
+        "persona_description": False,
+    }
+    world.store.add_version("pre_holdout", past_card(), reason="generate")
+    complete = run_export(services, tmp_path / "ds2")
+    assert complete.dataset is not None
+    assert complete.dataset.meta.stats["derived_data"]["complete"] is True
 
 
 # --------------------------------------------------------------------- no future leakage
@@ -438,6 +487,7 @@ def add_pii(world: World) -> None:
     for number, (sent, text) in enumerate(lines):
         writer.add(day + timedelta(seconds=40 * number), not sent, "text", text)
     writer.store(append=True)
+    mark_days_replayed(world.services)  # the replay covers the new day as well (R18-F7)
 
 
 def test_the_same_person_is_the_same_placeholder_everywhere_and_nothing_is_left(
@@ -548,6 +598,7 @@ def long_segment(world: World, day: datetime, *, turn_chars: int, turns: int, re
         moment += timedelta(minutes=2)
     writer.add(moment, True, "text", reply)
     writer.store(append=True)
+    mark_days_replayed(world.services)  # the replay covers the new day as well (R18-F7)
 
 
 def sample_with(dataset: DatasetDir, marker: str) -> dict[str, Any] | None:

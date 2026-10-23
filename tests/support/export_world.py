@@ -16,7 +16,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from tests.support.embedding import HashingBackend
-from tests.support.memory import add_fact, make_memory
+from tests.support.memory import add_fact, make_memory, mark_days_replayed
 from tests.support.synth_chat import ChatSpec, build_chat
 from twin.memory.memory import Memory
 from twin.profile.builder import rebuild
@@ -102,6 +102,7 @@ def build_world(
             if catalog.get(f"{number:032x}") is not None:
                 catalog.set_manual(f"{number:032x}", [label])
     quote_some(services)
+    mark_days_replayed(services)  # the export checks that the replay covers its range (R18-F7)
     return World(services, memory, store, holdout_cutoff(services))
 
 
