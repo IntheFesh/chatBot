@@ -19,7 +19,12 @@ a model:
   what the bot made up (R-MEM-011); the same holds for life line entries, which are bot
   inventions: the ones a higher source contradicts are marked invalid;
 * **same** with an equal or higher existing fact adds nothing: the evidence and the earliest
-  known time are merged into the existing fact.
+  known time are merged into the existing fact - but only into one known no later than the new
+  fact, or one in exactly the same words (D-780).  When only facts known *later* say it in other
+  words (a replay that meets the earlier, vaguer day last), merging would show their words before
+  they were said (iron rule 13), so the new fact is stored on its own, already replaced by them;
+* a fact stored as already replaced is replaced by the replacement that became known first, so
+  it stops being current at the earliest moment something better was known (D-780).
 """
 
 from __future__ import annotations
@@ -106,16 +111,23 @@ def decide(new: FactDraft, recall: Recall, relations: Mapping[str, str]) -> Deci
         counts[relation] = counts.get(relation, 0) + 1
     same = [c for c in recall.facts if relations.get(c.key) == "same"]
     changed = [c for c in recall.facts if relations.get(c.key) in ("update", "conflict")]
-    if same:
-        best = max(same, key=_rank)
-        if best.fact.priority >= priority:
-            return Decision("merge", best.fact.id, relation_counts=counts)
+    covering = [c for c in same if c.fact.priority >= priority]
+    later_same: list[FactCandidate] = []
+    if covering:
+        mergeable = [c for c in covering if _merge_keeps_the_past(new, c.fact)]
+        if mergeable:
+            return Decision("merge", max(mergeable, key=_rank).fact.id, relation_counts=counts)
+        # Only facts known later, in other words, say it (D-780): the new fact is stored on its
+        # own and the earliest of them replaces it from the moment it became known.
+        later_same = covering
+    else:
         changed = [*changed, *same]  # the new fact is the better source of the same thing
     vetoers = [c for c in changed if c.fact.priority > priority]
     if vetoers:
         return Decision("reject", max(vetoers, key=_rank).fact.id, relation_counts=counts)
     newer = [c for c in changed if c.fact.priority == priority and c.fact.known_at > new.known_at]
     replaced = tuple(c.fact.id for c in changed if c not in newer)
+    replacers = [*newer, *later_same]
     invalid: tuple[str, ...] = ()
     if priority > SOURCE_PRIORITY["bot_invented"]:
         invalid = tuple(c.event.id for c in recall.events if relations.get(c.key) == "conflict")
@@ -123,10 +135,26 @@ def decide(new: FactDraft, recall: Recall, relations: Mapping[str, str]) -> Deci
         "insert",
         None,
         replaced,
-        max(newer, key=_rank).fact.id if newer else None,
+        min(replacers, key=_first_known).fact.id if replacers else None,
         invalid,
         counts,
     )
+
+
+def _merge_keeps_the_past(new: FactDraft, old: FactRecord) -> bool:
+    """True if merging ``new`` into ``old`` shows nothing before it was known (D-780).
+
+    A merge keeps the old fact's words and lowers its known time to the earlier of the two.  That
+    is only right when the old fact was known no later than the new one, or says exactly the same
+    words: a replay that meets an earlier, vaguer statement after a later, more specific one
+    ("下个月要考雅思" after "3月15日下午考雅思口语") must not move the later words back in time.
+    """
+    return old.known_at <= new.known_at or normalised(old.text) == normalised(new.text)
+
+
+def _first_known(candidate: FactCandidate) -> tuple[float, int]:
+    """The replacement that became known first (the higher source among simultaneous ones)."""
+    return candidate.fact.known_at.timestamp(), -candidate.fact.priority
 
 
 def _rank(candidate: FactCandidate) -> tuple[int, float]:

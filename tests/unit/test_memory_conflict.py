@@ -97,6 +97,68 @@ def test_the_best_of_several_equal_facts_is_the_one_merged_into() -> None:
     assert (decision.action, decision.target_id) == ("merge", "F-c2")
 
 
+@pytest.mark.parametrize(
+    ("old_source", "new_source"),
+    [
+        ("real_record", "real_record"),
+        ("real_record", "user_said"),
+        ("user_said", "bot_invented"),
+        ("user_command", "real_record"),
+    ],
+)
+def test_the_same_thing_said_earlier_in_other_words_is_stored_as_replaced_by_the_later_one(
+    old_source: str, new_source: str
+) -> None:
+    """R18-C1 (D-780, iron rule 13): a replay that meets the earlier, vaguer wording last.
+
+    Merging would move the later wording back to the earlier time; instead the earlier draft is a
+    fact of its own that the later one replaces from the moment it became known.
+    """
+    recall = Recall((candidate("c1", source=old_source, known_at=NEW, text="她3月15日考雅思"),))
+    draft = fact_draft("她下个月要考雅思", source=new_source, known_at=OLD)
+    decision = decide(draft, recall, {"c1": "same"})
+    assert (decision.action, decision.target_id) == ("insert", None)
+    assert (decision.supersede, decision.superseded_by) == ((), "F-c1")
+
+
+def test_an_exact_repeat_said_earlier_is_still_merged() -> None:
+    """R18-C1 (D-780): the very same words were known at the earlier time, nothing moves back."""
+    recall = Recall((candidate("c1", known_at=NEW, text="她喜欢吃火锅！"),))
+    decision = decide(fact_draft("她 喜欢吃火锅", known_at=OLD), recall, {"c1": "same"})
+    assert (decision.action, decision.target_id) == ("merge", "F-c1")
+
+
+def test_an_earlier_same_fact_is_merged_into_rather_than_a_later_one() -> None:
+    """R18-C1 (D-780): of two facts that say the same, one known before the draft can take it."""
+    recall = Recall(
+        (
+            candidate("c1", known_at=utc(2026, 3, 20), text="她3月25日考雅思"),
+            candidate("c2", known_at=utc(2026, 2, 1), text="她在准备考雅思"),
+        )
+    )
+    draft = fact_draft("她下个月要考雅思", known_at=utc(2026, 3, 5))
+    decision = decide(draft, recall, {"c1": "same", "c2": "same"})
+    assert (decision.action, decision.target_id) == ("merge", "F-c2")
+
+
+def test_the_earliest_of_several_later_facts_ends_the_earlier_one() -> None:
+    """R18-C1 (D-780): the draft stops being current when the first replacement became known."""
+    recall = Recall(
+        (
+            candidate("c1", known_at=utc(2026, 3, 20), text="她3月25日考雅思"),
+            candidate("c2", known_at=utc(2026, 3, 8), text="她3月中旬考雅思"),
+            candidate("c3", known_at=utc(2026, 3, 1), text="她的雅思报名了"),
+        )
+    )
+    draft = fact_draft("她下个月要考雅思", known_at=utc(2026, 3, 5))
+    decision = decide(draft, recall, {"c1": "same", "c2": "update", "c3": "update"})
+    assert (decision.action, decision.supersede, decision.superseded_by) == (
+        "insert",
+        ("F-c3",),
+        "F-c2",
+    )
+
+
 @pytest.mark.parametrize("relation", ["update", "conflict"])
 @pytest.mark.parametrize(
     ("old_source", "new_source"),

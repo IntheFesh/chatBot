@@ -24,6 +24,7 @@ from twin.llm.types import DAILY
 from twin.memory.conflict import JUDGE_BATCH
 from twin.memory.extract import Extraction, FollowupDraft, LifelineDraft
 from twin.memory.memory import Memory
+from twin.memory.view import MemoryView
 from twin.memory.writer import MemoryWriter, merge_drafts
 from twin.services import Services
 from twin.storage.vector_schema import VectorKind
@@ -101,6 +102,49 @@ async def test_an_exact_repeat_is_merged_into_the_fact_that_says_it_without_aski
     assert merged.known_at == utc(2026, 3, 1)  # the earliest time it could be known
     assert merged.importance == 5 and merged.evidence == {"kind": "messages", "ids": ["m5", "m1"]}
     assert len(current_texts(env.memory)) == 1
+
+
+async def test_an_earlier_vaguer_statement_does_not_move_the_later_wording_into_the_past(
+    env: Env,
+) -> None:
+    """R18-C1 (D-780, iron rule 13): the replay meets the later, more specific day first.
+
+    The model calls the earlier, vaguer statement "same" (it adds nothing new); merging it into the
+    stored fact used to lower that fact's known time, so the exam date - only said on 10 March -
+    was in the memory of 1 March.
+    """
+    late = add_fact(
+        env.memory,
+        "她3月15日下午考雅思口语",
+        utc(2026, 3, 10, 21),
+        evidence={"kind": "messages", "ids": ["m-day3"]},
+    )
+    env.model.relate("下个月要考雅思", "3月15日", "same")
+    report = await env.writer.write_facts(
+        [
+            fact_draft(
+                "她下个月要考雅思",
+                category="plan",
+                known_at=utc(2026, 2, 20, 21),
+                evidence_refs=("m-day1",),
+            )
+        ],
+        DAILY,
+    )
+    assert (report.merged, report.facts_added, report.judge_calls) == (0, 1, 1)
+    kept = env.memory.store.fact(late.id)
+    assert kept is not None and kept.current
+    assert kept.known_at == utc(2026, 3, 10, 21)  # untouched
+    assert kept.evidence == {"kind": "messages", "ids": ["m-day3"]}
+    (early_id,) = report.inserted
+    early = env.memory.store.fact(early_id)
+    assert early is not None and early.superseded_by == late.id
+    assert (early.superseded_at, early.valid_to) == (utc(2026, 3, 10, 21), utc(2026, 3, 10, 21))
+    between = [f.text for f in MemoryView(env.memory, utc(2026, 3, 1)).facts()]
+    after = [f.text for f in MemoryView(env.memory, utc(2026, 3, 11)).facts()]
+    assert between == ["她下个月要考雅思"]
+    assert after == ["她3月15日下午考雅思口语"]
+    assert current_texts(env.memory) == ["她3月15日下午考雅思口语"]
 
 
 async def test_facts_that_say_the_same_in_one_extraction_become_one() -> None:
