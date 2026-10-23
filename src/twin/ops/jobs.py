@@ -60,6 +60,9 @@ if TYPE_CHECKING:
 log = get_logger("twin.jobs")
 
 DEFAULT_PRIORITY = 100
+# how long a stopping worker lets running jobs finish before it cancels and releases them (no
+# attempt is counted); part of the shutdown budget of ``twin.app`` (D-801)
+WORKER_DRAIN_S = 20.0
 MAX_ERROR_CHARS = 500  # of ``jobs.last_error``: the type, its facts and the stack
 MAX_ERROR_DETAIL_CHARS = 2000  # of ``jobs.last_error_detail``: the sealed, redacted message
 
@@ -669,9 +672,11 @@ class Worker:
         backoff_cap_s: float = 3600.0,
         jitter_ratio: float = 0.0,
         rng: random.Random | None = None,
+        drain_s: float = WORKER_DRAIN_S,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be at least 1")
+        self._drain_s = drain_s
         self._queue = queue
         self._registry = registry
         self._clock = clock
@@ -852,12 +857,21 @@ class Worker:
             stop_waiter.cancel()
             await self.drain()
 
-    async def drain(self, timeout_s: float = 30.0) -> None:
-        """Wait for running jobs; cancel (and release) those that outlast ``timeout_s``."""
+    async def drain(self, timeout_s: float | None = None) -> None:
+        """Wait for running jobs; cancel (and release) those that outlast ``timeout_s``.
+
+        The default is the worker's ``drain_s`` (:data:`WORKER_DRAIN_S`).  A drain that is itself
+        cancelled - the application's shutdown budget ran out - cancels the jobs as well, so each
+        is released without an attempt instead of running on behind the stop.
+        """
         if not self._running:
             return
-        _, pending = await asyncio.wait(set(self._running), timeout=timeout_s)
-        for task in pending:
-            task.cancel()
+        tasks = set(self._running)
+        try:
+            await asyncio.wait(tasks, timeout=self._drain_s if timeout_s is None else timeout_s)
+        finally:
+            pending = [task for task in tasks if not task.done()]
+            for task in pending:
+                task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)

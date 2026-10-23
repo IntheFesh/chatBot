@@ -14,7 +14,14 @@ from twin.app import Application, ComponentHealth, HealthStatus, TaskSupervisor
 from twin.clock import Clock
 from twin.llm.runtime import activate_offpeak_policy
 from twin.ops.alerts import AlertSink
-from twin.ops.jobs import HandlerRegistry, JobQueue, Worker, default_registry, load_handlers
+from twin.ops.jobs import (
+    WORKER_DRAIN_S,
+    HandlerRegistry,
+    JobQueue,
+    Worker,
+    default_registry,
+    load_handlers,
+)
 from twin.ops.logging import get_logger
 from twin.ops.state_watch import StateWatcher
 from twin.services import Services
@@ -25,7 +32,10 @@ log = get_logger("twin.components")
 
 HEARTBEAT_KEY = "heartbeat"
 HEARTBEAT_INTERVAL_S = 30.0
-WORKER_DRAIN_GRACE_S = 35.0
+# the worker's drain plus the moment it takes to release what it cancelled; at most the
+# application's COMPONENT_STOP_TIMEOUT_S, or every stop with a long job ended in
+# "component_stop_failed" (it was 35 s against 30 s before round 18, D-801)
+WORKER_DRAIN_GRACE_S = WORKER_DRAIN_S + 2.0
 
 
 class StateWatcherComponent:
@@ -117,17 +127,25 @@ class JobWorkerComponent:
     name = "job_worker"
     depends_on: Sequence[str] = ()
 
-    def __init__(self, worker: Worker, clock: Clock, alerts: AlertSink | None) -> None:
+    def __init__(
+        self,
+        worker: Worker,
+        clock: Clock,
+        alerts: AlertSink | None,
+        *,
+        grace_s: float = WORKER_DRAIN_GRACE_S,
+    ) -> None:
         self.worker = worker
         self._stop_event = asyncio.Event()
         self._supervisor = TaskSupervisor(self.name, clock, alerts)
+        self._grace_s = grace_s
 
     async def start(self) -> None:
         self._supervisor.spawn("worker", lambda: self.worker.run_forever(self._stop_event))
 
     async def stop(self) -> None:
         self._stop_event.set()
-        await self._supervisor.stop(grace_s=WORKER_DRAIN_GRACE_S)
+        await self._supervisor.stop(grace_s=self._grace_s)
 
     def health(self) -> ComponentHealth:
         return self._supervisor.health()

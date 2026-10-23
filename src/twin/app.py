@@ -12,6 +12,12 @@ R-ARCH-001 / R-ARCH-004 / R-OPS-002:
 * :class:`ShutdownSignals` turns Ctrl+C / SIGTERM (POSIX) and console control
   events - Ctrl+C, Ctrl+Break, window close, logoff, shutdown (Windows) - into one
   stop event, and on Windows holds the close event open until shutdown finished.
+
+The stop has a budget (round 18, D-801): each component gets at most
+:data:`COMPONENT_STOP_TIMEOUT_S`, which is at least the longest wait any component has of its own
+(the job worker's drain); all of them together get :data:`SHUTDOWN_BUDGET_S`, below the 40 s after
+which ``twin supervise`` kills ``twin run`` (``ops.supervise.stop_grace_s``).  When the budget is
+spent the components still to stop get :data:`CUT_SHORT_S` each to cancel what they run.
 """
 
 from __future__ import annotations
@@ -41,6 +47,14 @@ from twin.ops.winapi import (
 )
 
 log = get_logger("twin.app")
+
+# The shutdown budget (D-801; constants, not settings).  The waits for work in flight - the engine's
+# bubble on its way (``engine.machine.STOP_GRACE_S``, 10 s) and the job worker's drain
+# (``ops.components.WORKER_DRAIN_GRACE_S``, 22 s) - fit in the budget together; the other stops
+# take moments unless something hangs, and then the budget cuts them short.
+COMPONENT_STOP_TIMEOUT_S = 25.0  # one component's stop, at most
+SHUTDOWN_BUDGET_S = 34.0  # every component's stop, at most (ops.supervise.stop_grace_s is 40)
+CUT_SHORT_S = 0.5  # a component still to stop once the budget is spent: time to cancel
 
 
 class HealthStatus(StrEnum):
@@ -212,14 +226,20 @@ class TaskSupervisor:
         return worst
 
     async def stop(self, grace_s: float = 0.0) -> None:
-        """Stop all tasks: wait up to ``grace_s`` for them to finish, then cancel."""
+        """Stop all tasks: wait up to ``grace_s`` for them to finish, then cancel.
+
+        A stop that is itself cancelled (the application's budget ran out) still cancels the
+        tasks: nothing of the component keeps running behind it.
+        """
         self._stopping = True
         tasks = [state.task for state in self._states.values() if state.task is not None]
-        if grace_s > 0 and tasks:
-            await asyncio.wait(tasks, timeout=grace_s)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+        try:
+            if grace_s > 0 and tasks:
+                await asyncio.wait(tasks, timeout=grace_s)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -229,10 +249,16 @@ class TaskSupervisor:
 class Application:
     """Owns the components and their start/stop order."""
 
-    def __init__(self, *, stop_timeout_s: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        stop_timeout_s: float = COMPONENT_STOP_TIMEOUT_S,
+        stop_budget_s: float = SHUTDOWN_BUDGET_S,
+    ) -> None:
         self._components: dict[str, Component] = {}
         self._started: list[Component] = []
         self._stop_timeout_s = stop_timeout_s
+        self._stop_budget_s = stop_budget_s
 
     def register(self, component: Component) -> None:
         if component.name in self._components:
@@ -282,11 +308,26 @@ class Application:
             log.info("component_started", component=component.name)
 
     async def stop(self) -> None:
-        """Stop started components in reverse order; failures are logged, not raised."""
+        """Stop started components in reverse order; failures are logged, not raised.
+
+        Each component may take ``stop_timeout_s``, all of them ``stop_budget_s`` (see the module
+        text); a component that only got what was left of the budget and needed more is "cut
+        short" (a warning), one that outlasted its own full timeout has failed (an error).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._stop_budget_s
         while self._started:
             component = self._started.pop()
+            timeout = min(self._stop_timeout_s, max(deadline - loop.time(), CUT_SHORT_S))
             try:
-                await asyncio.wait_for(component.stop(), timeout=self._stop_timeout_s)
+                await asyncio.wait_for(component.stop(), timeout=timeout)
+            except TimeoutError:
+                if timeout < self._stop_timeout_s:
+                    log.warning(
+                        "component_stop_cut_short", component=component.name, after_s=timeout
+                    )
+                else:
+                    log.exception("component_stop_failed", component=component.name)
             except Exception:
                 log.exception("component_stop_failed", component=component.name)
             else:
