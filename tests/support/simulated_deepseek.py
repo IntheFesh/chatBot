@@ -33,6 +33,9 @@ class SimulatedDeepSeek:
     cache_works: bool = True
     unauthorized: bool = False
     out_of_balance_after: int | None = None
+    # the first ``interrupted_first`` answers stop half-way with this finish reason (D-796)
+    interrupted_first: int = 0
+    interrupt_reason: str = "insufficient_system_resource"
     requests: list[dict[str, Any]] = field(default_factory=list)
     _seen: set[str] = field(default_factory=set)
 
@@ -90,11 +93,13 @@ class SimulatedDeepSeek:
             reasoning = "Work it out step by step."
         elif not thinking and self.reasoning_when_not_thinking:
             reasoning = "stray reasoning"
+        cut_off = len(self.requests) <= self.interrupted_first
         return ok(
-            content=text,
+            content=text[: max(1, len(text) // 2)] if cut_off else text,
             reasoning=reasoning,
             prompt=prompt,
             hit=hit,
-            completion_tokens=12,
+            completion_tokens=6 if cut_off else 12,
             reasoning_tokens=8 if reasoning else 0,
+            finish=self.interrupt_reason if cut_off else "stop",
         )

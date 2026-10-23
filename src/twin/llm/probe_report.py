@@ -50,6 +50,7 @@ def _documentation_section() -> str:
 | 看图限制 | 仅 user 消息；JPEG/PNG/GIF/WebP 按文件头识别；`detail` 取 low/high/original/auto；每张图最多 {official.MAX_IMAGE_TOKENS} token；单图 32 MiB，请求体 48 MiB，每边 {official.MAX_IMAGE_SIDE_PX} px（15 张以上 {official.MAX_IMAGE_SIDE_PX_MANY} px），每次最多 {official.MAX_IMAGES_PER_REQUEST} 张 | 超限时用 Pillow 本地缩放；system/assistant 消息里放图直接抛异常 |
 | JSON 输出 | `response_format={{"type": "json_object"}}`；提示词里要有 "json"；要设置 `max_tokens`；偶尔返回空内容 | 自动补充指令；空内容当作无效并重试一次 |
 | 错误码 | 400/422 请求有误，401 鉴权，402 余额不足，429 限速，500/503 服务端 | 429/5xx/超时/连接错误重试；其余不重试，401/402/403 立即告警 |
+| 结束原因（2026-10-23 核对） | `finish_reason` 取 {"/".join(official.FINISH_REASONS)}；`insufficient_system_resource`（推理资源不足而中断）与 `aborted`（生成被中断）随 HTTP 200 返回已写出的半截内容 | 这两种照常记账，然后按可重试失败像 503 一样重试；重试用尽抛 `RetriesExhaustedError`，半截内容不交给任何调用方（D-796） |
 """
 
 

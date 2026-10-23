@@ -13,7 +13,10 @@ Every call to DeepSeek goes through :class:`DeepSeekClient`.  What happens to a 
    left out when thinking because the API ignores them (a warning is logged once);
 4. the call is retried on 429, 5xx, connection errors and timeouts with exponential backoff and
    jitter, limited by a semaphore, and guarded by a circuit breaker (R-LLM-005); 400/401/402/
-   403/422 are not retried and 401/402/403 raise an alert at once;
+   403/422 are not retried and 401/402/403 raise an alert at once.  A reply whose
+   ``finish_reason`` says the service cut the generation off (``insufficient_system_resource``,
+   ``aborted``) is booked like any paid call and then retried the same way: its text is a
+   fragment, and after the last attempt :class:`RetriesExhaustedError` is raised (D-796);
 5. usage (cache hit and miss tokens, completion tokens) becomes a cost via the price table and
    the peak calendar and is written to ``cost_ledger`` (R-LLM-006); the token estimator learns
    from the real prompt size (R-LLM-012); the cache monitor sees the hit rate (R-LLM-010).
@@ -66,6 +69,7 @@ from twin.llm.images import (
 from twin.llm.layout import CacheMonitor, PromptLayout
 from twin.llm.ledger import LedgerRecord, LedgerStore
 from twin.llm.official import (
+    INTERRUPTED_FINISHES,
     MANY_IMAGES_THRESHOLD,
     MAX_IMAGES_PER_REQUEST,
     MAX_TOTAL_IMAGE_BYTES,
@@ -115,6 +119,18 @@ Schema = type[BaseModel] | Mapping[str, Any]
 
 
 # ------------------------------------------------------------------ request building
+
+
+def interrupted_finish(response: Any) -> str | None:
+    """The ``finish_reason`` of a generation the service cut off, or ``None``.
+
+    ``insufficient_system_resource`` and ``aborted`` come with HTTP 200 and the part of the text
+    that was written so far (:data:`~twin.llm.official.INTERRUPTED_FINISHES`): half a sentence
+    must not be sent to the user or stored as a picture's description (D-796).
+    """
+    choices = getattr(response, "choices", None) or []
+    reason = getattr(choices[0], "finish_reason", None) if choices else None
+    return reason if reason in INTERRUPTED_FINISHES else None
 
 
 def normalize_messages(messages: Sequence[Mapping[str, Any]]) -> list[ChatMessage]:
@@ -764,10 +780,17 @@ class DeepSeekClient:
                     self._retry.delay(attempts, self._rng, failure.retry_after_s)
                 )
                 continue
-            self._breaker.record_success()
-            self._note_attempt(True)
             latency_ms = max(0, round((self._clock.monotonic() - started) * 1000))
-            return await self._finish(
+            cut_off = interrupted_finish(response)
+            if cut_off is None:
+                self._breaker.record_success()
+                self._note_attempt(True)
+            else:
+                # the service stopped the generation half-way (D-796): the call is paid for and
+                # booked, but its text is a fragment - nobody gets it; try again like a 503
+                self._breaker.record_failure()
+                self._note_attempt(False)
+            result = await self._finish(
                 response=response,
                 purpose=purpose,
                 model=model,
@@ -780,6 +803,21 @@ class DeepSeekClient:
                 layout=layout,
                 image_count=image_count,
             )
+            if cut_off is None:
+                return result
+            log.warning(
+                "llm_attempt_failed",
+                purpose=purpose.value,
+                attempt=attempts,
+                kind="interrupted",
+                finish_reason=cut_off,
+            )
+            if attempts > self._retry.max_retries:
+                raise RetriesExhaustedError(
+                    f"DeepSeek interrupted the generation {attempts} times ({cut_off})",
+                    attempts=attempts,
+                )
+            await self._clock.sleep(self._retry.delay(attempts, self._rng))
 
     def _note_attempt(self, ok: bool) -> None:
         """Tell the health record how an attempt ended (R-OPS-003)."""

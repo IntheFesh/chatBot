@@ -1376,3 +1376,102 @@ def test_list_content_with_text_parts_is_normalised() -> None:
         {"type": "text", "text": "a"},
         {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
     ]
+
+
+# ----------------------------------------- R18-D2: a generation the service cut off (D-796)
+
+CUT_OFF = ["insufficient_system_resource", "aborted"]
+
+
+@pytest.mark.parametrize("reason", CUT_OFF)
+async def test_a_generation_the_service_cut_off_is_paid_for_and_asked_again(
+    db: Database, clock: ManualClock, api: respx.MockRouter, reason: str
+) -> None:
+    """R18-D2: HTTP 200 with half a sentence is not a reply.
+
+    Before: ``chat`` returned "我今天去" as the content; the engine sent it, the caption job
+    stored it.  Now the call is booked (it was paid for) and asked again like a 503.
+    """
+    health = LlmHealth(clock)
+    rig = Rig(db, clock, health=health)
+    route = mock(
+        api,
+        ok(content="我今天去", finish=reason, request_id="cut"),
+        ok(content="我今天去公园散步了", request_id="whole"),
+    )
+    result = await rig.drive(rig.client.chat([user("今天干嘛了")], purpose="reply"))
+    assert result.content == "我今天去公园散步了" and result.finish_reason == "stop"
+    assert result.attempts == 2 and route.call_count == 2 and len(rig.clock.sleeps) == 1
+    assert [row["request_id"] for row in rig.rows()] == ["cut", "whole"]  # both were paid for
+    snapshot = health.snapshot(900)
+    assert (snapshot.calls, snapshot.failures) == (2, 1)
+
+
+@pytest.mark.parametrize("reason", CUT_OFF)
+async def test_a_generation_that_is_always_cut_off_raises_and_hands_out_no_fragment(
+    db: Database, clock: ManualClock, api: respx.MockRouter, reason: str
+) -> None:
+    """R18-D2: after the last attempt the error is the retryable kind the engine falls back on
+    (R-ENG-010); the fragment is never returned to anyone."""
+    rig = Rig(db, clock, failure_threshold=50)
+    route = mock(api, *[ok(content="我今天去", finish=reason) for _ in range(5)])
+    with pytest.raises(RetriesExhaustedError) as info:
+        await rig.drive(rig.client.chat([user("今天干嘛了")], purpose="reply"))
+    assert info.value.retryable and info.value.attempts == 5 and reason in str(info.value)
+    assert "我今天去" not in str(info.value)
+    assert route.call_count == 5 and len(rig.rows()) == 5
+
+
+async def test_cut_off_generations_count_towards_the_circuit_breaker(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R18-D2: an overloaded service that keeps stopping half-way is an outage like a 503."""
+    rig = Rig(db, clock, retry=RetryPolicy(max_retries=0), failure_threshold=2)
+    mock(api, *[ok(content="半", finish="insufficient_system_resource") for _ in range(2)])
+    for _ in range(2):
+        with pytest.raises(RetriesExhaustedError):
+            await rig.client.chat([user("x")], purpose="reply")
+    assert rig.breaker.state is BreakerState.OPEN
+
+
+async def test_json_output_that_was_cut_off_is_asked_again_before_it_is_parsed(
+    rig: Rig, api: respx.MockRouter
+) -> None:
+    """R18-D2: a cut-off JSON reply is not "invalid JSON" to be sent back as the model's mistake."""
+
+    class City(BaseModel):
+        city: str
+
+    route = mock(
+        api,
+        ok(content='{"city": "Par', finish="insufficient_system_resource"),
+        ok(content='{"city": "Paris"}'),
+    )
+    result = await rig.drive(rig.client.chat_json([user("json city")], City, purpose="extract"))
+    assert result.value.city == "Paris" and route.call_count == 2
+    second = request_json(route.calls[1].request)
+    assert second["messages"] == request_json(route.calls[0].request)["messages"]
+
+
+async def test_the_simulated_service_can_cut_a_generation_off(
+    rig: Rig, api: respx.MockRouter
+) -> None:
+    """R18-D2: the stand-in of the documented API produces the documented cut-off as well."""
+    from tests.support.simulated_deepseek import SimulatedDeepSeek
+
+    service = SimulatedDeepSeek(interrupted_first=1, interrupt_reason="aborted")
+    api.post(API).mock(side_effect=service)
+    result = await rig.drive(rig.client.chat([user("x")], purpose="reply"))
+    assert result.content == "391" and result.attempts == 2 and len(service.requests) == 2
+
+
+def test_only_the_two_cut_off_reasons_are_treated_as_interrupted() -> None:
+    from twin.llm.deepseek import interrupted_finish
+    from twin.llm.official import FINISH_REASONS, INTERRUPTED_FINISHES
+
+    assert {"insufficient_system_resource", "aborted"} == INTERRUPTED_FINISHES
+    assert set(FINISH_REASONS) >= INTERRUPTED_FINISHES
+    for reason in FINISH_REASONS:
+        response = SimpleNamespace(choices=[SimpleNamespace(finish_reason=reason)])
+        assert interrupted_finish(response) == (reason if reason in INTERRUPTED_FINISHES else None)
+    assert interrupted_finish(SimpleNamespace(choices=[])) is None

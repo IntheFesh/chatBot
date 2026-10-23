@@ -37,6 +37,10 @@ What the pages say, as used by this package:
 * Errors: 400 and 422 invalid request, 401 authentication, 402 insufficient balance, 429 rate
   limit, 500 server error, 503 overloaded.  The server holds the connection open (empty lines)
   while a request waits and closes it after 10 minutes without inference.
+* ``finish_reason`` (create-chat-completion, checked 2026-10-23): ``stop``, ``length``,
+  ``content_filter``, ``tool_calls``, ``insufficient_system_resource`` ("the request is
+  interrupted due to insufficient resource of the inference system") and ``aborted`` ("the
+  generation was interrupted").  The last two arrive with HTTP 200 and a partial ``content``.
 """
 
 from __future__ import annotations
@@ -54,6 +58,7 @@ DOC_PAGES = MappingProxyType(
         "json_output": "https://api-docs.deepseek.com/guides/json_mode",
         "error_codes": "https://api-docs.deepseek.com/quick_start/error_codes",
         "rate_limit": "https://api-docs.deepseek.com/quick_start/rate_limit",
+        "create_chat_completion": "https://api-docs.deepseek.com/api/create-chat-completion",
     }
 )
 
@@ -87,6 +92,16 @@ PEAK_HOURS_UTC = ((1, 4), (6, 10))
 BEIJING_UTC_OFFSET_HOURS = 8
 
 REASONING_EFFORTS = ("low", "high", "max")
+FINISH_REASONS = (
+    "stop",
+    "length",
+    "content_filter",
+    "tool_calls",
+    "insufficient_system_resource",
+    "aborted",
+)
+# the generation was cut off by the service, not finished: the content is a fragment (D-796)
+INTERRUPTED_FINISHES = frozenset({"insufficient_system_resource", "aborted"})
 DETAIL_VALUES = ("low", "high", "original", "auto")
 IMAGE_FORMATS = ("image/jpeg", "image/png", "image/gif", "image/webp")
 MAX_IMAGE_TOKENS = 1024

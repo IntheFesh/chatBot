@@ -14,6 +14,7 @@ import httpx
 import pytest
 import respx
 
+from tests.support.clock import ManualClock
 from tests.support.deepseek import API, TEST_KEY, error, ok
 from tests.support.reply_view import StaticDataView, StaticSelector, make_profile, sticker_record
 from twin.engine.backend import BackendRequest, BackendResult
@@ -284,6 +285,35 @@ async def test_a_failing_call_is_a_fallback_signal_not_an_exception(
     bad_request = route_of(api, error(400, "invalid parameter"))
     assert (await pipeline.run(context(), view())).fallback_reason == "backend_error"
     assert bad_request.call_count == 1
+
+
+@pytest.mark.parametrize("reason", ["insufficient_system_resource", "aborted"])
+async def test_a_reply_the_service_cut_off_never_becomes_a_bubble(
+    api: respx.MockRouter, pipeline: ReplyPipeline, clock: ManualClock, reason: str
+) -> None:
+    """R18-D2 (D-796): DeepSeek answered 200 with half a sentence.
+
+    Before: "我今天去" became the bubble the user got.  Now the client asks again and, when the
+    service keeps stopping half-way, the backend fails like any other and the engine falls back
+    (R-ENG-010) - the fragment never reaches the sender.
+    """
+    route = route_of(api, *[ok(content="我今天去", finish=reason) for _ in range(5)])
+    task = asyncio.ensure_future(pipeline.run(context(), view()))
+    for _ in range(500):  # the retries pause on the manual clock
+        if task.done():
+            break
+        await asyncio.wait({task}, timeout=0.01)
+        if not task.done():
+            await clock.advance(10)
+    draft = await task
+    assert route.call_count == 5
+    assert draft.needs_fallback and draft.fallback_reason == "backend_error"
+    assert draft.bubbles == () and "我今天去" not in json.dumps(
+        [a.detail for a in draft.actions], ensure_ascii=False
+    )
+    assert [a.detail for a in draft.actions if a.step == "backend_error"] == [
+        "RetriesExhaustedError"
+    ]
 
 
 async def test_a_missing_key_is_a_fallback_signal_too(
