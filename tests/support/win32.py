@@ -4,14 +4,31 @@ from __future__ import annotations
 
 import threading
 
-from twin.ops.winapi import ERROR_ALREADY_EXISTS, WM_CLOSE, CtrlHandler, WindowHandler
+from twin.clock import Clock
+from twin.ops.winapi import (
+    ERROR_ALREADY_EXISTS,
+    UNBIASED_TICKS_PER_S,
+    WM_CLOSE,
+    CtrlHandler,
+    WindowHandler,
+)
 
 
 class FakeWin32:
     """Simulates named mutexes (shared through ``registry``), execution state and console."""
 
-    def __init__(self, registry: dict[str, int] | None = None, *, state_ok: bool = True) -> None:
+    def __init__(
+        self,
+        registry: dict[str, int] | None = None,
+        *,
+        state_ok: bool = True,
+        clock: Clock | None = None,
+    ) -> None:
         self.registry: dict[str, int] = registry if registry is not None else {}
+        # the unbiased interrupt time: the clock's monotonic seconds minus the time the simulated
+        # machine slept (``suspended_s``); without a clock it stands still unless a test moves it
+        self.clock = clock
+        self.suspended_s = 0.0
         self._handles: dict[int, str] = {}
         self._next_handle = 100
         self.state_ok = state_ok
@@ -114,6 +131,13 @@ class FakeWin32:
 
     def process_started_at(self, pid: int) -> float | None:
         return self.processes.get(pid)
+
+    # -- time ---------------------------------------------------------------------
+
+    def unbiased_interrupt_time(self) -> int:
+        """Like ``QueryUnbiasedInterruptTime``: 100 ns steps that do not count a sleep."""
+        running = self.clock.monotonic() if self.clock is not None else 0.0
+        return round((running - self.suspended_s) * UNBIASED_TICKS_PER_S)
 
     def wait_for_window(self, timeout: float = 5.0) -> bool:
         return self._window_ready.wait(timeout)

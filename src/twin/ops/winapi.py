@@ -40,6 +40,7 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 STILL_ACTIVE = 259  # the exit code GetExitCodeProcess reports for a process that has not ended
 ERROR_ACCESS_DENIED = 5
 FILETIME_UNIX_EPOCH = 116444736000000000  # 1970-01-01 in 100 ns steps since 1601-01-01
+UNBIASED_TICKS_PER_S = 10_000_000  # QueryUnbiasedInterruptTime counts in 100 ns steps
 
 CtrlHandler = Callable[[int], bool]
 WindowHandler = Callable[[int, int, int], bool]
@@ -122,6 +123,15 @@ class Win32(Protocol):
 
     def process_started_at(self, pid: int) -> float | None:
         """When process ``pid`` was created (epoch seconds); ``None`` if it cannot be read."""
+        ...
+
+    def unbiased_interrupt_time(self) -> int:
+        """``QueryUnbiasedInterruptTime``: 100 ns steps since boot, **not** counting sleep.
+
+        Python 3.12's ``time.monotonic()`` on Windows is ``GetTickCount64``, which runs on while
+        the machine sleeps or hibernates; this one stops, which is what a check for "the machine
+        slept" needs (R-SCH-005, D-797).
+        """
         ...
 
 
@@ -228,6 +238,8 @@ if sys.platform == "win32":  # pragma: win32-only
             self._k32.GetProcessTimes.restype = wintypes.BOOL
             self._k32.GetCurrentProcess.argtypes = []
             self._k32.GetCurrentProcess.restype = wintypes.HANDLE
+            self._k32.QueryUnbiasedInterruptTime.argtypes = [ctypes.POINTER(ctypes.c_ulonglong)]
+            self._k32.QueryUnbiasedInterruptTime.restype = wintypes.BOOL
             self._callbacks: dict[object, object] = {}  # keep ctypes callbacks alive
             self._u32: ctypes.WinDLL | None = None
             self._wndproc_type: Any = None
@@ -440,6 +452,12 @@ if sys.platform == "win32":  # pragma: win32-only
                 return (ticks - FILETIME_UNIX_EPOCH) / 10_000_000
             finally:
                 self._k32.CloseHandle(handle)
+
+        def unbiased_interrupt_time(self) -> int:
+            ticks = ctypes.c_ulonglong()
+            if not self._k32.QueryUnbiasedInterruptTime(ctypes.byref(ticks)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return int(ticks.value)
 
     def load_win32() -> Win32:
         """The real Win32 binding."""

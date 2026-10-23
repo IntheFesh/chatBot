@@ -13,11 +13,15 @@ calls one handler:
     Windows calls are written against :class:`~twin.ops.winapi.Win32`.
 
 A clock jump (all platforms)
-    every ``schedule.power_tick_s`` seconds the difference between the wall clock and the
-    monotonic clock is compared with the previous tick.  While the machine sleeps the wall clock
-    goes on and the monotonic clock does not, so the difference grows by the time it slept; a
-    change of more than ``schedule.power_jump_ticks`` ticks counts as a suspend that went by.
-    The same check notices a wall clock that was set by hand.
+    every ``schedule.power_tick_s`` seconds the difference between the wall clock and a clock
+    that stops while the machine sleeps is compared with the previous tick.  While the machine
+    sleeps the wall clock goes on and the other does not, so the difference grows by the time it
+    slept; a change of more than ``schedule.power_jump_ticks`` ticks counts as a suspend that
+    went by.  The same check notices a wall clock that was set by hand.  The clock that stops is
+    ``Clock.monotonic()`` on Linux and macOS, and on Windows the unbiased interrupt time
+    (:meth:`~twin.ops.winapi.Win32.unbiased_interrupt_time`): there ``time.monotonic()`` of
+    Python 3.12 is ``GetTickCount64``, which counts the sleep, so the difference would never
+    move (round 18, D-797).
 
 Both paths end in :meth:`PowerEventMonitor.resumed`; two reports of one wake-up (the window message
 and the next tick) are one event.
@@ -41,6 +45,7 @@ from twin.ops.winapi import (
     PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND,
     PBT_APMSUSPEND,
+    UNBIASED_TICKS_PER_S,
     WM_POWERBROADCAST,
     Win32,
     load_win32,
@@ -146,11 +151,17 @@ class PowerEventMonitor:
                 )
         return True
 
+    def awake_seconds(self) -> float:
+        """Seconds of a clock that does not run while the machine sleeps (see the module text)."""
+        if self._platform == "win32" and self._win32 is not None:
+            return self._win32.unbiased_interrupt_time() / UNBIASED_TICKS_PER_S
+        return self._clock.monotonic()
+
     async def _watch(self) -> None:
-        wall, mono = self._clock.now_utc(), self._clock.monotonic()
+        wall, mono = self._clock.now_utc(), self.awake_seconds()
         while True:
             await self._clock.sleep(self._tick_s)
-            now_wall, now_mono = self._clock.now_utc(), self._clock.monotonic()
+            now_wall, now_mono = self._clock.now_utc(), self.awake_seconds()
             drift = clock_drift(wall, now_wall, mono, now_mono)
             wall, mono = now_wall, now_mono
             if abs(drift) > self.threshold_s:
@@ -237,6 +248,7 @@ class PowerEventMonitor:
         if self._platform == "win32" and self._window_error:
             return ComponentHealth(
                 HealthStatus.DEGRADED,
-                f"wake-up messages are not received ({self._window_error}); using the clock check",
+                f"wake-up messages are not received ({self._window_error}); using the clock check "
+                "(wall clock against the unbiased interrupt time, which stops during sleep)",
             )
         return supervised

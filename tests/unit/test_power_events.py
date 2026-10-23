@@ -179,8 +179,25 @@ async def test_the_user_waking_the_machine_by_hand_is_the_same_wake_up(clock: Ma
         await monitor.stop()
 
 
+def windows_sleep(clock: ManualClock, fake: FakeWin32, seconds: float) -> None:
+    """The machine slept the way Windows sleeps for Python 3.12.
+
+    The wall clock ran on, and so did ``time.monotonic()`` - on Windows it is ``GetTickCount64``,
+    which counts a sleep (Python 3.13 moved to ``QueryPerformanceCounter``; the project is on 3.12).
+    Only the unbiased interrupt time stood still.
+    """
+    clock.tick(seconds)
+    fake.suspended_s += seconds
+
+
 async def test_a_window_that_cannot_be_made_falls_back_to_the_clock(clock: ManualClock) -> None:
-    fake = FakeWin32()
+    """R18-D3 (D-797): the fallback really works on Windows.
+
+    Before, the check compared the wall clock with ``time.monotonic()``; on Windows both run on
+    through a sleep, the difference never moved, and with the window gone a wake-up went
+    unnoticed - while ``health()`` said "using the clock check".
+    """
+    fake = FakeWin32(clock=clock)
     fake.window_fails = True
     heard = Heard()
     monitor = await started(clock, heard, platform="win32", win32=fake)
@@ -188,12 +205,54 @@ async def test_a_window_that_cannot_be_made_falls_back_to_the_clock(clock: Manua
         assert monitor.window_handle is None
         health = monitor.health()
         assert health.status is HealthStatus.DEGRADED and "clock" in health.detail
+        assert "sleep" in health.detail  # the check that is used counts no sleep
         await wait_until(lambda: clock.pending_sleepers >= 1)
-        clock.jump_wall(7200)
+        windows_sleep(clock, fake, 7200)
         await clock.advance(TICK)
         await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].source == "clock_jump"
+        assert heard.events[0].gap_s == pytest.approx(7200, abs=1)
     finally:
         await monitor.stop()
+
+
+async def test_on_windows_the_clock_check_reads_the_unbiased_interrupt_time(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 (D-797): two hours asleep, the unbiased time stands still, the wake-up is seen.
+
+    An ordinary tick (everything moves by the tick) and a wall clock set by hand (only the wall
+    clock moves) behave as before.
+    """
+    fake = FakeWin32(clock=clock)
+    heard = Heard()
+    monitor = await started(clock, heard, platform="win32", win32=fake)
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        await clock.advance(TICK)  # an ordinary tick
+        assert heard.events == []
+        windows_sleep(clock, fake, 2 * 3600)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].gap_s == pytest.approx(2 * 3600, abs=1)
+        await clock.advance(120)  # past the de-duplication window
+        clock.jump_wall(3600)  # set by hand: the wall clock alone
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 2)
+    finally:
+        await monitor.stop()
+
+
+@pytest.mark.windows
+def test_the_real_unbiased_interrupt_time_counts_up_in_100_ns_steps() -> None:
+    """R18-D3: ``QueryUnbiasedInterruptTime`` through the real binding (Windows CI)."""
+    from twin.ops.winapi import load_win32
+
+    win32 = load_win32()
+    first = win32.unbiased_interrupt_time()
+    readings = [win32.unbiased_interrupt_time() for _ in range(1000)]
+    assert isinstance(first, int) and first > 0
+    assert readings == sorted(readings) and readings[0] >= first
 
 
 async def test_a_failing_wake_up_flow_is_logged_and_raised_as_an_alert(
@@ -240,6 +299,9 @@ async def test_a_real_hidden_window_receives_a_broadcast_message(clock: ManualCl
         assert answer == 1  # TRUE: the message was dealt with
         await wait_until(lambda: len(heard.events) == 1)
         assert heard.events[0].source == "wm_powerbroadcast"
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        await clock.advance(TICK)  # the clock check reads the real unbiased interrupt time
+        assert len(heard.events) == 1 and monitor.health().status is HealthStatus.OK
     finally:
         await monitor.stop()
     assert monitor.window_handle is None
