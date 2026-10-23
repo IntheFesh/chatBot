@@ -35,8 +35,8 @@ from twin.config.secrets import (
 )
 from twin.config.settings import Settings
 from twin.ingest.conversations import MANY_FOUND, MANY_HINT, count_conversations_in_file
-from twin.llm.official import VISION_MODELS
-from twin.llm.pricing import PeakCalendar
+from twin.llm.official import can_read_images
+from twin.llm.pricing import PeakCalendar, Pricing
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
 from twin.ops.power import describe_power_strategy
 from twin.ops.taskscheduler import (
@@ -424,17 +424,18 @@ def check_llm_config(ctx: DoctorContext) -> CheckResult:
     if ctx.settings is None:
         return CheckResult("llm-config", CheckStatus.WARN, "skipped (configuration did not load)")
     config = ctx.settings.deepseek
-    prices = ctx.settings.pricing_usd_per_mtok
+    # the client's own answers (rule 8, D-802): its price table with the retired aliases, and the
+    # one function that says whether a model can see
+    pricing = Pricing.from_settings(ctx.settings)
     problems: list[str] = []
     for role, model in (
         ("chat_model", config.chat_model),
         ("offline_model", config.offline_model),
         ("vision_model", config.vision_model),
     ):
-        canonical = {"deepseek-v4-flash": "deepseek-flash"}.get(model, model)
-        if canonical not in prices:
+        if not pricing.has_model(model):
             problems.append(f"deepseek.{role} {model!r} has no entry in pricing_usd_per_mtok")
-    if config.vision_model not in VISION_MODELS and config.vision_model != "deepseek-v4-flash":
+    if not can_read_images(config.vision_model):
         problems.append(f"deepseek.vision_model {config.vision_model!r} cannot read images")
     if problems:
         return CheckResult(

@@ -73,6 +73,20 @@ LEGACY_MODEL_ALIASES = MappingProxyType(
 )
 VISION_MODELS = frozenset({FLASH_MODEL})
 
+
+def canonical_model(model: str) -> str:
+    """The name a model is billed and judged by: retired aliases are ``deepseek-flash``."""
+    return LEGACY_MODEL_ALIASES.get(model, model)
+
+
+def can_read_images(model: str) -> bool:
+    """Whether ``model`` (or the model an alias stands for) accepts images.
+
+    The one answer the client, its start-up check and ``twin doctor`` all use (D-802).
+    """
+    return canonical_model(model) in VISION_MODELS
+
+
 # USD per million tokens at peak hours; off-peak is OFFPEAK_RATIO times these.
 PEAK_PRICES_USD_PER_MTOK = MappingProxyType(
     {

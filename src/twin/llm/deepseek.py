@@ -75,6 +75,7 @@ from twin.llm.official import (
     MAX_TOTAL_IMAGE_BYTES,
     REASONING_EFFORTS,
     VISION_MODELS,
+    can_read_images,
 )
 from twin.llm.onetime import BatchGuard
 from twin.llm.pricing import Pricing
@@ -382,8 +383,8 @@ class DeepSeekClient:
         self._warned: set[str] = set()
         self._alerted_at: dict[str, float] = {}
         self._unsaved_samples = 0
-        if self._pricing.has_model(config.vision_model) and (
-            self._pricing.resolve(config.vision_model) not in VISION_MODELS
+        if self._pricing.has_model(config.vision_model) and not can_read_images(
+            config.vision_model
         ):
             raise LlmConfigError(
                 f"deepseek.vision_model {config.vision_model!r} cannot read images; "
@@ -655,7 +656,7 @@ class DeepSeekClient:
 
         chosen = model or self.model_for(requested, has_images=total_images > 0)
         self._pricing.price_for(chosen)  # refuse early if the cost could not be computed
-        if total_images and self._pricing.resolve(chosen) not in VISION_MODELS:
+        if total_images and not can_read_images(chosen):
             raise LlmConfigError(f"model {chosen!r} cannot read images")
 
         if use_json:

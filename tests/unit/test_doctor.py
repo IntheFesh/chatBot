@@ -18,7 +18,7 @@ from tests.support.network import OfflineTransport
 from tests.support.ops import ScriptedRunner, healthy_machine_runner
 from twin.config.loader import load_settings
 from twin.config.secrets import BackendInfo, SecretStore
-from twin.llm.pricing import PeakCalendar
+from twin.llm.pricing import PeakCalendar, Pricing
 from twin.ops.doctor import CheckResult, CheckStatus, DoctorContext, exit_code, run_checks
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.storage import migrate
@@ -366,6 +366,32 @@ def test_llm_config_check_validates_models_prices_and_vision(tmp_path: Path) -> 
     assert doctor.check_llm_config(context(tmp_path, settings=legacy)).status is CheckStatus.OK
     skipped = DoctorContext(settings=None, settings_error="broken")
     assert doctor.check_llm_config(skipped).status is CheckStatus.WARN
+
+
+@pytest.mark.parametrize("role", ["chat_model", "offline_model", "vision_model"])
+@pytest.mark.parametrize("model", ["deepseek-v4-flash", "deepseek-v4-flash-vision-exp"])
+def test_llm_config_check_accepts_every_retired_name_the_client_accepts(
+    tmp_path: Path, role: str, model: str
+) -> None:
+    """R18-D9 (D-802): the doctor asks the client's own alias table and vision set (rule 8).
+
+    Before: the doctor had a table of its own with only ``deepseek-v4-flash`` in it and failed a
+    configuration with ``deepseek-v4-flash-vision-exp`` that the client runs with.
+    """
+    settings = load_settings(None, {"deepseek": {role: model}})
+    result = doctor.check_llm_config(context(tmp_path, settings=settings))
+    assert result.status is CheckStatus.OK, result.detail
+    from twin.llm.official import can_read_images  # the one place both read
+
+    assert Pricing.from_settings(settings).has_model(model) and can_read_images(model)
+
+
+def test_llm_config_check_still_fails_a_model_nobody_knows(tmp_path: Path) -> None:
+    """R18-D9: a truly unknown name is still a failure, whatever role it has."""
+    for role in ("chat_model", "offline_model", "vision_model"):
+        settings = load_settings(None, {"deepseek": {role: "deepseek-v9-imaginary"}})
+        result = doctor.check_llm_config(context(tmp_path, settings=settings))
+        assert result.status is CheckStatus.FAIL and "deepseek-v9-imaginary" in result.detail
 
 
 def test_deepseek_key_check_reports_presence_and_store_failures(tmp_path: Path) -> None:
