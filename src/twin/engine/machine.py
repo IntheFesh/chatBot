@@ -57,8 +57,9 @@ afresh (the messages that piled up in the channel while the process was away joi
 new one when it has passed - never a reply the moment the machine wakes; ``GENERATING`` goes to
 ``DECIDING`` for a fresh draw; ``SENDING`` goes on with the bubbles that were not out, or, if the
 user wrote meanwhile, continues like an interruption - but the rest of a reply that is partly out
-is dropped when she is in deep sleep now or its last bubble is more than ``STALE_REST_S`` ago
-(D-753).
+is dropped when she is in deep sleep now or its last bubble is more than ``STALE_REST_S`` ago,
+and a reply none of whose bubbles is out yet is decided again (queued to her waking) when she is
+in deep sleep now (D-753).
 
 A step of the driver that fails is tried again after a few seconds (alert ``engine_error``); after
 five failures in a row the round is given up: one short answer of hers goes out first, once per
@@ -1540,7 +1541,9 @@ class ConversationEngine:
             await self._interrupted(snap, data, outgoing)
             return
         if outgoing.reply_id is None and (
-            await self._active_pause() is not None or await self._probe_running()
+            await self._active_pause() is not None
+            or await self._probe_running()
+            or await self._asleep_before_first(data)
         ):
             await self._draft_back_to_deciding()
             return
@@ -1605,6 +1608,26 @@ class ConversationEngine:
             state=STATE_DECIDING,
             planned_send_at=None,
         )
+
+    async def _asleep_before_first(self, data: RoundData) -> bool:
+        """Is she in deep sleep now, with nothing of a reply out that was not queued to her
+        waking?  (The re-judgement of D-722 for a reply that is made already, D-753.)
+
+        After a long stop the reply that was ready may meet her deep sleep: it is decided again
+        from now (queued to her waking) instead of being sent at night.  As in :meth:`_rejudge`
+        (whose memory of the moved time it shares), a reply that is queued to her waking, or
+        whose time was moved once already, is not moved again: no loop.
+        """
+        decision = data.decision
+        if decision is not None and (decision.woke_up or decision.send_at == self._rejudged_for):
+            return False
+        state = await asyncio.to_thread(self._decider.her_state, self._clock.now_utc())
+        if state is None or state.kind != "deep_sleep":
+            return False
+        if decision is not None:
+            self._rejudged_for = decision.send_at
+        log.info("reply_decided_again_asleep", her_state=state.kind, made=True)
+        return True
 
     async def _stale_rest(self, snap: ConversationSnapshot) -> str | None:
         """Is the rest of a reply that is partly out too late to send? (D-753)

@@ -251,3 +251,31 @@ async def test_r18_b4_a_short_stop_while_she_is_awake_still_sends_the_rest(
         assert all(step["step"] != "send_dropped_stale" for step in steps(second))
     finally:
         await second.engine.stop()
+
+
+async def test_r18_b4_a_reply_with_nothing_out_waits_for_her_waking_after_a_downtime(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-B4 (the item-32 re-judgement for a reply that is made but has nothing out yet).
+
+    The reply was ready (SENDING, its first bubble not yet typed) when the process stopped; it
+    comes back ten hours later inside her deep sleep.  Before: both bubbles went out at once, at
+    night.  Now the reply is decided again from that moment, like a reply that a plan change
+    put into her sleep (D-722): queued to her waking, and made anew then ("you just woke up").
+    """
+    day = sleepy_day()
+    rig = build_harness(services, clock, day=day)
+    await rig.engine.start()
+    rig.writer.add(make_draft("一", "二"))
+    await rig.message("数数")
+    await run_to_idle(rig.engine, clock, until=lambda: rig.engine.snapshot().state == "SENDING")
+    second = await restart(rig, clock_jump_s=10 * 3600)
+    try:
+        second.writer.add(make_draft("刚醒", "怎么啦"))
+        await run_to_idle(second.engine, clock)
+        sent = [(o.text, o.at) for o in second.channel.out if o.kind == "text"]
+        assert [text for text, _ in sent] == ["刚醒", "怎么啦"]
+        assert all(day.her_state(at).kind == "free" for _, at in sent)
+        assert second.writer.calls == 1 and second.writer.contexts[0].woke_up
+    finally:
+        await second.engine.stop()
