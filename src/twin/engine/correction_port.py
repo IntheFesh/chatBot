@@ -1,13 +1,16 @@
 """The engine's view of the service for corrections in plain words (R-LRN-002).
 
 A correction in plain words ("她不会这么说", "你说话不像她") is not a command, so the command port
-never sees it.  The engine asks this port at two places:
+never sees it.  The engine asks this port at three places:
 
 ``propose(answered)``
     after a reply to the messages ``answered`` is out, the service looks at what the user wrote
     and, when it was a correction of the reply before, returns the system message that asks
     whether to record it ("回复‘是’确认"), or ``None``.  The persona has already answered
     normally by then - the question comes after, never instead;
+``withdraw(asked_since)``
+    the system message that carried the question was not delivered (the channel refused it or
+    could not send it): the question is closed, so that the user's next "是" is chat (D-755);
 ``is_confirmation(text, at)`` / ``confirm(context)``
     a message of the user that is the "yes" to a question that is still open (within the window,
     and no further reply of the persona since) is taken by the service: the engine marks it
@@ -39,4 +42,8 @@ class CorrectionPort(Protocol):
 
     async def propose(self, answered: Sequence[str]) -> str | None:
         """The question to ask after a reply to the rows ``answered`` (``None``: nothing to ask)."""
+        ...
+
+    async def withdraw(self, asked_since: datetime) -> None:
+        """Close the question asked at or after ``asked_since``: it never reached the user."""
         ...

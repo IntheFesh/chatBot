@@ -14,9 +14,13 @@ from collections.abc import AsyncIterator
 from datetime import timedelta
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
+from sqlalchemy import select
 
 from tests.support.clock import ManualClock
 from tests.support.engine_harness import (
+    START,
     Harness,
     ScriptedCrisis,
     build_harness,
@@ -26,10 +30,14 @@ from tests.support.engine_harness import (
     waiting_for,
 )
 from tests.support.waiting import wait_until
+from twin.commands.parse import parse_command
+from twin.commands.registry import CommandCall, CommandRegistry, CommandSpec
+from twin.commands.router import CommandRouter
 from twin.engine.command_port import CommandContext, CommandOutcome
 from twin.engine.machine import PROBE_RECHECK_S
 from twin.engine.roundstate import RoundData
 from twin.services import Services
+from twin.storage.engine_models import BotTurn
 
 
 class Probe:
@@ -49,6 +57,9 @@ class RecordingCommands:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+
+    def recognises(self, text: str) -> bool:
+        return parse_command(text) is not None  # the strict reading: no table here
 
     async def handle(self, text: str, context: CommandContext) -> CommandOutcome | None:
         self.calls.append(text)
@@ -237,3 +248,100 @@ async def test_without_a_probe_source_the_engine_holds_nothing(
         assert harness.channel.texts == ["好的"]
     finally:
         await harness.engine.stop()
+
+
+# ------------------------------------------------- R18-B7 (D-754): chat that looks like a command
+
+
+def router_with_status(ran: list[str]) -> CommandRouter:
+    """The real router (its parser and table), with ``/状态`` the one command it knows."""
+
+    async def status(call: CommandCall) -> str:
+        ran.append(call.name)
+        return "一切正常"
+
+    registry = CommandRegistry()
+    registry.register(
+        CommandSpec("状态", "基本", "状态", "/状态", "/状态", status, aliases=("status",))
+    )
+    return CommandRouter(registry)
+
+
+def inbound_rows(harness: Harness) -> dict[str, bool]:
+    with harness.services.db.session() as session:
+        rows = session.scalars(select(BotTurn).where(BotTurn.direction == "in"))
+        return {row.text: row.is_command for row in rows}
+
+
+async def test_r18_b7_chat_that_starts_with_a_slash_waits_in_the_round_during_a_probe(
+    services: Services, clock: ManualClock, probe: Probe
+) -> None:
+    """R18-B7: before, every message that began with a slash was stored as a command and dropped
+    while a probe ran - WeChat's "/::)" and "/ 吃饭" were never answered.  Now the router's own
+    reading (the one ``handle`` uses) decides: chat waits in the round, a command is held."""
+    ran: list[str] = []
+    harness = build_harness(services, clock, probe_active=probe, commands=router_with_status(ran))
+    await harness.engine.start()
+    try:
+        await harness.message("/状态")  # a command: stored, not run, not made up later (D-686)
+        await harness.message("/::)")  # WeChat's old emoticon: chat
+        await harness.message("/ 吃饭")  # a slash and a space before an unknown word: chat
+        await held(harness)
+        rows = inbound_rows(harness)
+        assert rows == {"/状态": True, "/::)": False, "/ 吃饭": False}
+        assert len(harness.engine.snapshot().pending) == 2 and ran == []
+        probe.on = False
+        await harness.engine.on_state_change(1, 2)
+        await run_to_idle(harness.engine, harness.clock)
+        assert harness.channel.texts == ["好的"] and harness.writer.calls == 1
+        assert [item.text for item in harness.writer.contexts[0].inbound] == ["/::)", "/ 吃饭"]
+        assert ran == []  # the command is not run after the probe either
+    finally:
+        await harness.engine.stop()
+
+
+async def test_r18_b7_a_yes_without_an_open_question_is_chat_during_a_probe(
+    services: Services, clock: ManualClock, probe: Probe
+) -> None:
+    """R18-B7: "是" is held only as the answer to an open question; otherwise it is chat."""
+
+    class NoQuestion:
+        async def is_confirmation(self, text: str, at: object) -> bool:
+            return False  # nothing is open
+
+        async def confirm(self, context: CommandContext) -> CommandOutcome | None:
+            raise AssertionError("never asked without an open question")
+
+        async def propose(self, answered: object) -> str | None:
+            return None
+
+        async def withdraw(self, asked_since: object) -> None:
+            return None
+
+    harness = build_harness(services, clock, probe_active=probe)
+    harness.engine.attach_corrections(NoQuestion())
+    await harness.engine.start()
+    try:
+        await harness.message("是")
+        await held(harness)
+        assert inbound_rows(harness) == {"是": False}
+        probe.on = False
+        await harness.engine.on_state_change(1, 2)
+        await run_to_idle(harness.engine, harness.clock)
+        assert harness.channel.texts == ["好的"]
+    finally:
+        await harness.engine.stop()
+
+
+@settings(max_examples=150, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(
+    st.one_of(
+        st.text(alphabet="/／ 　:：，,状态吃饭思考status)-8x", max_size=12),
+        st.sampled_from(["/状态", "／状态", "/ 状态", "/status", "/状态，看看", "/::)", "/ 吃饭"]),
+    )
+)
+async def test_r18_b7_the_probe_time_reading_is_the_reading_of_the_router(text: str) -> None:
+    """R18-B7 (rule 8): ``recognises`` says "command" exactly when ``handle`` answers one."""
+    router = router_with_status([])
+    context = CommandContext(at=START, inbound_id="t")
+    assert router.recognises(text) is ((await router.handle(text, context)) is not None)

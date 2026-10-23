@@ -15,7 +15,9 @@ the model does not confirm, a model that is not reachable, a budget that does no
 question.
 
 *The question* is stored (``learning.correction.pending``: the reply it is about, when it was
-asked and what kind it is), survives a restart, and is replaced by a newer one.  The reply it is
+asked and what kind it is), survives a restart, and is replaced by a newer one; a question whose
+system message the channel did not deliver is withdrawn (:meth:`CorrectionService.withdraw`,
+D-755) - the user never saw it, so his next "是" is chat.  The reply it is
 about is the newest reply of the persona before the user's remark.  *The yes* writes ``feedback``
 (``not_like``) through :class:`~twin.learning.dislike.NotLikeRecorder` - no wording, so no
 preference pair; the reply becomes one of the negative examples of the weekly consolidation
@@ -312,6 +314,23 @@ class CorrectionService:
             raise
         log.info("correction_fact_remembered")
         return CommandOutcome(texts.PREFIX + render_remembered(result))
+
+    async def withdraw(self, asked_since: datetime) -> None:
+        """The question asked at or after ``asked_since`` never reached the user: close it.
+
+        Its system message was refused or could not be sent (D-755).  An older question - one
+        the user did see - is left as it is.
+        """
+
+        def take() -> bool:
+            pending = self.pending()
+            if pending is None or ensure_aware(pending.asked_at) < ensure_aware(asked_since):
+                return False
+            self._store(None)
+            return True
+
+        if await asyncio.to_thread(take):
+            log.info("correction_question_withdrawn")
 
     async def propose(self, answered: Sequence[str]) -> str | None:
         settings = self._services.settings.learning

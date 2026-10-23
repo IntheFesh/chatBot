@@ -79,10 +79,13 @@ A correction in plain words ("她不会这么说") is no command.  The engine ha
 messages to the :class:`~twin.engine.correction_port.CorrectionPort` once the reply to them is out
 (round 11) and sends the question it returns as one more system message; a message of the user
 that is the "yes" to an open question is taken by the same port, answered at once like a command
-and marked ``is_command`` (it is not conversation, memory or learning).
+and marked ``is_command`` (it is not conversation, memory or learning).  A system message is
+written down only when the channel delivered it (or may have, ``AMBIGUOUS``); a question whose
+message was not delivered is withdrawn, so the user's next "是" is chat (D-755).
 
 While a channel probe runs (``probe_active``) the engine says nothing (D-684): the user's messages
-are stored and screened for a crisis, the round waits in COLLECTING, commands are not run, and when
+are stored and screened for a crisis, the round waits in COLLECTING, commands are not run (what
+the router would not take for a command - "/::)", "/ 吃饭" - is chat and waits too, D-754), and when
 the probe ends the round is decided afresh from that moment with the short "just seen" pause.  The
 answer to a crisis is the one exception (it goes out as an urgent send, D-685).
 
@@ -510,6 +513,10 @@ class ConversationEngine:
         if not added.created and not await self._lost(record.id, record.is_command):
             return  # delivered again after a restart: it is queued or answered already
         if (slash or confirming) and await self._probe_running():
+            if slash and not self._recognised(item.text):  # "/::)", "/ 吃饭": chat (D-754)
+                await asyncio.to_thread(self._rounds.set_command, record.id, False)
+                await self._register((record.id,))
+                return
             log.info("command_held_for_probe")  # stored as a command row; not run, not answered
             return
         if confirming and self._corrections is not None:
@@ -519,6 +526,7 @@ class ConversationEngine:
                 return
             await asyncio.to_thread(self._rounds.set_command, record.id, False)
         elif slash and self._commands is not None:
+            began = self._clock.now_utc()  # a question the command asks is asked from here on
             try:
                 outcome = await self._commands.handle(
                     item.text, CommandContext(at=message.at, inbound_id=record.id)
@@ -527,10 +535,15 @@ class ConversationEngine:
                 log.warning("command_failed", error=type(exc).__name__)
                 outcome = CommandOutcome(COMMAND_FAILED_REPLY)
             if outcome is not None:
-                await self._answer_command(outcome)
+                await self._answer_command(outcome, asked_since=began)
                 return
             await asyncio.to_thread(self._rounds.set_command, record.id, False)
         await self._register((record.id,))
+
+    def _recognised(self, text: str) -> bool:
+        """Would the router take ``text`` for a command?  (Its own reading, nothing is run.)"""
+        port = self._commands
+        return port is not None and port.recognises(text)
 
     async def _confirmation(self, text: str, at: datetime, turn_id: str) -> CommandOutcome | None:
         """The "yes" to an open question about a correction (``None``: no answer after all)."""
@@ -548,13 +561,25 @@ class ConversationEngine:
         port = self._corrections
         if port is None or not answered:
             return
+        began = self._clock.now_utc()
         try:
             question = await asyncio.wait_for(port.propose(answered), CORRECTION_TIMEOUT_S)
         except Exception as exc:  # the question is optional: the conversation goes on without it
             log.warning("correction_proposal_failed", error=type(exc).__name__)
             return
-        if question:
-            await self._say_system(question)
+        if question and not await self._say_system(question):
+            await self._withdraw_question(began)
+
+    async def _withdraw_question(self, asked_since: datetime) -> None:
+        """A question asked from ``asked_since`` on never reached the user: it is closed, so that
+        his next "是" is not taken for its answer (D-755)."""
+        port = self._corrections
+        if port is None:
+            return
+        try:
+            await port.withdraw(asked_since)
+        except Exception as exc:  # at worst the question lapses with its window
+            log.warning("correction_withdraw_failed", error=type(exc).__name__)
 
     async def _lost(self, turn_id: str, is_command: bool) -> bool:
         """Is a message that was stored before neither queued nor answered (a crash in between)?"""
@@ -590,23 +615,35 @@ class ConversationEngine:
         self._wake.set()
         self._activity.set()
 
-    async def _answer_command(self, outcome: CommandOutcome) -> None:
-        """A command is answered the moment it arrives, in the system voice (R-CMD-001)."""
-        await self._say_system(outcome.reply)
+    async def _answer_command(
+        self, outcome: CommandOutcome, *, asked_since: datetime | None = None
+    ) -> None:
+        """A command is answered the moment it arrives, in the system voice (R-CMD-001).
+
+        ``asked_since``: when the command began; a question it asked (the fact question of
+        ``/不像 <说法>``, D-674) is withdrawn if the answer that carries it is not delivered.
+        """
+        delivered = await self._say_system(outcome.reply)
+        if not delivered and asked_since is not None:
+            await self._withdraw_question(asked_since)
         if outcome.redo:
             await self._redo()
 
-    async def _say_system(self, text: str) -> None:
-        """One system message, at once, stored as a command row (never memory, never a prompt)."""
+    async def _say_system(self, text: str) -> bool:
+        """One system message, at once, stored as a command row (never memory, never a prompt).
+
+        ``True`` if it was delivered - or may have been (``AMBIGUOUS``: it may be on his phone);
+        only then is it written down (D-755): a message the channel refused or could not send
+        is not "said".
+        """
         try:
             result = await self._channel.send_text(text)
         except ChannelError as exc:
             log.warning("system_message_not_sent", reason=type(exc).__name__)
-            return
-        if not result.ok:
+            return False
+        if not result.ok and result.kind is not OutboundKind.AMBIGUOUS:
             log.warning("system_message_refused", kind=result.kind.value, reason=result.reason)
-            if result.kind in (OutboundKind.WINDOW_REJECTED, OutboundKind.AUTH_EXPIRED):
-                return
+            return False
         at = self._clock.now_utc()
         await asyncio.to_thread(
             self._store.add_bubble,
@@ -614,6 +651,7 @@ class ConversationEngine:
             meta=ReplyMeta("command"),
             is_command=True,
         )
+        return True
 
     async def _redo(self) -> None:
         """``/重来``: write the reply to the previous round again (the old one is thrown away).
