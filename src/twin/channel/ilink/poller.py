@@ -246,7 +246,8 @@ class IlinkPoller:
         batch = BatchCommit(
             new_cursor=new_cursor
             if isinstance(new_cursor, str) and new_cursor and new_cursor != cursor
-            else None
+            else None,
+            login=credentials.fingerprint(),
         )
         if messages:
             await self._collect(messages, credentials, batch)
@@ -272,7 +273,10 @@ class IlinkPoller:
 
     async def _commit_and_wake(self, batch: BatchCommit, has_messages: bool) -> None:
         if has_messages or batch.new_cursor:
-            await asyncio.to_thread(self._store.commit_batch, batch)
+            applied = await asyncio.to_thread(self._store.commit_batch, batch)
+            if applied is False:  # unbound or logged in anew while the poll waited (D-767)
+                log.warning("poll_batch_dropped_login_changed", messages=len(batch.deliver))
+                return
         await asyncio.to_thread(self._store.record_poll_success)
         if batch.deliver and self._on_inbox is not None:
             self._on_inbox()
