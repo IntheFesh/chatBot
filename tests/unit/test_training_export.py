@@ -29,6 +29,7 @@ from tests.support.export_world import (
 )
 from tests.support.memory import add_fact
 from tests.support.synth_chat import MessageWriter
+from tests.support.synthetic import id_card_with_check
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.engine.style_prompt import (
     PROACTIVE_CUE_TEXT,
@@ -532,6 +533,31 @@ def test_r17_9_the_residual_scan_sees_a_number_at_the_end_of_a_sentence(
         "好",
     )
     scan_sample(clean)
+
+
+def _grouped_card() -> str:
+    card = id_card_with_check("11010519491231002")
+    return f"{card[:6]} {card[6:14]} {card[14:]}"
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("我的微信是abc_def12", "wxid"),
+        ("加我vx abc_def12", "wxid"),
+        ("加我微信吧 zhang_san88", "wxid"),
+        ("上海市浦东新区张江路88弄3号501室", "address"),
+        ("成都市武侯区人民南路四段27号", "address"),
+        ("成都市高新区天府大道北段1700号", "address"),
+        (f"手机：{PHONE_A[:3]}.{PHONE_A[3:7]}.{PHONE_A[7:]}", "phone"),
+        (f"身份证 {_grouped_card()}", "id_card"),
+    ],
+)
+def test_r18_a4_the_residual_scan_sees_the_everyday_spellings(text: str, kind: str) -> None:
+    """R18-A4 (D-766): the scan uses the one detector, so these had left the training set too."""
+    sample = export_module.SftSample("w11", "系统", (lf_template.Turn("user", text),), "好")
+    with pytest.raises(ExportError, match=rf"personal data \({kind}\)"):
+        scan_sample(sample)
 
 
 # ----------------------------------------------------------------------- long samples

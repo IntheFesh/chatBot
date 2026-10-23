@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import string
 import threading
 
 import pytest
@@ -35,6 +36,17 @@ from twin.llm.redaction import (
 # ----------------------------------------------------------------- per kind
 
 
+def dotted_mobile() -> str:
+    number = mobile()
+    return f"{number[:3]}.{number[3:7]}.{number[7:]}"
+
+
+def grouped_id_card(separator: str) -> str:
+    """A valid ID number written in groups of 6, 8 and 4 (R18-A4)."""
+    card = id_card_with_check("11010519491231002")
+    return separator.join([card[:6], card[6:14], card[14:]])
+
+
 @pytest.mark.parametrize(
     ("text", "kind"),
     [
@@ -56,6 +68,22 @@ from twin.llm.redaction import (
         (f"群 {chatroom()}", "wxid"),
         ("我的微信号：Abc_12345 欢迎", "wxid"),
         ("wechat: lovely_cat9 hi", "wxid"),
+        # R18-A4 (D-766): the ways people actually write them used to pass untouched
+        ("我的微信是abc_def12", "wxid"),
+        ("我微信 abc_def12", "wxid"),
+        ("加我vx abc_def12", "wxid"),
+        ("加我微信吧 zhang_san88", "wxid"),
+        ("我微信abc_def12，加一下", "wxid"),
+        ("v信：Lucky-cat2024", "wxid"),
+        ("上海市浦东新区张江路88弄3号501室", "address"),
+        ("地址：长宁区愚园路1088弄5号601", "address"),
+        ("成都市武侯区人民南路四段27号", "address"),
+        ("成都市高新区天府大道北段1700号", "address"),
+        ("住在建国路2段16号3楼", "address"),
+        (f"手机：{dotted_mobile()}", "phone"),
+        (f"手机 +86.{dotted_mobile()}。", "phone"),
+        (f"身份证 {grouped_id_card(' ')}", "id_card"),
+        (f"身份证：{grouped_id_card('-')}，帮我填一下", "id_card"),
     ],
 )
 def test_identifiers_are_replaced_by_type_tokens(text: str, kind: str) -> None:
@@ -129,6 +157,27 @@ def test_detailed_addresses_are_replaced(text: str) -> None:
     assert REPLACEMENTS["address"] in result.text
 
 
+def test_r18_a4_lane_and_section_addresses_are_replaced_whole() -> None:
+    """R18-A4 (D-766): ``N弄`` and ``N段`` between the street and the house number, and a room
+    number written straight after ``号``, are part of the address; a year after it is not."""
+    assert redact_text("上海市浦东新区张江路88弄3号501室") == REPLACEMENTS["address"]
+    assert redact_text("地址：长宁区愚园路1088弄5号601") == f"地址：{REPLACEMENTS['address']}"
+    assert redact_text("成都市武侯区人民南路四段27号") == REPLACEMENTS["address"]
+    assert redact_text("成都市高新区天府大道北段1700号到了") == f"{REPLACEMENTS['address']}到了"
+    assert redact_text("建国路88号2026年拆了") == f"{REPLACEMENTS['address']}2026年拆了"
+
+
+def test_r18_a4_the_natural_wechat_id_forms_keep_the_words_around_the_id() -> None:
+    """R18-A4 (D-766): only the id goes; the label and the words around it stay."""
+    assert redact_text("我的微信是abc_def12") == f"我的微信是{REPLACEMENTS['wxid']}"
+    assert redact_text("加我微信吧 zhang_san88 备注一下") == (
+        f"加我微信吧 {REPLACEMENTS['wxid']} 备注一下"
+    )
+    assert redact_text("加我vx abc_def12") == f"加我vx {REPLACEMENTS['wxid']}"
+    # an ASCII label needs a separator: "vxlan123" is a word, not "vx" + an id
+    assert redact_text("开了vxlan12345") == "开了vxlan12345"
+
+
 def test_leading_function_words_are_not_swallowed_by_an_address() -> None:
     assert redact_text("我住在建国路88号") == f"我住在{REPLACEMENTS['address']}"
     assert redact_text("我们明天约在朝阳区建国路88号门口见") == (
@@ -164,6 +213,21 @@ def test_leading_function_words_are_not_swallowed_by_an_address() -> None:
         "2.312-555-0123",
         "你好，世界",
         "",
+        # R18-A4 (D-766): the wider address, WeChat id and phone forms must not catch these
+        "第3段",
+        "5弄堂",
+        "这段路好难走",
+        "微信上说",
+        "我微信 好的",
+        "我微信没电了",
+        "加我微信吧",
+        "微信 hello",
+        "wx 号码给你了",
+        "走到人民南路四段再说",
+        "他住3弄",
+        "第2段第5号",
+        "版本 138.1234.5678.9",
+        "138.12345678",
     ],
 )
 def test_ordinary_text_is_untouched(text: str) -> None:
@@ -362,6 +426,147 @@ def test_every_inserted_identifier_is_replaced_and_everything_else_is_preserved(
 @settings(max_examples=250, deadline=None)
 @given(_clean_text)
 def test_text_without_identifiers_is_never_changed(text: str) -> None:
+    assert redact_text(text) == text
+
+
+# ------------------------------------------- R18-A4: everyday spellings that used to slip through
+
+
+@st.composite
+def _dotted_phones(draw: st.DrawFn) -> str:
+    second = draw(st.integers(min_value=3, max_value=9))
+    rest = draw(st.integers(min_value=0, max_value=999_999_999))
+    digits = f"1{second}{rest:09d}"
+    prefix = draw(st.sampled_from(["", "+86 ", "+86.", "0086 "]))
+    return f"{prefix}{digits[:3]}.{digits[3:7]}.{digits[7:]}"
+
+
+@st.composite
+def _grouped_id_cards(draw: st.DrawFn) -> str:
+    card = draw(_id_cards())
+    if draw(st.booleans()):
+        card = card.lower()
+    separator = draw(st.sampled_from([" ", "-"]))
+    return separator.join([card[:6], card[6:14], card[14:]])
+
+
+@st.composite
+def _lane_addresses(draw: st.DrawFn) -> str:
+    city = draw(st.sampled_from(["上海市", "成都市", "杭州市", ""]))
+    district = draw(st.sampled_from(["浦东新区", "长宁区", "武侯区", "高新区", ""]))
+    street = draw(st.sampled_from(["张江路", "愚园路", "人民南路", "天府大道", "延安西路"]))
+    if draw(st.booleans()):
+        middle = f"{draw(st.integers(min_value=1, max_value=2000))}弄"
+    else:
+        middle = draw(st.sampled_from([*"一二三四五六东南西北中", "1", "2", "12"])) + "段"
+    house = draw(st.integers(min_value=1, max_value=9999))
+    room = draw(st.sampled_from(["", "501室", "3栋2单元501室", "601", " 1203室"]))
+    return f"{city}{district}{street}{middle}{house}号{room}"
+
+
+_R18_PII = st.one_of(
+    st.tuples(st.just("phone"), _dotted_phones()),
+    st.tuples(st.just("id_card"), _grouped_id_cards()),
+    st.tuples(st.just("address"), _lane_addresses()),
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    pieces=st.lists(st.tuples(_clean_text, _separator, _R18_PII), min_size=1, max_size=4),
+    tail=_clean_text,
+)
+def test_r18_a4_dotted_phones_grouped_id_cards_and_lane_addresses_are_replaced(
+    pieces: list[tuple[str, str, tuple[str, str]]], tail: str
+) -> None:
+    """R18-A4 (D-766): ``138.1234.5678``, ``110105 19491231 002X``, ``愚园路1088弄5号``."""
+    source: list[str] = []
+    expected: list[str] = []
+    for clean, separator, (kind, value) in pieces:
+        source.extend([clean, separator, value, separator])
+        expected.extend([clean, separator, REPLACEMENTS[kind], separator])
+    source.append(tail)
+    expected.append(tail)
+    assert redact_text("".join(source)) == "".join(expected)
+
+
+_WECHAT_LABELS = [
+    "我的微信是",
+    "我微信 ",
+    "我微信",
+    "加我微信吧 ",
+    "加我微信，",
+    "微信号：",
+    "微信号是 ",
+    "微信: ",
+    "v信 ",
+    "威信号",
+    "wx号",
+    "vx号：",
+    "加我vx ",
+    "vx: ",
+    "wx：",
+    "wechat ",
+    "WeChat ID: ",
+]
+
+
+@st.composite
+def _wechat_ids(draw: st.DrawFn) -> str:
+    """The shape WeChat allows: a letter, then 5 to 19 letters, digits, ``_`` or ``-``."""
+    first = draw(st.sampled_from(string.ascii_letters))
+    rest = draw(
+        st.text(alphabet=string.ascii_letters + string.digits + "_-", min_size=5, max_size=19)
+    )
+    return first + rest
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    _clean_text,
+    _separator,
+    st.sampled_from(_WECHAT_LABELS),
+    _wechat_ids(),
+    _separator,
+    _clean_text,
+)
+def test_r18_a4_a_wechat_id_after_a_natural_label_is_replaced(
+    before: str, lead: str, label: str, wechat_id: str, trail: str, after: str
+) -> None:
+    """R18-A4 (D-766): ``我微信 abc_def12``, ``加我vx abc_def12``: the label stays, the id goes."""
+    text = f"{before}{lead}{label}{wechat_id}{trail}{after}"
+    assert redact_text(text) == f"{before}{lead}{label}{REPLACEMENTS['wxid']}{trail}{after}"
+
+
+_LOOKALIKES = st.sampled_from(
+    [
+        "第3段",
+        "5弄堂",
+        "这段路",
+        "微信上说",
+        "我微信 好的",
+        "我微信没电了",
+        "加我微信吧",
+        "微信 hello",
+        "人民南路四段",
+        "他住3弄",
+        "第2段第5号",
+        "版本 138.1234.5678.9",
+        "wx 号码",
+        "vxlan12345",
+        "3.14159",
+        "192.168.100.1234",
+    ]
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(st.lists(st.tuples(_clean_text, _LOOKALIKES), max_size=5), _clean_text)
+def test_r18_a4_lookalikes_of_the_wider_forms_are_never_changed(
+    pieces: list[tuple[str, str]], tail: str
+) -> None:
+    """R18-A4 (D-766): the wider patterns leave ordinary words alone (a sentence ends between)."""
+    text = "".join(f"{clean}。{lookalike}。" for clean, lookalike in pieces) + tail
     assert redact_text(text) == text
 
 
