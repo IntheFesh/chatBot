@@ -174,6 +174,88 @@ def test_the_documented_disk_sizes_are_enough_for_every_profile(env_for) -> None
         assert done.returncode == 0, name
 
 
+def write_df_stub(tmp_path: Path, size_bytes: int, available_bytes: int) -> None:
+    """A ``df -Pk`` that reports a data disk of ``size_bytes`` with ``available_bytes`` free."""
+    stub = tmp_path / "stubs" / "df"
+    stub.parent.mkdir(exist_ok=True)
+    size, available = size_bytes // 1024, available_bytes // 1024
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'\n"
+        f"echo '/dev/vdb {size} {size - available} {available} 2% /root/autodl-tmp'\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+# What AutoDL calls a "GB" of the data disk is not documented: decimal or binary, the check must
+# pass on a disk expanded to the number the user is told (R18-E4).
+AUTODL_DISK_UNITS = (10**9, 2**30)
+
+
+@posix_only
+@pytest.mark.parametrize("name", list(PROFILES))
+@pytest.mark.parametrize("unit", AUTODL_DISK_UNITS)
+def test_a_disk_expanded_to_the_size_the_user_is_told_passes_the_check(
+    env_for,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+    name: str,
+    unit: int,
+) -> None:
+    """R18-E4 (D-811): the free space is measured in the unit of the requirement (10^9 bytes).
+
+    ``probe_free_gb`` gave whole GiB, ``required_disk_gb`` is decimal GB, and the size the user
+    was told to expand the disk to (``spec_disk_gb``) was the requirement itself: a fresh disk of
+    exactly that size (98 % of it available) could never pass for the 14B profiles, and with a
+    decimal "GB" not for 8B either.
+    """
+    profile = PROFILES[name]
+    autodl, env = env_for(name)
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(
+        tmp_path, probe_present_gb="echo 0", probe_ram_gb="echo 999"
+    )
+    size = profile.spec_disk_gb * unit
+    write_df_stub(tmp_path, size, int(size * 0.98))
+    done = call_function(autodl, env, "run_resource_checks")
+    assert done.returncode == 0, done.stdout + done.stderr
+
+
+@posix_only
+@pytest.mark.parametrize("name", list(PROFILES))
+def test_a_disk_that_is_short_fails_and_the_message_names_the_unit(
+    env_for,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """R18-E4 (D-811): one decimal GB short of the requirement is short, and the text says so."""
+    profile = PROFILES[name]
+    autodl, env = env_for(name)
+    env["TWIN_PROBE_OVERRIDES"] = write_overrides(
+        tmp_path, probe_present_gb="echo 0", probe_ram_gb="echo 999"
+    )
+    available = (profile.required_disk_gb - 1) * 10**9 + 5 * 10**8
+    write_df_stub(tmp_path, profile.spec_disk_gb * 10**9, available)
+    done = call_function(autodl, env, "run_resource_checks")
+    assert done.returncode == 1
+    assert f"only {profile.required_disk_gb - 1} GB" in done.stderr
+    assert "1 GB = 10^9 bytes" in done.stderr
+    assert f"at least {profile.spec_disk_gb} GB" in done.stderr
+
+
+@posix_only
+def test_the_free_space_and_the_project_size_are_decimal_gigabytes(  # type: ignore[no-untyped-def]
+    env_for, tmp_path: Path
+) -> None:
+    """R18-E4 (D-811): ``df`` and ``du`` count KiB; the probes answer in 10^9 bytes."""
+    autodl, env = env_for("5090-14b")
+    write_df_stub(tmp_path, 120 * 10**9, 107_800_000_000)
+    write_du_stub(tmp_path, 12_600_000_000)  # TWIN_HOME and TWIN_MODELS: 25.2e9 together
+    (tmp_path / "models").mkdir()
+    done = call_function(autodl, env, "probe_free_gb /root/autodl-tmp; probe_present_gb")
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split() == ["107", "25"]
+
+
 @posix_only
 @pytest.mark.parametrize("name", list(PROFILES))
 def test_the_memory_check_per_profile(env_for, name: str) -> None:  # type: ignore[no-untyped-def]
@@ -753,7 +835,8 @@ def write_du_stub(tmp_path: Path, size_bytes: int) -> None:
     stub.parent.mkdir(exist_ok=True)
     stub.write_text(
         "#!/usr/bin/env bash\n"
-        f'case "$1" in -sb) echo "{size_bytes}\t$2" ;; *) echo "{size_bytes // 1024}\t$2" ;; esac\n',
+        f'case "$1" in -sb) echo "{size_bytes}\t$2" ;; '
+        f'*) echo "{size_bytes // 1024}\t$2" ;; esac\n',
         encoding="utf-8",
     )
     stub.chmod(0o755)
@@ -1708,9 +1791,12 @@ def test_the_quantization_gate_is_the_size_of_the_file_it_writes(tmp_path: Path)
 def test_the_free_space_a_quantization_needs(  # type: ignore[no-untyped-def]
     env_for, f16_gb: float, needed: int
 ) -> None:
-    """R17-8 (D-634): ceil(F16 size x 0.55) + 2, at least the largest quant (Q8_0, 0.53)."""
+    """R17-8 (D-634): ceil(F16 size x 0.55) + 2, at least the largest quant (Q8_0, 0.53).
+
+    R18-E4 (D-811): sizes are decimal GB (10^9 bytes) like ``base_gb`` and the free space.
+    """
     autodl, env = env_for("5090-8b")
-    size = int(f16_gb * 2**30)
+    size = int(f16_gb * 10**9)
     done = call_function(autodl, env, f"quant_space_needed_gb {size}")
     assert done.returncode == 0 and done.stdout.strip() == str(needed), done.stderr
     assert needed >= f16_gb * max(QUANT_FACTORS.values()) + 2

@@ -17,6 +17,7 @@ from twin.training.profiles import (
     DISK_PEAK_FACTOR,
     PROFILES,
     QUANT_FACTORS,
+    SPEC_DISK_USABLE_SHARE,
     ProfileError,
     epochs_for,
     get_profile,
@@ -69,6 +70,19 @@ def test_the_disk_requirement_follows_the_base_size_and_matches_the_round_number
         # a disk expanded to the number in R-TRN-009 always passes, and the number is close
         assert profile.required_disk_gb <= profile.spec_disk_gb
         assert profile.required_disk_gb >= profile.spec_disk_gb * 0.9
+
+
+def test_a_fresh_disk_of_the_size_the_user_is_told_covers_the_requirement() -> None:
+    """R18-E4 (D-811): 98 % of a disk of ``spec_disk_gb`` decimal GB is still enough.
+
+    The 14B profiles told the user to expand the disk to exactly the requirement (110 GB), which a
+    file system never offers in full; they now say 115 GB - still "about 110" of R-TRN-009.
+    """
+    assert SPEC_DISK_USABLE_SHARE == 0.98
+    for name, profile in PROFILES.items():
+        assert profile.spec_disk_gb * SPEC_DISK_USABLE_SHARE >= profile.required_disk_gb, name
+    spec = {name: profile.spec_disk_gb for name, profile in PROFILES.items()}
+    assert spec == {"5090-8b": 70, "5090-14b": 115, "pro6000-14b": 115, "pro6000-32b": 230}
 
 
 def test_the_cpu_merge_of_the_qlora_profile_needs_the_whole_bf16_model_in_memory() -> None:
@@ -277,7 +291,8 @@ def test_dataset_info_describes_sharegpt_files_with_the_roles_of_llamafactory() 
 def test_the_profile_env_holds_plain_words_and_the_computed_requirements() -> None:
     lines = dict(line.split("=", 1) for line in profile_env(PROFILES["5090-14b"]).splitlines())
     assert lines["TWIN_PROFILE"] == "5090-14b"
-    assert lines["TWIN_REQUIRED_DISK_GB"] == "110" and lines["TWIN_SPEC_DISK_GB"] == "110"
+    # R18-E4 (D-811): the disk the user is told to expand to leaves room above the requirement
+    assert lines["TWIN_REQUIRED_DISK_GB"] == "110" and lines["TWIN_SPEC_DISK_GB"] == "115"
     assert lines["TWIN_QUANT_BIT"] == "4" and lines["TWIN_EXPORT_DEVICE"] == "cpu"
     assert lines["TWIN_BASE_GB"] == "29.6" and lines["TWIN_BASE_GB_CEIL"] == "30"
     assert lines["TWIN_DPO_MIN_PAIRS"] == "200"

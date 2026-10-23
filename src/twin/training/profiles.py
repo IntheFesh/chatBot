@@ -16,7 +16,11 @@ Disk space (``required_disk_gb``)
     the peak 3.4 times, which the disks of R-TRN-009 do not hold: D-634).  The result is
     ``base_gb * 3.20 + 15``, rounded up: 68 GB for 8B, 110 GB for 14B and 225 GB for 32B, which is
     what R-TRN-009 asks for ("about 70, 110 and 230 GB").  The merged bf16 copy is deleted before
-    the quantisation, so it adds nothing to it.
+    the quantisation, so it adds nothing to it.  Every disk number is in decimal gigabytes
+    (10^9 bytes), the unit of ``base_gb``; the AutoDL scripts measure the free space in it too.
+    ``spec_disk_gb`` - what the user is told to expand the data disk to - leaves room for what a
+    fresh file system does not offer (:data:`SPEC_DISK_USABLE_SHARE`), whichever unit the console
+    means by "GB": 115 for the 14B profiles, still "about 110" (D-811).
 Memory (``required_ram_gb``)
     a QLoRA adapter is merged on the CPU into the bf16 base (``export_device: cpu``), which needs
     the whole bf16 model in RAM; the other profiles merge on the GPU and only map the weights.
@@ -43,6 +47,8 @@ QUANT_FACTORS: Final = {"Q4_K_M": 0.31, "Q5_K_M": 0.36, "Q8_0": 0.53}
 DISK_PEAK_FACTOR: Final = 1 + 1 + sum(QUANT_FACTORS.values())
 """The base, the F16 GGUF and every quantisation on the disk at once (3.20)."""
 DISK_OVERHEAD_GB: Final = 15
+SPEC_DISK_USABLE_SHARE: Final = 0.98
+"""Share of a fresh data disk of ``spec_disk_gb`` (decimal GB) that must cover the requirement."""
 RAM_CPU_MERGE_FACTOR: Final = 1.3
 RAM_CPU_MERGE_EXTRA_GB: Final = 4
 RAM_GPU_MERGE_FACTOR: Final = 0.5
@@ -87,7 +93,7 @@ class TrainingProfile:
     per_device_train_batch_size: int
     gradient_accumulation_steps: int
     export_device: ExportDevice
-    spec_disk_gb: int  # the round number of R-TRN-009 the user is told to expand the disk to
+    spec_disk_gb: int  # the round number the user is told to expand the disk to (R-TRN-009, D-811)
 
     @property
     def effective_batch_size(self) -> int:
@@ -150,7 +156,7 @@ PROFILES: Final[dict[str, TrainingProfile]] = {
         per_device_train_batch_size=2,
         gradient_accumulation_steps=8,
         export_device="cpu",
-        spec_disk_gb=110,
+        spec_disk_gb=115,
     ),
     "pro6000-14b": TrainingProfile(
         name="pro6000-14b",
@@ -165,7 +171,7 @@ PROFILES: Final[dict[str, TrainingProfile]] = {
         per_device_train_batch_size=4,
         gradient_accumulation_steps=4,
         export_device="auto",
-        spec_disk_gb=110,
+        spec_disk_gb=115,
     ),
     "pro6000-32b": TrainingProfile(
         name="pro6000-32b",

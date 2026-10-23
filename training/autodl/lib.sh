@@ -73,6 +73,11 @@ check_python_version() {
     return 1
 }
 
+# Every disk size of these scripts is in decimal gigabytes, the unit of twin.training.profiles
+# (base_gb, required_disk_gb) and of the model repositories; df and du count KiB (D-811).
+GB_BYTES=1000000000
+GB_UNIT_TEXT="1 GB = 10^9 bytes"
+
 # check_disk_space FREE_GB REQUIRED_GB SPEC_GB: success when the free space is enough.
 check_disk_space() {
     local free="$1" required="$2" spec="$3"
@@ -80,7 +85,7 @@ check_disk_space() {
         log "disk: ${free} GB available, ${required} GB needed - ok"
         return 0
     fi
-    log "disk: only ${free} GB available but this profile needs ${required} GB (the data disk should be at least ${spec} GB)" >&2
+    log "disk: only ${free} GB available but this profile needs ${required} GB (${GB_UNIT_TEXT}; the data disk should be at least ${spec} GB)" >&2
     log "请到 AutoDL 控制台扩容数据盘/换实例 (expand the data disk or choose another instance), then run setup again" >&2
     return 1
 }
@@ -146,8 +151,8 @@ QUANT_SPACE_FACTOR=0.55
 # file: ceil(F16 size * QUANT_SPACE_FACTOR) + 2.  The F16 file is already on the disk, and the
 # earlier quantizations are in artifacts/gguf, so only the new file is added.
 quant_space_needed_gb() {
-    awk -v bytes="$1" -v factor="${QUANT_SPACE_FACTOR}" \
-        'BEGIN { gb = bytes * factor / 1073741824; n = int(gb); if (n < gb) n++; print n + 2 }'
+    awk -v bytes="$1" -v factor="${QUANT_SPACE_FACTOR}" -v unit="${GB_BYTES}" \
+        'BEGIN { gb = bytes * factor / unit; n = int(gb); if (n < gb) n++; print n + 2 }'
 }
 
 # yaml_get FILE KEY: the value of a top-level "key: value" line.
@@ -260,12 +265,13 @@ stack_choice() {
 # The probes below read the machine.  When one of them misreads a container, point
 # TWIN_PROBE_OVERRIDES at a file that redefines it; the file is sourced after lib.sh.
 
-# probe_free_gb PATH: whole GB free on the file system of PATH.
+# probe_free_gb PATH: whole GB (10^9 bytes) free on the file system of PATH.
 probe_free_gb() {
-    df -Pk "$1" | awk 'NR == 2 { print int($4 / 1048576) }'
+    df -Pk "$1" | awk -v unit="${GB_BYTES}" 'NR == 2 { print int($4 * 1024 / unit) }'
 }
 
-# probe_present_gb: GB the project already occupies (an interrupted setup is resumed, not doubled).
+# probe_present_gb: GB (10^9 bytes) the project already occupies (an interrupted setup is resumed,
+# not doubled).
 probe_present_gb() {
     local total=0 path kb
     for path in "${TWIN_HOME}" "${TWIN_MODELS}"; do
@@ -274,7 +280,7 @@ probe_present_gb() {
             total=$((total + ${kb:-0}))
         fi
     done
-    echo $((total / 1048576))
+    awk -v kb="${total}" -v unit="${GB_BYTES}" 'BEGIN { print int(kb * 1024 / unit) }'
 }
 
 # probe_ram_gb: GB of memory this container may use (the smaller of the host and the cgroup limit).
@@ -442,12 +448,12 @@ turbo_off() {
     unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 }
 
-# free_space_gate LABEL MIN_GB: stop when the data disk has less than MIN_GB free.
+# free_space_gate LABEL MIN_GB: stop when the data disk has less than MIN_GB (10^9 bytes) free.
 free_space_gate() {
     local label="$1" minimum="$2" free
     free="$(probe_free_gb "${TWIN_DISK_ROOT}")"
     if [ "${free}" -lt "${minimum}" ]; then
-        die "not enough free space before '${label}': ${free} GB free, ${minimum} GB needed. 请到 AutoDL 控制台扩容数据盘/换实例"
+        die "not enough free space before '${label}': ${free} GB free, ${minimum} GB needed (${GB_UNIT_TEXT}). 请到 AutoDL 控制台扩容数据盘/换实例"
     fi
     log "free space before ${label}: ${free} GB (need ${minimum} GB) - ok"
 }
