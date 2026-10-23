@@ -26,6 +26,7 @@ from twin.training.profiles import (
     profile_names,
 )
 from twin.training.yaml_render import (
+    GENERATION_TOP_K,
     ConfigKind,
     dataset_info,
     render_all,
@@ -120,6 +121,21 @@ def test_the_rendered_yaml_of_every_profile_matches_its_snapshot(name: str) -> N
         rendered = render_config(kind, profile, train_samples=1200)
         expected = (SNAPSHOTS / f"{name}.{kind.value}.yaml").read_text(encoding="utf-8")
         assert rendered == expected, f"{name} {kind.value} changed; review it, then regenerate"
+
+
+@pytest.mark.parametrize("name", list(PROFILES))
+def test_the_evaluation_samples_like_the_live_clients_without_top_k(name: str) -> None:
+    """R18-E8 (D-815): LLaMA-Factory 0.9.5 generates with ``top_k`` 50 unless told otherwise
+    (``hparams/generating_args.py``); the two live clients switch top-k off (D-120), so the
+    replies the evaluation compares were sampled from another distribution.  ``top_k: 0`` is
+    "off" for transformers' ``generate`` as it is for llama.cpp."""
+    config = yaml.safe_load(
+        render_config(ConfigKind.EVAL_GENERATE, PROFILES[name], train_samples=1200)
+    )
+    assert config["do_sample"] is True and config["top_k"] == 0
+    assert config["top_k"] == GENERATION_TOP_K == 0
+    assert (config["temperature"], config["top_p"]) == (0.7, 0.9)
+    assert "repetition_penalty" not in config  # LLaMA-Factory's default is 1.0: off
 
 
 @pytest.mark.parametrize("name", list(PROFILES))

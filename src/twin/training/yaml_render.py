@@ -60,6 +60,9 @@ from twin.training.profiles import (
 
 GENERATION_TEMPERATURE = 0.7
 GENERATION_TOP_P = 0.9
+GENERATION_TOP_K = 0
+"""Top-k off, as the live clients send it (D-120; ``twin.llm.style_client``): 0 switches it off
+in transformers' ``generate``, which LLaMA-Factory would otherwise call with top_k 50 (D-815)."""
 GENERATION_MAX_NEW_TOKENS = 256
 
 
@@ -129,6 +132,7 @@ def render_config(
         "dpo_grad_accum": 16,
         "temperature": GENERATION_TEMPERATURE,
         "top_p": GENERATION_TOP_P,
+        "top_k": GENERATION_TOP_K,
         "max_new_tokens": GENERATION_MAX_NEW_TOKENS,
     }
     return _environment().get_template(f"{kind.value}.yaml.j2").render(**context)
