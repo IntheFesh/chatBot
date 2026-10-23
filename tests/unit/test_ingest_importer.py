@@ -371,6 +371,105 @@ def test_an_older_export_does_not_overwrite_a_newer_version(
         assert stored.source_export_id == "newer"
 
 
+def recall_in_newer_export(export: SynthExport, message_id: str) -> None:
+    """A newer export in which the message ``message_id`` is a recall notice."""
+
+    def recall(items: list[dict[str, Any]]) -> None:
+        for item in items:
+            if item["id"] == message_id:
+                for key in ("emojiMd5", "emojiUrl", "offlineMedia", "mediaPath", "localPath"):
+                    item.pop(key, None)
+                item.update(renderType="system", type=10000, content="她撤回了一条消息")
+
+    rewrite_export(export, recall, exported_at=datetime(2026, 11, 1, tzinfo=UTC), export_id="newer")
+
+
+def test_a_sticker_that_a_newer_export_shows_as_recalled_is_no_longer_counted(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C6 (D-784): the use of the replaced message used to stay, and so did her count."""
+    export = make_export(tmp_path, target_messages=80, media=False)
+    run_import(services, export)
+    items = json.loads(export.messages_path.read_text("utf-8"))["messages"]
+    target = next(m for m in items if m["renderType"] == "emoji" and not m["isSent"])
+    md5 = target["emojiMd5"]
+    with services.db.session() as session:
+        before = session.get(Sticker, md5)
+        assert before is not None and session.get(StickerUse, target["id"]) is not None
+        her_before = before.her_uses
+    recall_in_newer_export(export, target["id"])
+    outcome = run_import(services, export)
+    assert outcome.run.conflict_updated == 1
+    with services.db.session() as session:
+        row = session.get(Message, target["id"])
+        assert row is not None and row.kind == "system" and row.sticker_md5 is None
+        assert session.get(StickerUse, target["id"]) is None
+        after = session.get(Sticker, md5)
+        assert after is not None and after.her_uses == her_before - 1
+
+
+def test_a_sticker_message_that_shows_another_sticker_moves_its_use(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C6 (D-784): a replaced message keeps exactly the use its new version has."""
+    export = make_export(tmp_path, target_messages=80, media=False)
+    run_import(services, export)
+    items = json.loads(export.messages_path.read_text("utf-8"))["messages"]
+    stickers = [m for m in items if m["renderType"] == "emoji" and not m["isSent"]]
+    target = stickers[0]
+    other = next(m["emojiMd5"] for m in stickers if m["emojiMd5"] != target["emojiMd5"])
+
+    def swap(messages: list[dict[str, Any]]) -> None:
+        for item in messages:
+            if item["id"] == target["id"]:
+                item["emojiMd5"] = other
+
+    rewrite_export(export, swap, exported_at=datetime(2026, 11, 1, tzinfo=UTC), export_id="newer")
+    run_import(services, export)
+    with services.db.session() as session:
+        use = session.get(StickerUse, target["id"])
+        assert use is not None and use.sticker_md5 == other and use.by_her
+
+
+def test_media_of_a_recalled_message_that_was_never_imported_is_forgotten(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C6 (D-784): its pending or missing asset rows go; a stored file of another stays."""
+    export = make_export(tmp_path, target_messages=120, media=False)
+    run_import(services, export)
+    items = json.loads(export.messages_path.read_text("utf-8"))["messages"]
+    images = [m for m in items if m["renderType"] == "image"]
+    recalled, kept = images[0], images[1]
+    with services.db.transaction() as session:
+        assets = session.scalars(
+            select(MediaAsset).where(MediaAsset.message_id.in_([recalled["id"], kept["id"]]))
+        ).all()
+        assert {a.message_id for a in assets} == {recalled["id"], kept["id"]}
+        assert all(a.status != "available" for a in assets)
+        for asset in assets:
+            if asset.message_id == kept["id"]:
+                asset.status, asset.sha256 = "available", "a" * 64  # its file was imported
+
+    def recall_both(messages: list[dict[str, Any]]) -> None:
+        for item in messages:
+            if item["id"] in (recalled["id"], kept["id"]):
+                for key in ("offlineMedia", "mediaPath", "localPath"):
+                    item.pop(key, None)
+                item.update(renderType="system", type=10000, content="她撤回了一条消息")
+
+    rewrite_export(
+        export, recall_both, exported_at=datetime(2026, 11, 1, tzinfo=UTC), export_id="newer"
+    )
+    run_import(services, export)
+    with services.db.session() as session:
+        left = session.execute(
+            select(MediaAsset.message_id, MediaAsset.status).where(
+                MediaAsset.message_id.in_([recalled["id"], kept["id"]])
+            )
+        ).all()
+    assert [tuple(row) for row in left] == [(kept["id"], "available")]
+
+
 def test_a_second_conversation_is_refused_before_anything_is_imported(
     services: Services, tmp_path: Path
 ) -> None:

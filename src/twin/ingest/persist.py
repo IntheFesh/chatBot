@@ -21,7 +21,7 @@ from datetime import datetime
 from typing import Any, cast
 
 import orjson
-from sqlalchemy import Table, func, select, update
+from sqlalchemy import Table, delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -246,12 +246,32 @@ def _resolve_conflicts(
                 replaced.append(item)
             else:
                 result.conflict_kept += 1
+    _forget_derived_rows(session, [item.id for item in replaced])
     for item in replaced:
         values = _message_row(item, ctx)
         for column in ("id", "created_at", "media_sha256"):
             values.pop(column)  # keep the identity, the creation time and any imported media
         session.execute(update(MESSAGES).where(MESSAGES.c.id == item.id).values(**values))
     return replaced
+
+
+def _forget_derived_rows(session: Session, message_ids: Sequence[str]) -> None:
+    """Drop what the old versions of replaced messages added besides themselves (D-784).
+
+    The new version writes its own sticker use and media rows right after (a recall notice
+    writes none); without this, a sticker that a newer export shows as recalled kept its use and
+    her count.  Media rows go only while no file was stored for them (``available`` rows keep
+    the file the message already pointed to, as ``media_sha256`` is kept); a media row belongs to
+    exactly one message (its id is made from the message id), so nothing shared is touched.
+    The importer recounts the stickers' uses at the end of the run.
+    """
+    for chunk in _chunks(list(message_ids), IN_CHUNK):
+        session.execute(delete(STICKER_USES).where(STICKER_USES.c.message_id.in_(chunk)))
+        session.execute(
+            delete(MEDIA_ASSETS).where(
+                MEDIA_ASSETS.c.message_id.in_(chunk), MEDIA_ASSETS.c.status != "available"
+            )
+        )
 
 
 # -------------------------------------------------------------- stickers, assets
