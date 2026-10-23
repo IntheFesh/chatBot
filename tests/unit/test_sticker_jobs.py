@@ -335,6 +335,35 @@ async def test_a_denied_budget_hands_the_job_back(
     assert jobs_of(services)[0].status == "pending"
 
 
+@pytest.mark.parametrize(("status", "message"), [(402, "Insufficient Balance"), (401, "bad key")])
+async def test_an_empty_account_hands_the_job_back_and_keeps_what_was_tagged(
+    scenario: Scenario, services: Services, api: respx.MockRouter, status: int, message: str
+) -> None:
+    """R18-D1 (D-795): a 402 or 401 is not the sticker's failure.
+
+    Before: ``run_tagging`` counted it as a failed sticker (``except LlmError``), so every
+    sticker of the job "failed", the job was retried twice and then failed for good.  Now the
+    job goes back to the queue without an attempt; what was tagged before the outage stays.
+    """
+    calls = {"n": 0}
+
+    def outage(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return error(status, message) if calls["n"] >= 2 else answer(request)
+
+    api.post(API).mock(side_effect=outage)
+    plan = plan_tagging(services)
+    runtime = build_llm_runtime(services)
+    for batch_id in plan.batch_ids:
+        runtime.batches.approve(batch_id)
+    summary = await run_tag_jobs(services)
+    assert summary.deferred >= 1 and summary.retried == 0 and summary.failed == 0
+    assert calls["n"] == 1 + summary.deferred  # one sticker tagged, then one 402 per job
+    waiting = [job for job in jobs_of(services) if job.status != "done"]
+    assert waiting and all(j.status == "pending" and j.attempts == 0 for j in waiting)
+    assert len([r for r in StickerCatalog(services).records() if r.vision_tags]) >= 1
+
+
 # ------------------------------------------------------- after a download
 
 

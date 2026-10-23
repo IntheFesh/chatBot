@@ -48,7 +48,7 @@ from twin.ops.power_events import WINDOW_STOP_TIMEOUT_S
 from twin.services import Services
 from twin.serving.server import STOP_GRACE_S as LLAMA_STOP_GRACE_S
 
-SCALE = 0.1  # every duration of the behaviour test, production ratios kept
+SCALE = 0.2  # every duration of the behaviour test, production ratios kept
 SUPERVISOR_GRACE_S = Settings().ops.supervise.stop_grace_s
 
 
