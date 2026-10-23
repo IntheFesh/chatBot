@@ -12,7 +12,9 @@
 
 It runs in ``twin run`` and in ``twin supervise`` (the supervisor must be able to say that
 ``twin run`` died while no application is there to say it).  Two processes may run it at once:
-a delivery is leased per alert (``claimed_at``), so each notice is sent by one of them.
+a delivery is leased per alert (``claimed_at``), so each notice is sent by one of them.  Starting
+does not clear the leases (round 18, D-799): the other process may be sending one; the lease of a
+process that died runs out after two minutes (``CLAIM_LEASE``) and the notice is sent then.
 
 When no e-mail account is set up the mail part is skipped (and said so once in the log); the
 notification still works.
@@ -168,8 +170,9 @@ class AlertDelivery:
             await self._wait()
 
     async def start(self) -> None:
+        # no lease is cleared here: the other process may be sending that notice right now; a
+        # lease a dead process left behind runs out after CLAIM_LEASE (D-799)
         self._loop = asyncio.get_running_loop()
-        await asyncio.to_thread(self._service.reset_claims)
         self._service.set_wake(self._poke)
         self._supervisor.spawn("deliver", self._run, restart_on_exit=True)
         self._poke()

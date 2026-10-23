@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from enum import StrEnum
 from typing import Any, Protocol
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, or_, select
 
 from twin.clock import Clock
 from twin.ops.logging import get_logger
@@ -603,10 +603,3 @@ class AlertService:
         with self._db.transaction(bump_state=False) as session:
             result = session.execute(delete(Alert).where(Alert.created_at < cutoff))
             return int(getattr(result, "rowcount", 0) or 0)
-
-    def reset_claims(self) -> None:
-        """Forget unfinished leases (the delivery component calls it when it starts)."""
-        with self._db.transaction(bump_state=False) as session:
-            session.execute(
-                update(Alert).where(Alert.claimed_at.is_not(None)).values(claimed_at=None)
-            )
