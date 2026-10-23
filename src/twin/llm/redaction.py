@@ -125,11 +125,13 @@ _WXID = re.compile(r"(?<![A-Za-z0-9_\-])wxid_[A-Za-z0-9_\-]{6,}|[A-Za-z0-9_\-]{6
 # WeChat allows (a letter, then 5 to 19 letters, digits, ``_`` or ``-``), so ``我微信 好的`` and
 # ``微信上说`` stay.  A label that ends in a Chinese character may touch the id (``微信abc_123``);
 # one that ends in a Latin letter needs a separator, so ``vxlan12345`` is a word, not ``vx`` + id.
+# The English ``WeChat`` needs a colon: ``WeChat channel``, ``WeChat polling`` are prose.
 _WX_ID = r"([A-Za-z][A-Za-z0-9_\-]{5,19})(?![A-Za-z0-9_\-])"
 _WX_SEPARATOR = r"(?:\s|[:：,，]|是|为|叫|[吧呀啊哦哈嘛呢啦])"
 _WXID_LABELLED = re.compile(
     rf"(?:微信|威信|(?<![A-Za-z0-9])[vVwW](?:信|[xX]\s*号))号?{_WX_SEPARATOR}{{0,4}}{_WX_ID}"
-    rf"|(?<![A-Za-z0-9])(?:微信\s*id|wechat(?:\s*id)?|vx|wx){_WX_SEPARATOR}{{1,4}}{_WX_ID}",
+    rf"|(?:微信\s*id|(?<![A-Za-z0-9])(?:vx|wx)){_WX_SEPARATOR}{{1,4}}{_WX_ID}"
+    rf"|(?<![A-Za-z0-9])wechat(?:\s*id)?\s*[:：]\s*{_WX_ID}",
     re.IGNORECASE,
 )
 _ID_CARD = re.compile(
@@ -224,7 +226,7 @@ def _detect_wxid(text: str) -> Iterable[_Hit]:
     for match in _WXID.finditer(text):
         yield _Hit("wxid", match.start(), match.end(), match.group(0))
     for match in _WXID_LABELLED.finditer(text):
-        group = 1 if match.group(1) else 2
+        group = next(index for index in (1, 2, 3) if match.group(index))
         yield _Hit("wxid", match.start(group), match.end(group), match.group(group))
 
 

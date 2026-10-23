@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import string
 import threading
 
@@ -228,6 +229,8 @@ def test_leading_function_words_are_not_swallowed_by_an_address() -> None:
         "第2段第5号",
         "版本 138.1234.5678.9",
         "138.12345678",
+        "WeChat polling keeps failing; check the network connection",
+        "the WeChat channel serves the one bound user",
     ],
 )
 def test_ordinary_text_is_untouched(text: str) -> None:
@@ -326,7 +329,11 @@ def test_leaked_tokens_are_found_in_replies() -> None:
 
 _CLEAN_CHARS = "你我他她的了是在有不这就都和也很好想去吃玩看说今天明晚上下午早安"
 _CLEAN_ALPHABET = st.sampled_from(list(_CLEAN_CHARS + "abcdefghijklmnopqrstuvwxyz ，。！？,.!?~"))
-_clean_text = st.text(alphabet=_CLEAN_ALPHABET, min_size=0, max_size=60)
+# R18-A4 (D-766): ``vx abcdefg`` written with these letters is a WeChat id now, not clean text
+_ASCII_WECHAT_LABEL = re.compile(r"(?i)(?<![a-z0-9])(?:vx|wx)[\s,，]")
+_clean_text = st.text(alphabet=_CLEAN_ALPHABET, min_size=0, max_size=60).filter(
+    lambda text: _ASCII_WECHAT_LABEL.search(text) is None
+)
 _separator = st.sampled_from(["，", "。", " ", "！", "\n", ", "])
 
 
@@ -506,8 +513,9 @@ _WECHAT_LABELS = [
     "加我vx ",
     "vx: ",
     "wx：",
-    "wechat ",
+    "wechat: ",
     "WeChat ID: ",
+    "微信ID ",
 ]
 
 
