@@ -22,7 +22,7 @@ from twin.ops.doctor import (
     run_checks,
     sleep_timeouts,
 )
-from twin.ops.taskscheduler import build_task_xml
+from twin.ops.taskscheduler import CommandResult, build_task_xml
 
 SPEC = TASK_SPEC
 
@@ -266,6 +266,85 @@ def test_a_power_plan_that_sleeps_is_a_warning(
     assert runner.calls[0][:3] == ["powercfg", "/query", "SCHEME_CURRENT"]
     if level is CheckStatus.WARN:
         assert "Never" in result.hint
+
+
+LIDACTION = """
+Power Scheme GUID: 381b4222-f694-41f0-9685-ff5bb260df2e  (Balanced)
+  GUID Alias: SCHEME_BALANCED
+  Subgroup GUID: 4f971e89-eebd-4455-a8de-9e59040e7347  (Power buttons and lid)
+    GUID Alias: SUB_BUTTONS
+    Power Setting GUID: 5ca83367-6e45-459f-a27b-476b1d01c936  (Lid close action)
+      GUID Alias: LIDACTION
+      Possible Setting Index: 000
+      Possible Setting Friendly Name: Do nothing
+      Possible Setting Index: 001
+      Possible Setting Friendly Name: Sleep
+      Possible Setting Index: 002
+      Possible Setting Friendly Name: Hibernate
+      Possible Setting Index: 003
+      Possible Setting Friendly Name: Shut down
+    Current AC Power Setting Index: 0x{ac:08x}
+    Current DC Power Setting Index: 0x{dc:08x}
+"""
+
+
+def lid_runner(lid: CommandResult, *, idle_ac: int = 0, idle_dc: int = 0) -> ScriptedRunner:
+    return ScriptedRunner(
+        {
+            "powercfg /query SCHEME_CURRENT SUB_SLEEP": ok(POWERCFG.format(ac=idle_ac, dc=idle_dc)),
+            "powercfg /query SCHEME_CURRENT SUB_BUTTONS LIDACTION": lid,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("ac", "dc", "level", "text"),
+    [
+        (1, 1, CheckStatus.WARN, "closing the lid puts the computer to sleep"),
+        (2, 0, CheckStatus.WARN, "on mains power closing the lid hibernates the computer"),
+        (0, 1, CheckStatus.WARN, "on battery closing the lid puts the computer to sleep"),
+        (3, 3, CheckStatus.WARN, "closing the lid shuts the computer down"),
+        (0, 0, CheckStatus.OK, "sleep is set to never"),
+    ],
+)
+def test_a_lid_that_puts_the_computer_to_sleep_is_a_warning(
+    secret_store: SecretStore, ac: int, dc: int, level: CheckStatus, text: str
+) -> None:
+    """R18-D10 (D-803): ``SetThreadExecutionState`` keeps the idle timer off, not the lid.
+
+    Before: only ``STANDBYIDLE`` was read, and a laptop that sleeps when its lid is closed passed.
+    """
+    runner = lid_runner(ok(LIDACTION.format(ac=ac, dc=dc)))
+    result = check_power_plan(context(secret_store, runner=runner, platform="win32"))
+    assert result.status is level and text in result.detail, result.detail
+    assert ["powercfg", "/query", "SCHEME_CURRENT", "SUB_BUTTONS", "LIDACTION"] in runner.calls
+    if level is CheckStatus.WARN:
+        assert "lid" in result.hint.lower()
+
+
+def test_an_idle_timeout_and_a_lid_are_both_reported(secret_store: SecretStore) -> None:
+    runner = lid_runner(ok(LIDACTION.format(ac=1, dc=1)), idle_ac=1800)
+    result = check_power_plan(context(secret_store, runner=runner, platform="win32"))
+    assert result.status is CheckStatus.WARN
+    assert "sleeps after 30 min" in result.detail and "lid" in result.detail
+    assert "Never" in result.hint and "lid" in result.hint.lower()
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        failed('Invalid Parameters -- try "/?" for help'),  # a desktop: no lid setting
+        ok("The power scheme, subgroup or setting specified does not exist."),
+        ok(""),
+    ],
+    ids=["refused", "no-such-setting", "empty"],
+)
+def test_a_computer_without_a_lid_setting_is_not_warned_about_a_lid(
+    secret_store: SecretStore, answer: CommandResult
+) -> None:
+    """R18-D10: a desktop has no lid; nothing that cannot be read is reported."""
+    result = check_power_plan(context(secret_store, runner=lid_runner(answer), platform="win32"))
+    assert result.status is CheckStatus.OK and "lid" not in result.detail
 
 
 def test_an_unreadable_power_plan_and_other_platforms(secret_store: SecretStore) -> None:

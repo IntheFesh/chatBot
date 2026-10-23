@@ -610,7 +610,7 @@
    - `twin setup` 依次问：她同意的日期、DeepSeek Key（存凭据管理器）、告警邮件的 SMTP（服务器、端口、发件地址、收件地址、应用专用密码，并可发测试邮件）、她的 wxid、时区、紧急联系人（默认关；开启前屏幕上会原样显示将要发出的固定邮件）。
    - 安装完成后看 `uv run twin service status`：应显示 `logon type: InteractiveToken`、`time limit: PT0S`、`runs on battery: yes`、`second instance: IgnoreNew`。**如果 `schtasks` 拒绝了任务定义，把完整的错误发给我**（任务 XML 由 `twin service install --print-xml` 可以看到）——这是沙箱里没法验证的一步。
    - 想让断电或系统更新重启后无人值守恢复：需要 Windows 自动登录（`netplwiz` 或 Sysinternals Autologon）。风险：开机后任何接触这台电脑的人都直接进入你的账户，只在电脑放在可信的地方并开了 BitLocker 时才这么做；否则重启后要你手动登录一次（计划任务只在你登录后运行，因为凭据管理器、通知和二维码窗口都需要你的会话）。
-   - 电源计划：`uv run twin doctor` 的 `power-plan` 一行如果是警告，到“设置 → 系统 → 电源”把“睡眠”设成“从不”（程序运行时也会请求 Windows 不要睡眠）。
+   - 电源计划：`uv run twin doctor` 的 `power-plan` 一行如果是警告，到“设置 → 系统 → 电源”把“睡眠”设成“从不”（程序运行时也会请求 Windows 不要睡眠）。笔记本另外看同一行有没有提到合盖（lid）：有就到“控制面板 → 电源选项 → 选择关闭笔记本计算机盖的功能”把接通电源与使用电池都设成“不采取任何操作”（第 18 轮 D-803；合盖设置在台式机上读不到时不报）。
 
 3. **核对 Windows 上才有的东西（请告诉我结果）**
    - `uv run twin doctor`：新增检查 `deepseek-net`（用已存的 Key 请求 `GET https://api.deepseek.com/user/balance`，看是否可达、Key 是否被接受、余额是否可用——**这个接口的返回形状是按官方文档写的，没有真实调用过**，如果显示奇怪请把原话发给我）、`gpu`（`nvidia-smi`）、`scheduled-task`、`power-plan`（`powercfg` 的输出在中文 Windows 上只取末尾两个十六进制数，没有在中文系统上验证）。
