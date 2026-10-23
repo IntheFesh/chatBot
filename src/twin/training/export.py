@@ -117,6 +117,7 @@ MIN_PROMPT_TOKENS = 64
 BATCH_BLOCKS = 256
 SCOPE = "pre_holdout"
 WORK_DIR_PREFIX = ".export-"
+PERSONA_COMMAND = "`twin persona regenerate --scope pre_holdout`"
 
 DROP_NO_REPRODUCIBLE = "no_reproducible_line"
 DROP_EMPTY_TARGET = "empty_target"
@@ -235,9 +236,7 @@ class TrainingSetExporter:
 
     def _check_derived_data(self) -> None:
         if self._source.compact is None:
-            raise ExportError(
-                "there is no pre-holdout persona card; run `twin persona generate` first"
-            )
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND} first")
         if self._source.profile is None or self._source.activity is None:
             raise ExportError(
                 "there is no pre-holdout profile or routine; run `twin profile rebuild` first"
@@ -246,7 +245,7 @@ class TrainingSetExporter:
     def _persona_card(self) -> RenderedPersona:
         card = self._source.compact
         if card is None:
-            raise ExportError("there is no pre-holdout persona card; run `twin persona generate`")
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND}")
         return card
 
     @property

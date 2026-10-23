@@ -140,7 +140,10 @@ def readiness_problems(services: Services, backends: Sequence[str]) -> list[str]
     if load_activity_model(services, "pre_holdout") is None:
         problems.append("there is no pre-holdout routine; run `twin profile rebuild` first")
     if any(b != "style" for b in backends) and render_full(services, "pre_holdout") is None:
-        problems.append("there is no pre-holdout persona card; run `twin persona generate` first")
+        problems.append(
+            "there is no pre-holdout persona card; "
+            "run `twin persona regenerate --scope pre_holdout` first"
+        )
     if (
         any(b in STYLE_BACKENDS for b in backends)
         and render_compact(services, "pre_holdout") is None
