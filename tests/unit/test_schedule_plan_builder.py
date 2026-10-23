@@ -623,3 +623,24 @@ def test_r18_f5_the_floor_is_the_setting_and_never_above_her_usual_length() -> N
     )
     for episode in build_plan(request_floor).episodes:
         assert episode.wake - episode.onset >= timedelta(minutes=300)
+
+
+def test_r18_f5_a_night_that_must_begin_later_keeps_at_least_the_floor() -> None:
+    """R18-F5: no draw fits (the night may only begin after 06:00, she usually wakes at 07:30):
+    the night begins at 06:00 and lasts at least the floor - before, it lasted until the drawn
+    wake-up, about an hour and a half."""
+    window = sleep_window(23.5, 7.5, spread=SPREAD)
+    low, _ = duration_bounds(window)
+    day = date(2026, 10, 24)
+    not_before = datetime(2026, 10, 24, 6, 0, tzinfo=CHICAGO)
+    for seed in range(20):
+        episode = _sample_episode(
+            window,
+            day,
+            random.Random(seed),
+            _Notes(CHICAGO),
+            edge_minutes=30,
+            onset_not_before=not_before,
+        )
+        assert episode.onset == not_before
+        assert episode.wake - episode.onset >= timedelta(minutes=low)

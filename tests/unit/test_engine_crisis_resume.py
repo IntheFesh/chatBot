@@ -31,6 +31,7 @@ from tests.support.engine_harness import (
 )
 from tests.support.waiting import wait_until
 from twin.channel.base import OutboundKind, OutboundResult, QuoteTarget, SendBypass
+from twin.engine import machine
 from twin.engine.decision import MAX_RETRIES
 from twin.engine.roundstate import CrisisAnswer, RoundData
 from twin.engine.state_store import ConversationSnapshot
@@ -257,3 +258,41 @@ def test_r18_b1_the_crisis_note_round_trips_and_old_rows_have_none() -> None:
     old = data.to_json()
     del old["crisis"]
     assert RoundData.of(ConversationSnapshot("DECIDING", moment, data=old)).crisis is None
+
+
+async def test_r18_b1_a_failed_note_of_the_answer_does_not_stop_it_either(
+    services: Services, clock: ManualClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-B1: the note of the bubbles still to send cannot be written once: the answer goes on."""
+    rig = build_harness(services, clock, crisis=ScriptedCrisis("不想活"))
+    original = machine._crisis_sent
+    calls = {"n": 0}
+
+    def flaky(data: RoundData, text: str, reply_id: str | None) -> RoundData:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+        return original(data, text, reply_id)
+
+    monkeypatch.setattr(machine, "_crisis_sent", flaky)
+    await rig.engine.start()
+    try:
+        await rig.message("我真的不想活了")
+        await run_to_idle(rig.engine, clock)
+        assert rig.channel.urgent == ANSWER and rig.writer.calls == 0
+        assert rig.engine.snapshot().state == "IDLE"
+    finally:
+        await rig.engine.stop()
+
+
+def test_r18_b1_the_notes_of_the_answer_leave_a_round_without_one_alone() -> None:
+    """R18-B1: the helpers that update the note change nothing when there is no answer."""
+    moment = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    empty = RoundData(screened=("t1",))
+    assert machine._crisis_sent(empty, "你现在还好吗？", "r1") == empty
+    assert machine._crisis_retry(empty, moment) == empty
+    note = RoundData(crisis=CrisisAnswer(("一", "二", "三"), ("t1",)))
+    after = machine._crisis_sent(note, "二", "r1").crisis
+    assert after is not None and after.unsent == ("三",) and after.reply_id == "r1"
+    again = machine._crisis_retry(note, moment).crisis
+    assert again is not None and (again.retries, again.retry_at) == (1, moment)

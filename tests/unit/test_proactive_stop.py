@@ -144,3 +144,34 @@ async def test_r18_b5_after_a_stop_the_scheduler_is_not_left_unable_to_send(calm
     share_is_due(calm)
     report = await calm.scheduler.tick()
     assert report.outcome == "sent" and calm.channel.texts == [FIRST, SECOND]
+
+
+async def test_r18_b5_a_later_bubble_in_doubt_is_noted_on_the_message(calm: World) -> None:
+    """R18-B5: the first bubble is out, the second never answers: both are booked, the message
+    carries the note that one of them is in doubt."""
+    share_is_due(calm)
+    original = calm.channel.send_text
+    reached = asyncio.Event()
+
+    async def second_hangs(
+        text: str,
+        quote: QuoteTarget | None = None,
+        *,
+        recipient: str | None = None,
+        bypass: SendBypass | None = None,
+    ) -> OutboundResult:
+        if text == SECOND:
+            reached.set()
+            await asyncio.Event().wait()
+        return await original(text, quote, recipient=recipient, bypass=bypass)
+
+    calm.channel.send_text = second_hangs  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit, stop_grace_s=0.2)
+    await component.start()
+    await wait_until(reached.is_set)
+    await asyncio.wait_for(component.stop(), 10)
+    rows = out_rows(calm)
+    assert [row.text for row in rows] == [FIRST, SECOND]
+    assert rows[1].external_id is None
+    steps = [a.get("step") for a in rows[0].actions]
+    assert "proactive" in steps and "bubble_in_doubt" in steps

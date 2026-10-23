@@ -982,3 +982,47 @@ async def test_r18_b6_a_withdrawal_that_fails_never_costs_the_user_a_reply(
         assert harness.channel.texts[:2] == ["嗯嗯", "什么呀"]  # (then the question, delivered)
     finally:
         await harness.engine.stop()
+
+
+async def test_r18_b6_withdraw_closes_only_a_question_asked_from_that_moment_on(rig: Rig) -> None:
+    """R18-B6: ``withdraw`` leaves an older question (the user saw it) and an empty slot alone."""
+    reply_id = await first_exchange(rig)
+    clock = rig.harness.clock
+    await rig.service.withdraw(clock.now_utc())  # nothing is open: nothing happens
+    assert rig.service.pending() is None
+    rig.service._store(PendingCorrection(reply_id, clock.now_utc()))
+    clock.tick(5)
+    await rig.service.withdraw(clock.now_utc())
+    assert rig.service.pending() is not None  # asked before: kept
+    await rig.service.withdraw(clock.now_utc() - timedelta(seconds=5))
+    assert rig.service.pending() is None  # asked at that moment: closed
+
+
+async def test_r18_b6_a_command_answer_that_cannot_be_sent_is_not_said(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-B6: the channel raises on a command's answer, and no correction service is attached:
+    nothing is written down as said, and the conversation goes on."""
+    from twin.channel.base import ChannelError
+
+    commands = ScriptedCommands(状态=CommandOutcome(texts.PREFIX + "一切正常"))
+    harness = build_harness(services, clock, commands=commands)
+    original = harness.channel.send_text
+    calls = {"n": 0}
+
+    async def broken(text: str, quote: Any = None, **kwargs: Any) -> OutboundResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ChannelError("the platform cannot be reached")
+        return await original(text, quote, **kwargs)
+
+    harness.channel.send_text = broken  # type: ignore[method-assign]
+    await harness.engine.start()
+    try:
+        await harness.message("/状态")
+        assert [r.text for r in _rows(harness) if r.direction == "out"] == []
+        await harness.message("在吗")
+        await run_to_idle(harness.engine, harness.clock)
+        assert harness.channel.texts == ["好的"]
+    finally:
+        await harness.engine.stop()

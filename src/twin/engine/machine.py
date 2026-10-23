@@ -735,8 +735,9 @@ class ConversationEngine:
                 self._progress.set()
 
     async def _step(self, snap: ConversationSnapshot) -> None:
-        if RoundData.of(snap).crisis is not None:  # an answer to a crisis is finished first (D-750)
-            await self._answer_crisis()
+        crisis = RoundData.of(snap).crisis
+        if crisis is not None:  # an answer to a crisis is finished first (D-750)
+            await self._answer_crisis(crisis)
             return
         if snap.state == STATE_IDLE:
             await self._idle(snap)
@@ -1432,7 +1433,7 @@ class ConversationEngine:
         # the next pass finishes it - the persona never gets these messages (D-750)
         answer = CrisisAnswer(tuple(outcome.bubbles), tuple(snap.pending))
         await self._edit(lambda d: replace(d, screened=marked, crisis=answer))
-        await self._answer_crisis()
+        await self._answer_crisis(answer)
         return True
 
     async def _crisis_context(self, snap: ConversationSnapshot) -> list[str]:
@@ -1441,21 +1442,18 @@ class ConversationEngine:
         window = await asyncio.to_thread(self._history.load, exclude_ids=turn_ids)
         return [turn.text for turn in window.turns[-CRISIS_CONTEXT_TURNS:]]
 
-    async def _answer_crisis(self) -> None:
+    async def _answer_crisis(self, answer: CrisisAnswer) -> None:
         """Step out of the role at once: the fixed answer, no pause, no persona (R-SAFE-001).
 
-        The answer is the round's note :class:`~twin.engine.roundstate.CrisisAnswer` (written by
-        :meth:`_screen` before the first bubble); each bubble that is out leaves it.  Writing a
-        bubble down is best-effort here: a write that fails is logged and the answer goes on (a
+        ``answer`` is the round's note :class:`~twin.engine.roundstate.CrisisAnswer` as stored
+        (written by :meth:`_screen` before the first bubble); each bubble that is out leaves it.
+        Writing a bubble down is best-effort here: a write that fails is logged and the answer
+        goes on (a
         bubble not written down is sent again after a restart - the hotline twice is better than
         never).  A send that the channel could not make (``FAILED``: the network) is tried again
         2 to 10 minutes later, at most ``MAX_RETRIES`` times; any other end of the send, or the
         last try, ends the round as before.  Never the persona (D-750).
         """
-        data = RoundData.of(await self._load())
-        answer = data.crisis
-        if answer is None:
-            return
         now = self._clock.now_utc()
         if answer.retry_at is not None and answer.retry_at > now:
             await self._wait_wake((answer.retry_at - now).total_seconds())
