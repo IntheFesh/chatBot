@@ -1126,8 +1126,8 @@ async def test_background_work_still_goes_out_at_the_last_level(
     """R17-17 (D-115): at level 4 only the proactive messages are refused (R-LLM-008 item 3).
 
     The daily life line (``plan``, thinking switched off), a sticker caption, a sticker tag and
-    a summary are not refused; the jobs that make these calls keep their ``except
-    BudgetDeniedError`` handlers for the one purpose that still raises.
+    a summary are not refused; a job that meets the one purpose that still raises is handed
+    back by the job worker (round 18, D-795: no longer by an ``except`` in each handler).
     """
     rig = Rig(db, clock, with_budget=True)
     route = mock(api, *[ok()] * 4)
@@ -1153,6 +1153,43 @@ async def test_background_work_still_goes_out_at_the_last_level(
     assert request_json(route.calls.last.request)["thinking"] == {"type": "disabled"}
     for purpose in ("caption", "sticker_tag", "summary"):
         await rig.client.chat([user("x")], purpose=purpose)
+    assert route.call_count == 4
+
+
+async def test_at_the_last_level_only_the_chat_and_the_planner_lose_their_thinking(
+    db: Database, clock: ManualClock, api: respx.MockRouter
+) -> None:
+    """R18-D11 (D-804): what the budget's description now says, pinned.
+
+    R-LLM-008 switches off the *chat's* thinking (step 1) and pauses proactive messages (step 3,
+    the planner's thinking goes with them); it does not touch the thinking of summaries,
+    extraction or the consistency audit, so they keep what their caller asked for at level 4.
+    """
+    rig = Rig(db, clock, with_budget=True)
+    route = mock(api, *[ok()] * 4)
+    assert rig.budget is not None
+    rig.ledger.record(
+        LedgerRecord(
+            "deepseek",
+            "deepseek-flash",
+            "reply",
+            Usage(1, 1, 0, 1, 0),
+            CostBreakdown(2.1, 0, 0, True, 1.0),
+            False,
+            1,
+            clock.now_utc(),
+        )
+    )
+    rig.budget.note_spend()
+    assert rig.budget.current_level() == 4
+    for purpose, thinking in (
+        ("reply", "disabled"),
+        ("plan", "disabled"),
+        ("summary", "enabled"),
+        ("consistency", "enabled"),
+    ):
+        await rig.client.chat([user("x")], purpose=purpose, thinking=True)
+        assert request_json(route.calls.last.request)["thinking"] == {"type": thinking}, purpose
     assert route.call_count == 4
 
 
