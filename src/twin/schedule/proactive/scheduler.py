@@ -238,6 +238,14 @@ class ProactiveScheduler:
 
     # ------------------------------------------------------------------- events
 
+    async def hold_sending(self, grace_s: float) -> None:
+        """The application is stopping: no new bubble, the one under way finishes (D-756)."""
+        await self._sender.hold(grace_s)
+
+    def release_sending(self) -> None:
+        """The stop is over (its tasks are cancelled): sending is allowed again."""
+        self._sender.release()
+
     @property
     def epoch(self) -> int:
         """Moves whenever the candidates are void (restart, wake-up, zone switch)."""
@@ -938,7 +946,7 @@ def _unsent_reason(outcome: SendOutcome) -> Reason:
         return Reason.USER_ACTIVE
     if outcome.interrupted_by == "sleep":
         return Reason.DEEP_SLEEP
-    if outcome.interrupted_by == "resume":
+    if outcome.interrupted_by in ("resume", "stop"):
         return Reason.INTERRUPTED
     stop = outcome.stop
     if stop is StopReason.EXPIRED:
