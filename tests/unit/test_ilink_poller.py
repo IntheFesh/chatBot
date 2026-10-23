@@ -787,6 +787,9 @@ async def test_r18_a1_an_impossible_message_time_neither_blocks_nor_loses_the_ba
         ("NaN", 40.0),
         ("-Infinity", 40.0),
         ("true", 40.0),
+        ("0", 40.0),
+        ("-5000", 40.0),
+        ('"20000"', 40.0),  # text is not a number
     ],
 )
 async def test_r18_a1_the_suggested_poll_timeout_stays_between_5_s_and_2_minutes(

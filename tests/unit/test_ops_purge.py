@@ -21,7 +21,7 @@ from twin.config.loader import DataPaths
 from twin.config.secrets import SecretStore
 from twin.ops import purge_cli
 from twin.ops.backup.archive import read_manifest
-from twin.ops.backup.layout import POOL_DIRNAME
+from twin.ops.backup.layout import POOL_DIRNAME, moved_aside, replaced_path, restore_targets
 from twin.ops.backup.sealed import BackupDecryptionError
 from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, InstanceLock
 from twin.ops.process_model import ExitCode
@@ -234,6 +234,22 @@ def test_r18_a5_the_data_a_restore_moved_aside_is_counted_and_deleted(
     assert [path.name for path in leftovers if path.exists()] == []
     assert not list(paths.data_dir.glob("*.replaced-*"))
     assert report.failed == [] and MARKER not in "\n".join(report.lines())
+
+
+def test_r18_a5_the_leftovers_are_found_by_the_one_naming_rule(tmp_path: Path) -> None:
+    """R18-A5 (D-769): restore and purge share ``replaced_path``/``moved_aside``; other names
+    that merely look alike are not touched, and a folder that is not there has nothing."""
+    data = tmp_path / "data"
+    data.mkdir()
+    targets = restore_targets(data / "twin.db", data / "vectors")
+    made = [replaced_path(target, "20261023T101500") for target in targets]
+    for path in made[:3]:
+        path.write_bytes(b"x")
+    made[3].mkdir()
+    (data / "twin.db.bak").write_bytes(b"not a leftover")
+    (data / "other.replaced-20261023T101500").write_bytes(b"not ours")
+    assert moved_aside(targets) == made
+    assert moved_aside(restore_targets(tmp_path / "nowhere" / "twin.db", tmp_path / "v")) == []
 
 
 def test_r18_a5_the_plan_lists_the_data_a_restore_moved_aside(installed: Installation) -> None:

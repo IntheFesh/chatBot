@@ -353,6 +353,16 @@ def test_r18_a1_message_time_is_total_and_keeps_to_plausible_times(value: float 
     assert at == received or EARLIEST_MESSAGE_TIME <= at <= received + timedelta(days=1)
 
 
+def test_r18_a1_numbers_in_text_and_numbers_beyond_any_float_are_read_leniently() -> None:
+    """R18-A1 (D-765): a time sent as text is still the time; a negative integer that no float
+    can hold is minus infinity, which no time is."""
+    received = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    as_text = WireMessage.model_validate({"create_time_ms": " 1790000000000 "})
+    assert message_time(as_text, received).timestamp() == 1_790_000_000
+    huge = WireMessage.model_validate({"create_time_ms": -(10**400)})
+    assert huge.create_time_ms == float("-inf") and message_time(huge, received) == received
+
+
 @pytest.mark.parametrize("value", ["soon", [1], {"ms": 1}, True])
 def test_r18_a1_a_time_that_is_not_a_number_counts_as_missing(value: object) -> None:
     """R18-A1 (D-765): a malformed ``create_time_ms`` no longer makes the whole message invalid

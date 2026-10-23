@@ -302,6 +302,17 @@ async def test_r18_a3_a_poll_in_flight_during_unbind_writes_nothing_back(
     assert h.store.state.get("ilink.poll_status") is None
 
 
+async def test_r18_a3_the_poll_record_is_not_written_without_a_login(h: Harness) -> None:
+    """R18-A3 (D-767): the poll record belongs to the login; a poll that ends after ``unbind``
+    - successful or failed - does not write it back."""
+    h.store.record_poll_failure("network", None, "down")
+    assert h.store.poll_status().consecutive_failures == 1
+    h.store.unbind()
+    assert h.store.record_poll_failure("network", None, "down") == 0
+    h.store.record_poll_success()
+    assert h.store.state.get("ilink.poll_status") is None
+
+
 async def test_r18_a3_a_candidate_in_flight_during_unbind_is_not_brought_back(
     api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
 ) -> None:
