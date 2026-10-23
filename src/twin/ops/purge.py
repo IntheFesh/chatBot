@@ -4,6 +4,8 @@
 
 ========================  =========================================================
 database                  ``twin.db`` and its journal files (the rows are counted first)
+restore leftovers         ``twin.db.replaced-*``, ``vectors.replaced-*``: what a restore moved
+                          aside and could not delete (a file another program held open)
 media                     the encrypted files in ``data/media``
 vector index              ``data/vectors``
 backups                   every archive, index file, media-pool file and pre-restore
@@ -47,6 +49,8 @@ from twin.ops.backup.layout import (
     POOL_DIRNAME,
     PRE_RESTORE_PREFIX,
     SIDECAR_SUFFIX,
+    moved_aside,
+    restore_targets,
 )
 from twin.ops.logging import shutdown_logging
 from twin.storage.db import Database
@@ -192,6 +196,8 @@ def plan_all(paths: DataPaths, mirror_dir: Path | None, keys: int) -> PurgePlan:
         else 0
     )
     plan.items.append(PurgeItem("向量库", tables_dirs, "张表", f"{vector_files} 个文件"))
+    leftovers = moved_aside(restore_targets(paths.db_path, paths.vectors_dir))
+    plan.items.append(PurgeItem("恢复时替换下的旧数据", len(leftovers), "项"))
     local = backup_files(paths.backups_dir)
     plan.items.append(PurgeItem("本地备份（含媒体池、恢复前备份）", len(local), "个文件"))
     mirrored = backup_files(mirror_dir) if mirror_dir is not None else []
@@ -310,6 +316,8 @@ def purge_all(
     report = PurgeReport("all", [item for item in plan.items if "密钥" not in item.category])
     eraser = Eraser()
     eraser.files([paths.db_path, Path(f"{paths.db_path}-wal"), Path(f"{paths.db_path}-shm")])
+    for leftover in moved_aside(restore_targets(paths.db_path, paths.vectors_dir)):
+        eraser.tree(leftover)  # what a restore could not delete (R18-A5, D-769)
     eraser.tree(paths.media_dir)
     eraser.tree(paths.vectors_dir)
     eraser.files(backup_files(paths.backups_dir))

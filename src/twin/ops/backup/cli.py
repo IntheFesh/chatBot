@@ -182,6 +182,12 @@ def backup_restore(
         f"pool, {report.media_missing} not available"
     )
     typer.echo(f"  the data that was there is in {report.pre_restore or '(there was none)'}")
+    if report.leftovers:  # held open by another program; the pre-restore backup has the same data
+        typer.echo(
+            f"  could not be deleted: {', '.join(report.leftovers)} (in {paths.data_dir}) - the "
+            "replaced data, moved aside; delete it by hand once no program holds it open "
+            "(`twin purge --all` also removes it)"
+        )
     services = context.services()
     BackupService.from_services(services).reconcile()
     integrity = run_integrity(services.db, VectorStore(paths.vectors_dir), services.clock.now_utc())

@@ -45,9 +45,12 @@ from twin.ops.backup.archive import (
 from twin.ops.backup.layout import (
     POOL_DIRNAME,
     archive_name,
+    replaced_path,
+    restore_targets,
     sidecar_name,
     write_sidecar,
 )
+from twin.ops.purge import Eraser
 from twin.storage import migrate
 from twin.storage.crypto import KeyRing, build_aad
 from twin.storage.db import Database
@@ -77,10 +80,8 @@ class RestoreReport:
     vector_files: int
     sampled_values: int
     problems: list[str] = field(default_factory=list)
-
-
-def _moved(path: Path, tag: str) -> Path:
-    return path.with_name(f"{path.name}.replaced-{tag}")
+    leftovers: list[str] = field(default_factory=list)
+    """Names of the moved-aside old files that could not be deleted (D-769); no content."""
 
 
 def database_files(db_path: Path) -> list[Path]:
@@ -234,14 +235,11 @@ def _swap(
     tag = f"{clock.now_utc():%Y%m%dT%H%M%S}"
     aside: list[tuple[Path, Path]] = []
     try:
-        for current in database_files(paths.db_path):
-            target = _moved(current, tag)
-            os.replace(current, target)
-            aside.append((current, target))
-        if paths.vectors_dir.exists():
-            target = _moved(paths.vectors_dir, tag)
-            os.replace(paths.vectors_dir, target)
-            aside.append((paths.vectors_dir, target))
+        for current in restore_targets(paths.db_path, paths.vectors_dir):
+            if current.exists():
+                target = replaced_path(current, tag)
+                os.replace(current, target)
+                aside.append((current, target))
         paths.db_path.parent.mkdir(parents=True, exist_ok=True)
         os.replace(database, paths.db_path)
         if vectors is not None and vectors.is_dir():
@@ -268,11 +266,7 @@ def _swap(
     except BaseException:
         _put_back(aside, paths)
         raise
-    for _current, moved in aside:  # the pre-restore backup holds them
-        if moved.is_dir():
-            shutil.rmtree(moved, ignore_errors=True)
-        else:
-            moved.unlink(missing_ok=True)
+    leftovers = _clean_up(aside)
     return RestoreReport(
         archive=archive.name,
         created_at=manifest.created_at,
@@ -286,7 +280,21 @@ def _swap(
         media_missing=missing,
         vector_files=0,
         sampled_values=sampled,
+        leftovers=leftovers,
     )
+
+
+def _clean_up(aside: list[tuple[Path, Path]]) -> list[str]:
+    """Delete the moved-aside old data (the pre-restore backup holds it); the names that stay.
+
+    The restore is complete by now, so a file that cannot be deleted - on Windows one another
+    program holds open - is reported, not raised: it used to turn a finished restore into a
+    failed command (R18-A5, D-769).  ``twin purge --all`` deletes such leftovers too.
+    """
+    eraser = Eraser()
+    for _current, moved in aside:
+        eraser.tree(moved)
+    return [moved.name for _current, moved in aside if moved.exists()]
 
 
 def _put_back(aside: list[tuple[Path, Path]], paths: DataPaths) -> None:

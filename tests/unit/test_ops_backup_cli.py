@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -171,6 +172,27 @@ def test_the_restore_is_an_exclusive_command_and_backup_now_only_writes() -> Non
     restore, now = get_spec(backup_cli.backup_restore), get_spec(backup_cli.backup_now)
     assert restore is not None and restore.kind is CommandKind.EXCLUSIVE
     assert now is not None and now.kind is not CommandKind.EXCLUSIVE
+
+
+def test_r18_a5_a_restore_that_cannot_delete_the_old_files_says_so_and_succeeds(
+    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-A5 (D-769): the old database a restore moved aside cannot be deleted (held open on
+    Windows): the command used to end with a traceback-like failure after a complete restore."""
+    name = make(world)
+    real_unlink = os.unlink
+
+    def held_open(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        if Path(os.fsdecode(path)).name.startswith("twin.db.replaced-"):
+            raise PermissionError(13, "The process cannot access the file: it is in use")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", held_open)
+    code, out = twin(world, "restore", name, "--yes")
+    monkeypatch.undo()
+    assert code == 0, out
+    [left] = world.services.paths.data_dir.glob("twin.db.replaced-*")
+    assert f"could not be deleted: {left.name}" in out and "delete it by hand" in out
 
 
 def test_restore_yes_skips_the_question_and_missing_files_are_refused(world: BackupWorld) -> None:
