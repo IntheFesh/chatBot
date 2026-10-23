@@ -205,7 +205,8 @@ def jobs_run(
             await close_llm_runtime(services)
         typer.echo(
             f"done={summary.done} retried={summary.retried} "
-            f"failed={summary.failed} discarded={summary.discarded}"
+            f"failed={summary.failed} discarded={summary.discarded} "
+            f"deferred={summary.deferred}"  # handed back: DeepSeek cannot do them now (D-795)
         )
 
     if force:  # a second worker beside the application cannot hold the lock the application has

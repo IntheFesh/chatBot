@@ -42,7 +42,7 @@ from twin.memory.jobs import EXTRACT_JOB, handle_memory_extract, queue_bot_extra
 from twin.memory.memory import Memory
 from twin.memory.recent import BotMessage, use_bot_turn_reader
 from twin.ops.alerts import AlertService
-from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, Worker
+from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, Worker, default_registry
 from twin.services import Services, build_services
 from twin.storage.db import Database
 
@@ -302,6 +302,28 @@ def test_jobs_retry_failed_requeues_every_failed_job_of_a_type(cli_data: Any) ->
     assert _statuses()[ids["image_caption"][0]] == ("pending", 0)
     nothing = runner.invoke(app, ["jobs", "retry", "--failed"])
     assert nothing.exit_code == 0 and "no failed job" in nothing.output
+
+
+def test_jobs_run_says_how_many_jobs_were_handed_back(cli_data: Any) -> None:
+    """R18-D1: a foreground run during an outage says ``deferred=1`` instead of all zeros."""
+
+    async def no_balance(ctx: JobContext) -> None:
+        raise InsufficientBalanceError("DeepSeek balance exhausted", status=402)
+
+    default_registry.register("outage_demo", no_balance)
+    try:
+        settings = load_settings()
+        services = build_services(settings, root=resolve_paths(settings).root)
+        try:
+            job_id = JobQueue(services.db, services.clock).enqueue("outage_demo", {})
+        finally:
+            services.close()
+        result = runner.invoke(app, ["jobs", "run", "--until-idle"])
+    finally:
+        default_registry._handlers.pop("outage_demo", None)
+    assert result.exit_code == 0, result.output
+    assert "failed=0" in result.output and "deferred=1" in result.output
+    assert _statuses()[job_id] == ("pending", 0)
 
 
 def test_jobs_retry_takes_an_id_or_failed_but_not_both(cli_data: Any) -> None:
