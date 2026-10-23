@@ -21,7 +21,10 @@ States
                 (R-ENG-002; the user's own p75 pause when ``engine.quiet_window_adaptive`` is on) or
                 ``engine.max_wait_s`` have passed since the first one.  The messages are screened
                 for a crisis (R-SAFE-001) the moment collecting ends - never later than a night's
-                sleep - and a confirmed crisis is answered at once, out of the role.
+                sleep - and a confirmed crisis is answered at once, out of the role.  The answer
+                is noted in the round before its first bubble and every pass of the driver
+                finishes it before anything else: a kill, a stop or a failed write halfway
+                through never hands those messages to the persona (D-750).
 ``DECIDING``    when does she answer?  :class:`~twin.engine.decision.Decider` draws it from her
                 state
                 (R-ENG-003, R-ENG-004, R-SCOPE-006) and the state waits for it, ``planned_send_at``
@@ -121,7 +124,7 @@ from twin.engine.history import HistoryLoader
 from twin.engine.kit import EngineKit
 from twin.engine.pacing import PacingModel, first_bubble_lead
 from twin.engine.rounds import RoundStore
-from twin.engine.roundstate import Outgoing, RoundData
+from twin.engine.roundstate import CrisisAnswer, Outgoing, RoundData
 from twin.engine.safety.crisis import CrisisOutcome
 from twin.engine.sender import (
     BubbleSender,
@@ -684,6 +687,9 @@ class ConversationEngine:
                 self._progress.set()
 
     async def _step(self, snap: ConversationSnapshot) -> None:
+        if RoundData.of(snap).crisis is not None:  # an answer to a crisis is finished first (D-750)
+            await self._answer_crisis()
+            return
         if snap.state == STATE_IDLE:
             await self._idle(snap)
         elif snap.state == STATE_COLLECTING:
@@ -747,6 +753,8 @@ class ConversationEngine:
         if not snap.pending or snap.round_id is None or snap.round_id == self._gave_up_round:
             return False  # nothing waits, or the answer was tried for this round and failed
         data = RoundData.of(snap)
+        if data.crisis is not None:
+            return False  # the round answers a crisis: never a word of the persona (D-750)
         if data.outgoing is not None and data.outgoing.reply_id is not None:
             return False  # a part of her reply is out: no second word on top of it
         self._gave_up_round = snap.round_id
@@ -1359,10 +1367,15 @@ class ConversationEngine:
             context = await self._crisis_context(snap)
             outcome = await self._crisis.handle(texts, context)
         marked = (*data.screened, *fresh_ids)
-        await self._edit(lambda d: replace(d, screened=marked))
         if outcome is None:
+            await self._edit(lambda d: replace(d, screened=marked))
             return False
-        await self._answer_crisis(outcome, snap)
+        log.warning("crisis_answered", severity=outcome.assessment.severity)
+        # the answer is noted with the mark, before its first bubble: whatever stops it halfway,
+        # the next pass finishes it - the persona never gets these messages (D-750)
+        answer = CrisisAnswer(tuple(outcome.bubbles), tuple(snap.pending))
+        await self._edit(lambda d: replace(d, screened=marked, crisis=answer))
+        await self._answer_crisis()
         return True
 
     async def _crisis_context(self, snap: ConversationSnapshot) -> list[str]:
@@ -1371,16 +1384,42 @@ class ConversationEngine:
         window = await asyncio.to_thread(self._history.load, exclude_ids=turn_ids)
         return [turn.text for turn in window.turns[-CRISIS_CONTEXT_TURNS:]]
 
-    async def _answer_crisis(self, outcome: CrisisOutcome, snap: ConversationSnapshot) -> None:
-        """Step out of the role at once: the fixed answer, no pause, no persona (R-SAFE-001)."""
-        log.warning("crisis_answered", severity=outcome.assessment.severity)
+    async def _answer_crisis(self) -> None:
+        """Step out of the role at once: the fixed answer, no pause, no persona (R-SAFE-001).
+
+        The answer is the round's note :class:`~twin.engine.roundstate.CrisisAnswer` (written by
+        :meth:`_screen` before the first bubble); each bubble that is out leaves it.  Writing a
+        bubble down is best-effort here: a write that fails is logged and the answer goes on (a
+        bubble not written down is sent again after a restart - the hotline twice is better than
+        never).  A send that the channel could not make (``FAILED``: the network) is tried again
+        2 to 10 minutes later, at most ``MAX_RETRIES`` times; any other end of the send, or the
+        last try, ends the round as before.  Never the persona (D-750).
+        """
+        data = RoundData.of(await self._load())
+        answer = data.crisis
+        if answer is None:
+            return
+        now = self._clock.now_utc()
+        if answer.retry_at is not None and answer.retry_at > now:
+            await self._wait_wake((answer.retry_at - now).total_seconds())
+            return
+        if answer.reply_id is not None or answer.retries:
+            log.info("crisis_answer_resumed", unsent=len(answer.unsent), retries=answer.retries)
         meta = ReplyMeta("safety", actions=({"step": "crisis_answer", "count": 1},))
-        bubbles = tuple(OutBubble("text", text) for text in outcome.bubbles)
-        recorder = _Recorder(self._store, meta)
+        recorder = _Recorder(self._store, meta, answer.reply_id)
 
         async def note(sent: SentBubble) -> None:
-            await recorder.record(sent)
-            await self._edit(last_outbound_at=sent.at)
+            try:
+                await recorder.record(sent)
+            except Exception as exc:  # the answer goes on: the row is not worth the hotline
+                log.warning("crisis_bubble_not_written", error=type(exc).__name__)
+            try:
+                await self._edit(
+                    lambda d: _crisis_sent(d, sent.bubble.text, recorder.reply_id),
+                    last_outbound_at=sent.at,
+                )
+            except Exception as exc:  # ... nor is the note: at worst a bubble is said again
+                log.warning("crisis_note_not_written", error=type(exc).__name__)
 
         async def keep(sent: SentBubble) -> None:
             await _written(note(sent))
@@ -1388,17 +1427,38 @@ class ConversationEngine:
         # a stop lets the whole answer go out and the round end: nothing else may be cut short
         self._safe_to_cancel.clear()
         try:
-            await self._sender.send(
-                bubbles,
+            report = await self._sender.send(
+                tuple(OutBubble("text", text) for text in answer.unsent),
                 pacing=PacingModel(),
-                wait=uninterruptible_pause(self._clock),
+                wait=self._crisis_pause,
                 on_sent=keep,
                 paced=False,
                 urgent=True,  # safety wins over a running probe (D-685); no other send sets this
             )
-            await self._complete(snap.pending)
+            if report.stop is StopReason.FAILED and answer.retries < MAX_RETRIES:
+                retry_at = self._decider.retry(self._clock.now_utc()).send_at
+                log.warning("crisis_answer_will_retry", attempt=answer.retries + 1)
+                await self._edit(lambda d: _crisis_retry(d, retry_at))
+                return
+            if report.stop is not None:
+                log.warning("crisis_answer_not_sent", reason=report.stop.value)
+            await self._complete(answer.answering)
         finally:
             self._safe_to_cancel.set()
+
+    async def _crisis_pause(self, seconds: float) -> bool:
+        """The pause before a send of the crisis answer is repeated (:func:`uninterruptible_pause`).
+
+        Nothing cuts it short; :attr:`waiting_until` says what the driver waits for, as for any
+        other wait (the pause is a whole number of microseconds, so that the moment said is the
+        moment it ends).
+        """
+        pause = timedelta(seconds=max(0.0, seconds))
+        self._waiting_until = self._clock.now_utc() + pause
+        try:
+            return await uninterruptible_pause(self._clock)(pause.total_seconds())
+        finally:
+            self._waiting_until = None
 
     # ----------------------------------------------------------------------- SENDING
 
@@ -1852,6 +1912,28 @@ def _with_extra(data: RoundData, action: dict[str, Any]) -> RoundData:
     if out is None:
         return data
     return replace(data, outgoing=replace(out, extra_actions=(*out.extra_actions, action)))
+
+
+def _crisis_sent(data: RoundData, text: str, reply_id: str | None) -> RoundData:
+    """The notes with one more bubble of the answer to a crisis out (and its reply row)."""
+    answer = data.crisis
+    if answer is None:
+        return data
+    rest = list(answer.unsent)
+    with contextlib.suppress(ValueError):
+        rest = rest[rest.index(text) + 1 :]
+    return replace(
+        data,
+        crisis=replace(answer, unsent=tuple(rest), reply_id=reply_id or answer.reply_id),
+    )
+
+
+def _crisis_retry(data: RoundData, at: datetime) -> RoundData:
+    """The notes with the answer to a crisis to be tried again at ``at``."""
+    answer = data.crisis
+    if answer is None:
+        return data
+    return replace(data, crisis=replace(answer, retries=answer.retries + 1, retry_at=at))
 
 
 def uninterruptible_pause(clock: Clock) -> Wait:
