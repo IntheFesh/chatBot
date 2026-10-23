@@ -738,6 +738,57 @@ def test_sourcing_setup_defines_the_functions_and_runs_nothing(tmp_path: Path) -
     assert [line.split()[-1] for line in done.stdout.splitlines()] == names
 
 
+# Bytes of the bf16 safetensors of the base models (the file list of the Hugging Face repository;
+# ModelScope has the same files).  ``base_gb`` of the profiles is this number in decimal gigabytes.
+REAL_BASE_BYTES = {
+    "Qwen/Qwen3-8B": 16_397_461_266,
+    "Qwen/Qwen3-14B": 29_552_613_776,
+    "Qwen/Qwen3-32B": 65_540_298_478,
+}
+
+
+def write_du_stub(tmp_path: Path, size_bytes: int) -> None:
+    """A ``du`` that reports a directory of ``size_bytes`` (``-sk``: KiB, ``-sb``: bytes)."""
+    stub = tmp_path / "stubs" / "du"
+    stub.parent.mkdir(exist_ok=True)
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f'case "$1" in -sb) echo "{size_bytes}\t$2" ;; *) echo "{size_bytes // 1024}\t$2" ;; esac\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+@posix_only
+@pytest.mark.parametrize("name", list(PROFILES))
+def test_a_complete_base_model_download_is_recognised_for_every_profile(
+    env_for,  # type: ignore[no-untyped-def]
+    tmp_path: Path,
+    name: str,
+) -> None:
+    """R18-E1 (D-810): ``du`` counts binary units, ``base_gb`` is decimal - compare bytes.
+
+    The check divided the KiB of ``du -sk`` by 1048576 (whole GiB) and compared that with
+    ``base_gb * 0.95`` (decimal GB): a finished Qwen3-14B (29.55e9 bytes = 27 GiB) never reached
+    28, a Qwen3-32B (61 GiB) never 62, so ``setup.sh`` stopped every 14B and 32B setup with
+    "the download is incomplete".  A download that is 10 % short is still incomplete.
+    """
+    profile = PROFILES[name]
+    real = REAL_BASE_BYTES[profile.base_model]
+    assert abs(profile.base_gb * 1e9 - real) / real < 0.01  # base_gb is decimal gigabytes
+    autodl, env = env_for(name)
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}", encoding="utf-8")
+    for size, complete in ((real, True), (int(real * 0.9), False)):
+        write_du_stub(tmp_path, size)
+        done = call_setup(autodl, env, f"base_model_complete '{model}'")
+        assert (done.returncode == 0) is complete, (name, size, done.stdout, done.stderr)
+    (model / "config.json").unlink()  # no config.json: never complete, whatever the size
+    write_du_stub(tmp_path, real)
+    assert call_setup(autodl, env, f"base_model_complete '{model}'").returncode == 1
+
+
 # ------------------------------------------------------ PyTorch stays as it is (R17-49b)
 
 COUNTED_TORCH = (
