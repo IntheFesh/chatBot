@@ -34,11 +34,15 @@ class LearnCommands:
         alerts: AlertSink,
         dpo_min_pairs: Callable[[], int],
         facts: FactProposer | None = None,
+        *,
+        dpo_pairs: Callable[[], tuple[int, int]],
     ) -> None:
         self._recorder = recorder
         self._alerts = alerts
         self._min_pairs = dpo_min_pairs
         self._facts = facts
+        # (pairs before the hold-out cut-off, pairs after it): DPO trains on the first (D-860)
+        self._dpo_pairs = dpo_pairs
 
     async def not_like(self, call: CommandCall) -> str:
         wording = call.args.strip()
@@ -64,7 +68,7 @@ class LearnCommands:
         if wording:
             if result.pair is not None and result.pair_created:
                 lines.append(texts.NOT_LIKE_PAIR.format(total=result.pairs_total))
-                self._announce_dpo(result.pairs_total)
+                self._announce_dpo(self._dpo_pairs()[0])
             elif result.pair is not None:
                 lines.append(texts.NOT_LIKE_PAIR_AGAIN)
             else:
@@ -72,7 +76,8 @@ class LearnCommands:
         else:
             lines.append(texts.NOT_LIKE_HINT)
         lines.append(texts.NOT_LIKE_WEEKLY)
-        hint = dpo_hint(result.pairs_total, self._min_pairs())
+        usable, later = self._dpo_pairs()
+        hint = dpo_hint(usable, self._min_pairs(), later=later)
         if hint:
             lines.append(hint)
         return "\n".join(lines)

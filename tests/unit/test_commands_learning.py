@@ -29,11 +29,13 @@ from twin.commands import texts
 from twin.engine.style_prompt import StylePromptBuilder, StyleTurn
 from twin.learning import corrections as corrections_module
 from twin.learning.corrections import KIND_FACT, FactProposer, PendingStore
-from twin.learning.pairs import PreferencePairStore, PromptSample
+from twin.learning.pairs import PreferencePairStore, PromptSample, dpo_hint, dpo_pair_counts
 from twin.llm.runtime import DEEPSEEK_SECRET
+from twin.profile.holdout import HOLDOUT_KEY, Holdout
 from twin.services import Services
 from twin.storage.learning_models import PreferencePair
 from twin.storage.models import Alert
+from twin.storage.settings_store import put_setting
 from twin.training import lf_template
 
 START = datetime(2026, 10, 9, 18, 0, tzinfo=UTC)
@@ -280,20 +282,77 @@ async def test_the_text_of_a_pair_is_sealed_at_rest(world: CommandWorld) -> None
             assert plain.encode() not in raw
 
 
+def store_cutoff(services: Services, cutoff: datetime) -> None:
+    """A stored hold-out cut-off (what ``holdout_cutoff()`` keeps once it was computed)."""
+    with services.db.transaction(bump_state=True) as session:
+        put_setting(
+            session,
+            HOLDOUT_KEY,
+            Holdout(cutoff, 0.1, 100, 10, cutoff).to_json(),
+            clock=services.clock,
+            by="test",
+        )
+
+
 async def test_enough_pairs_are_announced_once_and_in_the_status(
     world: CommandWorld,
 ) -> None:
+    """R18-DPO13 (D-860): the pairs counted are the ones made before the hold-out cut-off."""
     world.services.settings.training.dpo_min_pairs = 2
+    store_cutoff(world.services, world.clock.now_utc() + timedelta(days=1))
     world.chat("今天好累呀", ["哈哈 辛苦啦"])
     first = await world.reply("/不像 抱抱你")
     assert "可以做 DPO" not in first
     second = await world.reply("/不像 快去睡吧")
-    assert "偏好对已有 2 对（至少 2 对），可以做 DPO：先 twin train export-dpo" in second
+    assert (
+        "偏好对已有 2 对在留出切分点之前（至少 2 对），可以做 DPO：先 twin train export-dpo"
+        in second
+    )
     with world.services.db.session() as session:
         alerts = [a for a in session.scalars(select(Alert)) if a.category == "dpo_ready"]
     assert len(alerts) == 1
     status = await world.reply("/状态")
-    assert "偏好对已有 2 对（至少 2 对），可以做 DPO" in status
+    assert "偏好对已有 2 对在留出切分点之前（至少 2 对），可以做 DPO" in status
+
+
+async def test_pairs_made_after_the_cutoff_do_not_make_dpo_possible(
+    world: CommandWorld,
+) -> None:
+    """R18-DPO13 (D-860): DPO only trains on pairs from before the cut-off, so pairs made after
+    it - every new correction, while the cut-off has not moved past it - are not counted."""
+    world.services.settings.training.dpo_min_pairs = 2
+    store_cutoff(world.services, world.clock.now_utc() - timedelta(days=1))
+    world.chat("今天好累呀", ["哈哈 辛苦啦"])
+    await world.reply("/不像 抱抱你")
+    second = await world.reply("/不像 快去睡吧")
+    assert store(world).count() == 2 and "可以做 DPO" not in second
+    with world.services.db.session() as session:
+        assert not [a for a in session.scalars(select(Alert)) if a.category == "dpo_ready"]
+    assert "可以做 DPO" not in await world.reply("/状态")
+    store_cutoff(world.services, world.clock.now_utc() + timedelta(days=1))  # the cut moved on
+    assert "可以做 DPO" in await world.reply("/状态")
+
+
+def test_the_dpo_counts_split_the_pairs_at_the_cutoff(services: Services) -> None:
+    moment = datetime(2026, 9, 1, tzinfo=UTC)
+    for hours in (-5, -1, 2):
+        PreferencePairStore(services.db, ManualClock(moment + timedelta(hours=hours))).add(
+            reply_id=f"r{hours}",
+            sample=PromptSample("她说话很短。", (lf_template.Turn("user", "在吗"),), moment),
+            chosen=f"说法{hours}",
+            rejected="回复",
+            template_version=lf_template.TEMPLATE_VERSION,
+            persona_version="live:v1",
+        )
+    assert dpo_pair_counts(services) == (0, 3)  # no cut-off yet: nothing can be trained on
+    store_cutoff(services, moment)
+    assert dpo_pair_counts(services) == (2, 1)
+    assert PreferencePairStore(services.db, services.clock).count(before=moment) == 2
+    assert dpo_hint(2, 2, later=1) == (
+        "偏好对已有 2 对在留出切分点之前（至少 2 对），可以做 DPO：先 twin train export-dpo；"
+        "另有 1 对在切分点之后，留到下次"
+    )
+    assert dpo_hint(1, 2, later=5) is None
 
 
 async def test_not_like_is_listed_in_the_help_and_answers_in_system_voice(

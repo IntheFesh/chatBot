@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 
@@ -32,6 +32,9 @@ from twin.storage.db import Database
 from twin.storage.learning_models import PreferencePair
 from twin.training import lf_template
 from twin.training.lf_template import Turn
+
+if TYPE_CHECKING:
+    from twin.services import Services
 
 SOURCE_USER_CORRECTION = "user_correction"
 SAMPLE_SCHEMA = 1
@@ -232,13 +235,42 @@ class PreferencePairStore:
             )
             return [_record(row) for row in rows]
 
-    def count(self) -> int:
+    def count(self, *, before: datetime | None = None) -> int:
+        """The number of pairs (stored before ``before``, when it is given)."""
+        query = select(func.count()).select_from(PreferencePair)
+        if before is not None:
+            query = query.where(PreferencePair.created_at < before)
         with self._db.session() as session:
-            return int(session.scalar(select(func.count()).select_from(PreferencePair)) or 0)
+            return int(session.scalar(query) or 0)
 
 
-def dpo_hint(pairs: int, minimum: int) -> str | None:
-    """The line that says there are enough pairs for DPO (R-TRN-012), or ``None``."""
+def dpo_pair_counts(services: Services) -> tuple[int, int]:
+    """``(pairs DPO may train on, pairs it may not yet)``, split at the stored hold-out cut-off.
+
+    DPO only trains on the pairs made before the cut-off (iron rule 13, D-860; the export keeps
+    those of its base dataset).  Before a cut-off was ever computed there is no dataset to build
+    on, so none counts.  A pure read: the cut-off is not computed here.
+    """
+    from twin.profile.holdout import get_holdout
+
+    store = PreferencePairStore(services.db, services.clock)
+    total = store.count()
+    stored = get_holdout(services)
+    usable = store.count(before=stored.cutoff) if stored is not None else 0
+    return usable, total - usable
+
+
+def dpo_hint(pairs: int, minimum: int, *, later: int = 0) -> str | None:
+    """The line that says there are enough pairs for DPO (R-TRN-012), or ``None``.
+
+    ``pairs`` are the pairs made before the hold-out cut-off, ``later`` the others (D-860).
+    """
     if pairs < minimum:
         return None
-    return f"偏好对已有 {pairs} 对（至少 {minimum} 对），可以做 DPO：先 twin train export-dpo"
+    text = (
+        f"偏好对已有 {pairs} 对在留出切分点之前（至少 {minimum} 对），"
+        "可以做 DPO：先 twin train export-dpo"
+    )
+    if later:
+        text += f"；另有 {later} 对在切分点之后，留到下次"
+    return text

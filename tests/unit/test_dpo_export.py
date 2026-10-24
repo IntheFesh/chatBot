@@ -47,10 +47,12 @@ from twin.learning.pairs import (
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
 from twin.ops.jobs import HandlerRegistry, JobContext, JobQueue, JobView
+from twin.profile.holdout import HOLDOUT_KEY, Holdout
 from twin.profile.persona.store import PersonaStore
 from twin.services import Services, build_services, get_cli_context
 from twin.storage.ids import new_id
 from twin.storage.learning_models import PreferencePair
+from twin.storage.settings_store import put_setting
 from twin.training import lf_template
 from twin.training.cli import format_dpo_state
 from twin.training.dataset_dir import file_sha256, load_dataset_dir
@@ -91,6 +93,7 @@ USER_TURN = lf_template.Turn("user", "今天好累呀")
 # the hold-out cut-off of the base datasets of the tests of the file itself: after the test clock
 # (2026-10-09 12:00) and NOW, so every pair those tests make is one the export may train on
 LATE_CUTOFF = "2026-10-10T00:00:00+00:00"
+CUTOFF_AFTER_ALL = datetime.fromisoformat(LATE_CUTOFF)
 runner = CliRunner()
 
 
@@ -762,9 +765,25 @@ def test_the_retrain_check_reports_the_pairs_for_dpo(data_dir: Path, clock: Manu
         add_pair(services)
 
     with_services(add)
-    runner.invoke(app, ["--set", "training.dpo_min_pairs=1", "train", "retrain-check"])
+    after = runner.invoke(app, ["--set", "training.dpo_min_pairs=1", "train", "retrain-check"])
+    # R18-DPO13 (D-860): no cut-off yet - no pair DPO may train on
+    assert "preference pairs: 1 (0 before the hold-out cut-off, 1 after it)" in after.output
+    assert "可以做 DPO" not in after.output
+
+    def cut(services: Services) -> None:
+        with services.db.transaction(bump_state=True) as session:
+            put_setting(
+                session,
+                HOLDOUT_KEY,
+                Holdout(CUTOFF_AFTER_ALL, 0.1, 100, 10, CUTOFF_AFTER_ALL).to_json(),
+                clock=services.clock,
+                by="test",
+            )
+
+    with_services(cut)
     result = runner.invoke(app, ["--set", "training.dpo_min_pairs=1", "train", "retrain-check"])
-    assert "preference pairs: 1" in result.output and "可以做 DPO" in result.output
+    assert "preference pairs: 1 (1 before the hold-out cut-off, 0 after it)" in result.output
+    assert "可以做 DPO" in result.output
 
 
 def test_the_sample_schema_is_part_of_the_stored_form() -> None:

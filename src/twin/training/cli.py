@@ -44,7 +44,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.learning.pairs import PreferencePairStore, dpo_hint
+from twin.learning.pairs import dpo_hint, dpo_pair_counts
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
@@ -492,9 +492,12 @@ def retrain_check_command() -> None:
     if status.suggested:
         typer.echo("export the data again with `twin train export`, then train from the base model")
     _warn_about_the_holdout(services)
-    pairs = PreferencePairStore(services.db, services.clock).count()
-    typer.echo(f"preference pairs: {pairs}")
-    hint = dpo_hint(pairs, services.settings.training.dpo_min_pairs)
+    usable, later = dpo_pair_counts(services)  # DPO trains on the ones before the cut-off only
+    typer.echo(
+        f"preference pairs: {usable + later} ({usable} before the hold-out cut-off, "
+        f"{later} after it)"
+    )
+    hint = dpo_hint(usable, services.settings.training.dpo_min_pairs, later=later)
     if hint:
         typer.echo(hint)
 
