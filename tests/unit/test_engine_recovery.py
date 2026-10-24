@@ -504,7 +504,13 @@ async def test_a_wake_up_keeps_a_planned_time_that_is_still_ahead(rig: Harness) 
     await run_to_idle(rig.engine, rig.clock, until=lambda: at_state(rig, "DECIDING"))
     planned = rig.engine.snapshot().planned_send_at
     await rig.engine.on_resumed(Resumed(rig.clock.now_utc(), "wake", 30.0, None))
-    await asyncio.sleep(0.05)
+    # R18-F13: not a fixed 50 ms - wait until the driver has looked at the wake-up (the nudge
+    # is cleared) and waits again, so the assertion below is about the state it then left
+    await wait_until(
+        lambda: not rig.engine.pending_wake and rig.engine.waiting_until is not None,
+        limit_s=10.0,
+        interval=0.002,
+    )
     assert rig.engine.snapshot().planned_send_at == planned
     await run_to_idle(rig.engine, rig.clock)
     assert rig.channel.texts == ["好的"]

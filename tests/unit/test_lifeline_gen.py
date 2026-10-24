@@ -24,7 +24,7 @@ from tests.support.memory import add_event, add_fact, make_memory
 from tests.support.policies import AlwaysOffPeak
 from tests.support.routine import Rig, fixed_model
 from twin.llm.deepseek import DeepSeekClient
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
+from twin.llm.errors import BudgetDeniedError, CircuitOpenError, InvalidRequestError
 from twin.llm.runtime import DEEPSEEK_SECRET, LlmRuntime, build_llm_runtime
 from twin.llm.types import DAILY
 from twin.memory.api import lifeline_at
@@ -322,7 +322,8 @@ async def test_a_failing_model_stores_nothing(
 ) -> None:
     plan = rig.planner.ensure(FRIDAY)
     api.post(API).mock(side_effect=ScriptedLifelineModel(fail_from_call=1))
-    with pytest.raises(Exception):  # noqa: B017 - any API failure surfaces unchanged
+    # R18-F13: the API's 400 surfaces unchanged as the client's own error, not as any exception
+    with pytest.raises(InvalidRequestError):
         await generator(rig, memory, runtime).generate(plan, DAILY)
     assert stored(memory) == []
 

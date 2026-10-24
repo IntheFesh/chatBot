@@ -47,7 +47,7 @@ jobs:
       - name: Install Python and dependencies
         run: |
           uv python install 3.12
-          uv sync --frozen
+          uv sync --locked
 
       - name: ruff (lint)
         run: uv run ruff check .
@@ -121,7 +121,7 @@ jobs:
       - name: Install Python and dependencies
         run: |
           uv python install 3.12
-          uv sync --frozen
+          uv sync --locked
 
       - name: Select the test files of this shard
         run: |
@@ -189,7 +189,7 @@ jobs:
       - name: Install Python and the development tools
         run: |
           uv python install 3.12
-          uv sync --frozen --only-group dev
+          uv sync --locked --only-group dev
 
       - name: Download the coverage data of every shard of this OS
         uses: actions/download-artifact@v4
