@@ -122,7 +122,7 @@ uv run twin health              # 通道、DeepSeek、风格模型、磁盘、�
 - **断电或系统更新重启后想无人值守恢复**，需要开启 Windows 自动登录（`netplwiz` 或 Sysinternals Autologon）。风险：开机后任何接触这台电脑的人都直接进入你的账户，只在电脑放在可信的地方并开了 BitLocker 时才这么做；否则重启后要你手动登录一次。
 - 调试时可以在窗口里前台运行：`uv run twin run`（Ctrl+C 优雅退出）。**不要和计划任务同时跑**：第二个会立刻报 `another 'run' instance is already running`（退出码 4）。
 - 日志在 `data\logs\`：`twin.log`（应用）、`twin-cli.log`（命令）、`twin-supervise.log`（监督进程），每行一个 JSON，10 MB × 10 份轮转；INFO 及以上不含聊天正文。
-- 告警（登录失效、DeepSeek 连续失败、预算、备份失败、磁盘不足、风格模型掉线……）同时走 Windows 通知和邮件，同类 1 小时最多 1 封；邮件里没有任何聊天内容，二维码只在本机弹窗里出现。
+- 告警（登录失效、DeepSeek 连续失败、预算、备份失败、磁盘不足、风格模型掉线……）同时走 Windows 通知和邮件，同类 1 小时最多 1 封（这一小时里被压住的告警，若到点时问题仍在，会在这一小时结束时补发一次，之后照常每 `ops.health.remind_h` 小时提醒，D-893）；邮件里没有任何聊天内容，二维码只在本机弹窗里出现。
 
 ---
 
@@ -690,6 +690,7 @@ uv run twin purge --all
 | 邮件收不到 | `uv run twin setup` 重走 SMTP 一步并发测试邮件；Gmail 要应用专用密码，QQ/163 要授权码 |
 | 导入很慢或卡住 | `uv run twin import status` 看阶段；`uv run twin import --resume` 续传；表情包下载失败不阻塞导入，`uv run twin stickers download --retry-failed` 重试 |
 | 任务队列积压 | `uv run twin jobs list --status failed` 看失败的任务；`uv run twin jobs retry <任务号>`，或 `uv run twin jobs retry --failed` 一次全部重排；DeepSeek 不可用时（预算、熔断、Key 被拒、余额用完）离线任务不算失败，会交还队列等着（Key/余额问题一小时再问一次） |
+| 通知“有后台任务处于失败状态” | 健康检查 `failed_jobs`：最近 24 小时里有任务失败到底（`twin health` 那一行按类型列出个数）。`uv run twin jobs list --status failed` 与 `uv run twin jobs show <任务号> --detail` 看原因，修好后 `uv run twin jobs retry --failed`；任务放回队列后检查回到正常，会收到“已恢复”（D-892） |
 | 一次性批任务暂停 | 实际费用超过估算 20%：检查后 `uv run twin jobs approve <批次号>` 重新批准，或取消 |
 | 想让运行中的应用重读人设卡等 | 不用重启：轻量修改命令写库后应用 2 秒内感知 |
 
