@@ -10,7 +10,9 @@ One template table (:data:`EVENT_TEMPLATES`) drives everything:
   event text is removed, and training targets / retrieval examples are filtered with it.  The
   rule is the literal prefix of each template (``[图片`` / ``【语音`` ...), searched in folded
   text; because it is derived, adding or changing a template changes the detector too;
-* :func:`is_reproducible` tells which kinds the bot could itself have sent.
+* :func:`is_reproducible` tells which kinds the bot could itself have sent;
+* :func:`quote_line` is the one line a quote reply starts with (``[引用:<at most 30 characters>]``)
+  wherever a model reads one: the reply path, the training set and the evaluation (D-840).
 
 Fields are written ``{name}``; the literal parts must not contain braces.
 """
@@ -224,6 +226,40 @@ def _render_system(message: EventSource, templates: Mapping[str, str]) -> str:
     if "拍了拍" in text or "拍一拍" in text:
         return templates["pat"]
     return templates["system"]
+
+
+# --------------------------------------------------------------- the quote line
+
+QUOTE_CHARS = 30
+QUOTE_PREFIX = "[引用:"
+_INVISIBLE_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1b\x7f]")  # control characters, not spaces
+
+
+def quoted_source(quote: Mapping[str, object] | None) -> str | None:
+    """What a stored quote reply (``messages.quote``) quotes: its content, else its title."""
+    found: Mapping[str, object] = quote or {}
+    source = found.get("quoteContent") or found.get("quoteTitle")
+    return source if isinstance(source, str) else None
+
+
+def quote_fragment(source: str | None) -> str | None:
+    """The quoted words as every reader shows them (R-TRN-003, R-EVAL-001, D-840).
+
+    One line (runs of blanks and line breaks become one space, control characters go), at most
+    :data:`QUOTE_CHARS` characters - a hard cut without an ellipsis, because the reply's own quote
+    is matched against the user's words - and a ``]`` written as ``)`` so that it cannot close the
+    line early.  ``None`` when nothing is left.
+    """
+    words = _one_line(_INVISIBLE_CONTROLS.sub("", source or ""))
+    fragment = words[:QUOTE_CHARS].rstrip().replace("]", ")")
+    return fragment or None
+
+
+def quote_line(source: str | None) -> str | None:
+    """``[引用:<被引用的话>]``: the one quote line of the reply path, the training set and the
+    evaluation sandbox (iron rule 8, D-840); ``None`` when there is nothing to show."""
+    fragment = quote_fragment(source)
+    return f"{QUOTE_PREFIX}{fragment}]" if fragment else None
 
 
 def is_reproducible(message: object) -> bool:

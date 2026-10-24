@@ -47,6 +47,7 @@ from twin.memory.recent import BotMessage, Role, Turn, merge_turns
 from twin.profile.holdout import holdout_cutoff
 from twin.retrieval.windows import LocalPlace
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
 from twin.training.export_blocks import (
     BlockRef,
     LoadedBlock,
@@ -195,6 +196,7 @@ class SampleDrawer:
         self._place = LocalPlace.create(services)
         catalog = StickerCatalog(services)
         self._tag = catalog.tag_lookup()
+        self._user_stickers = user_sticker_lines(catalog)  # as the reply path writes them (D-840)
         self.describe = StickerDescriber(catalog)
 
     # ------------------------------------------------------------------ strata
@@ -292,7 +294,7 @@ class SampleDrawer:
         flat = [m for turn in block.context for m in turn]
         messages: list[BotMessage] = []
         for message in flat:
-            text = context_text([message.data], self._tag)
+            text = context_text([message.data], self._tag, self._user_stickers)
             if text:
                 role: Role = "user" if message.data.is_sent else "bot"
                 messages.append(BotMessage(message.data.id, role, text, message.at))
@@ -316,11 +318,16 @@ class SampleDrawer:
         )
 
     def _inbound(self, message: LoadedMessage) -> dict[str, Any]:
+        """A message of the user's last turn as the sandbox hands it to the pipeline.
+
+        Its text is the line the running bot writes for it when it arrives - the same quote
+        line, the same sticker description - so a test measures what the bot reads (D-840).
+        """
         return {
             "id": message.data.id,
             "at": message.at.isoformat(),
             "kind": "text" if message.data.kind == "quote" else message.data.kind,
-            "text": context_text([message.data], self._tag),
+            "text": context_text([message.data], self._tag, self._user_stickers),
         }
 
     def _shown(self, turn: Turn, by_id: Mapping[str, LoadedMessage]) -> dict[str, Any]:

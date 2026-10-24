@@ -8,9 +8,9 @@ Two different renderings of the same messages:
 * a sticker is ``[表情包:<标签>]`` with the tag of the sticker library, ``[表情包]`` when it has
   none;
 * an emoji code such as ``[拥抱]`` stays as she typed it;
-* a reply that quotes starts with the line ``[引用:<quoted text, 30 characters>]`` - only when the
-  first message of the block is the quote, because the output convention allows the quote line
-  as the first line only (``engine.parsing``);
+* a reply that quotes starts with the line ``[引用:<quoted text, 30 characters>]``
+  (:func:`twin.ingest.events.quote_line`) - only when the first message of the block is the quote,
+  because the output convention allows the quote line as the first line only (``engine.parsing``);
 * everything the bot could not send itself - pictures, voice, video, calls, transfers, red
   packets, locations, files, links, chat histories, system events - is **deleted** from the
   target, and so is a text line that merely looks like one of those (a typed ``[链接]``).  A
@@ -19,6 +19,11 @@ Two different renderings of the same messages:
 **The context** (the turns before it, hers and the user's): the same text, sticker and quote
 lines, but a message the bot could not send stays visible as its event text
 (:func:`~twin.ingest.events.render_event_text`), because that is what the user sends the bot.
+What the user sent is written exactly as the running bot writes it when it arrives (iron rule 8,
+R-TRN-011, D-840): a quote with the same :func:`~twin.ingest.events.quote_line`, and a sticker of
+the user as the reply path describes it, ``[表情包：<描述>（情绪：<标签>）]``
+(:func:`twin.stickers.incoming.user_sticker_lines`); her stickers stay ``[表情包:<标签>]``, the
+line she - and the bot in her place - writes.
 
 Newlines inside one message become spaces: a line break in a reply means "another bubble".
 Control tokens of the chat template and the slot names of LLaMA-Factory are removed
@@ -33,14 +38,19 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from twin.engine.style_prompt import scrub
-from twin.ingest.events import EventTextDetector, Kind, default_detector, render_event_text
+from twin.ingest.events import (
+    EventTextDetector,
+    Kind,
+    default_detector,
+    quoted_source,
+    render_event_text,
+)
+from twin.ingest.events import quote_line as shared_quote_line
 from twin.profile.textstats import EMOJI_CODE_RE
 from twin.retrieval.records import MessageData
 
-QUOTE_CHARS = 30
 STICKER_TEXT = "[表情包]"
 STICKER_PREFIX = "[表情包:"
-QUOTE_PREFIX = "[引用:"
 
 # drop reasons that are not a message kind
 EVENT_TEXT_LITERAL = "event_text_literal"
@@ -48,6 +58,8 @@ EMPTY_TEXT = "empty_text"
 QUOTE_NOT_FIRST = "quote_not_first"
 
 StickerLabeler = Callable[[str], str | None]
+UserStickerLine = Callable[[str | None], str]
+"""``md5 -> the line of a sticker the user sent`` (``stickers.incoming.user_sticker_lines``)."""
 
 _LINE_BREAKS = re.compile(r"\s*[\r\n]+\s*")
 
@@ -66,16 +78,15 @@ def sticker_line(message: MessageData, labeler: StickerLabeler | None) -> str:
     return f"[表情包:{label}]" if label else STICKER_TEXT
 
 
-def quote_line(message: MessageData, *, limit: int = QUOTE_CHARS) -> str | None:
-    """``[引用:<quoted text cut to 30 characters>]`` of a quote reply, or ``None``."""
+def quote_line(message: MessageData) -> str | None:
+    """``[引用:<quoted text cut to 30 characters>]`` of a quote reply, or ``None``.
+
+    The one quote line of :func:`twin.ingest.events.quote_line` - the reply path writes the user's
+    quotes with it (D-840).
+    """
     if message.kind != Kind.QUOTE.value:
         return None
-    quote = message.quote or {}
-    source = quote.get("quoteContent") or quote.get("quoteTitle")
-    if not isinstance(source, str):
-        return None
-    fragment = collapse(source)[:limit].rstrip().replace("]", ")")
-    return f"{QUOTE_PREFIX}{fragment}]" if fragment else None
+    return shared_quote_line(quoted_source(message.quote))
 
 
 def _own_lines(message: MessageData, labeler: StickerLabeler | None) -> list[str]:
@@ -86,11 +97,20 @@ def _own_lines(message: MessageData, labeler: StickerLabeler | None) -> list[str
     return [text] if text else []
 
 
-def context_text(messages: Sequence[MessageData], labeler: StickerLabeler | None) -> str:
-    """One turn of the context: its messages as lines (event text where the bot cannot copy)."""
+def context_text(
+    messages: Sequence[MessageData],
+    labeler: StickerLabeler | None,
+    user_stickers: UserStickerLine,
+) -> str:
+    """One turn of the context: its messages as lines (event text where the bot cannot copy).
+
+    ``labeler`` names her stickers; ``user_stickers`` writes the user's as the reply path does.
+    """
     lines: list[str] = []
     for message in messages:
-        if message.kind in (Kind.TEXT.value, Kind.STICKER.value, Kind.QUOTE.value):
+        if message.kind == Kind.STICKER.value and message.is_sent:
+            lines.append(user_stickers(message.sticker_md5))
+        elif message.kind in (Kind.TEXT.value, Kind.STICKER.value, Kind.QUOTE.value):
             header = quote_line(message)
             if header:
                 lines.append(header)
@@ -147,7 +167,7 @@ def render_target(
                 if target.lines or target.quoted:
                     target.dropped[QUOTE_NOT_FIRST] += 1
                 else:
-                    target.lines.append(header)
+                    target.lines.append(scrub(header))  # the reply is the label: no control text
                     target.quoted = True
         for line in _own_lines(message, labeler):
             if kind != Kind.STICKER.value and detector.is_event_text(line):

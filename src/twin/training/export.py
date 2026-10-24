@@ -78,6 +78,7 @@ from twin.profile.holdout import HoldoutError, holdout_cutoff
 from twin.profile.persona.refresh import has_description
 from twin.profile.persona.render import RenderedPersona
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
 from twin.training import lf_template
 from twin.training.dataset_dir import DatasetDir, ParityCase, SftSample, write_dataset_dir
 from twin.training.export_blocks import (
@@ -280,7 +281,9 @@ class TrainingSetExporter:
             else settings.training.hybrid_plan_ratio
         )
         self._memory_tokens = settings.style_model.memory_tokens
-        self._labeler = StickerCatalog(services).tag_lookup()
+        catalog = StickerCatalog(services)
+        self._labeler = catalog.tag_lookup()
+        self._user_stickers = user_sticker_lines(catalog)  # as the reply path writes them
         self._loader = MessageLoader(services)
         self._memory_builder = StylePromptBuilder(memory_tokens=self._memory_tokens)
 
@@ -324,7 +327,7 @@ class TrainingSetExporter:
         turns: list[StyleTurn] = []
         last_at: datetime | None = None  # the last message of the last turn that has text
         for turn in block.context:
-            text = context_text([m.data for m in turn], self._labeler)
+            text = context_text([m.data for m in turn], self._labeler, self._user_stickers)
             if text:
                 turns.append(StyleTurn("user" if turn[0].data.is_sent else "assistant", text))
                 last_at = turn[-1].at

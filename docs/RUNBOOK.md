@@ -437,6 +437,8 @@ uv run twin model list
 
 她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = （先 `uv run twin retrieval resplit`，见下）→ 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。训练集只取留出切分点之前的样本，切分点不随导入移动：不重切，上次之后导入的聊天全在留出集里，新导出的训练集与上次几乎一样（`retrain-check` 与 `export` 在切分点明显落后时会提示，第 18 轮 D-818）。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
 
+**第 18 轮之前导出的数据集要重新导出（D-840）**：你发的表情包与引用在训练集、评估沙盒和线上现在是同一种写法（表情包带描述与情绪标签，引用截到 30 字），旧数据集里是另一种。重新 `twin train export` → `bundle` → `remote all` 并重跑 `twin eval gate M5`；导出前用 `twin stickers tag-all` 让你发过的表情包都有描述。
+
 **DPO 的参考模型与适配器栈（第 17 轮，DECISIONS D-650 至 D-657）**：DPO 的参考模型是 SFT 模型，不是基座。bf16 三档（`5090-8b`、`pro6000-14b`、`pro6000-32b`）在合并了 SFT 的模型上新建一个 DPO 适配器（不多占显存和磁盘），所以模型是 `sft` + `dpo` 两个适配器叠加；`5090-14b`（4 比特）继续 SFT 适配器，参考是显式的 4 比特 SFT 模型，`dpo.sh` 先用最长的 64 条偏好对试跑 1 步，显存不够就降批大小，仍放不下才**仅这一档**退回“基座”作参考——退回时 `twin train remote dpo` 与 `twin train remote status` 会用大写的 `FALLBACK` 告诉你，`artifacts/dpo/dpo_reference.json`、训练报告（`artifacts/dpo/metrics.json`）和登记后的 `twin model show` 里也有。`twin train remote eval` 在有 DPO 适配器时用同一批留出样本评估 SFT 与 SFT+DPO 两个栈，按“风格指标在 ±30% 内的个数、偏差、验证集 loss”的顺序比较（全平保留 SFT），把更好的写回实例；`export` 合并的就是保留的那个（有 DPO 适配器却还没有评估的裁决时 `export.sh` 会停下，不会猜）。远程 vLLM 把两个适配器按秩拼接成一个适配器服务（`--max-lora-rank` 随之读自适配器配置）；`twin model register` 逐层核对哈希并记录适配器栈。第一次真实运行请留意：5090-14b 的试跑结果、`dpo_reference.json` 里的 `fallback`、两个栈的评估数字。
 
 ---

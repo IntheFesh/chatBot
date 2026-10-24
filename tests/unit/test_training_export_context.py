@@ -41,6 +41,7 @@ from twin.profile.holdout import holdout_cutoff
 from twin.schedule.proactive import decide
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
 from twin.training import lf_template
 from twin.training.dataset_dir import DatasetDir
 from twin.training.export import ExportOptions, ExportResult, TrainingSetExporter
@@ -279,10 +280,11 @@ async def test_r17_6_the_cue_prompt_equals_what_the_proactive_path_renders(
     ref = next(r for r in iter_block_refs(services, across_gaps=True) if r.reply_at == follow_up)
     (block,) = MessageLoader(services).load([ref])
     label = StickerCatalog(services).tag_lookup()
+    users = user_sticker_lines(StickerCatalog(services))  # as the exporter (D-840)
     history = tuple(
         Turn(
             "user" if turn[0].data.is_sent else "bot",
-            context_text([m.data for m in turn], label),
+            context_text([m.data for m in turn], label, users),
             turn[0].at,
             turn[-1].at,
             tuple(m.data.id for m in turn),
