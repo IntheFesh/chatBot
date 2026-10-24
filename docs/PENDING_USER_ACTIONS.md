@@ -189,7 +189,7 @@
    - 下次 `uv run twin import <新导出>` 之后，导入报告多一节"风格变化"：画像重算排队中时先写"还没有计算/首次画像"，任务跑完后这一节会被改写成"相对上一版变化超过 10% 的指标"。没有她的新消息的导入不会触发重算。
 
 6. **（后续轮次）重切留出集**
-   - 函数 `twin.profile.holdout.resplit_holdout()` 已完成并有测试；命令 `twin retrieval resplit` 在第 05 轮提供。重切会让评估结果前后不可比，并自动排队重算 pre_holdout 范围的派生数据。
+   - 函数 `twin.profile.holdout.resplit_holdout()` 已完成并有测试；命令 `twin retrieval resplit` 在第 05 轮提供。重切会让评估结果前后不可比，并自动排队重算 pre_holdout 范围的派生数据。第 18 轮起（你的决定，D-881）`twin train export` 每次先自动重切到当时的最新 10%，不必再手动重切；已存的评估与门槛结果不作废（D-884）。
 
 ## 第 05 轮 —— 向量模型与真实片段检索库
 
@@ -202,7 +202,7 @@
      uv run twin retrieval stats
      ```
      应用在运行时去掉 `--foreground`，命令只入队、运行中的应用执行，用 `twin retrieval stats` 看进度（“last index run”一行有已完成/总数、速度、预计剩余）。任务可随时 Ctrl+C，再次运行会从停下的地方继续。
-   - 预期：`stats` 里有“windows (her reply blocks)”总数、“held out”（约占 10%）、“windows with a vector”（= 有上下文且未留出的窗口数）、“vectors in the index”与前者相同、模型名 `BAAI/bge-small-zh-v1.5`，且没有以 `problem:` 开头的行。
+   - 预期：`stats` 里有“windows (her reply blocks)”总数、“held out”（约占 10%）、“windows with a vector”（= 有上下文的窗口数；第 18 轮起留出期的窗口也编码，D-880）、“vectors in the index”与前者相同、模型名 `BAAI/bge-small-zh-v1.5`，且没有以 `problem:` 开头的行。
    - 请把这些数字告诉我：窗口总数、留出数、`last index run` 里的“每千个窗口多少秒”（沙箱 4 核 CPU 是 9 秒；你的 CPU 不同会有几倍差别）。另外：`uv run pytest tests/unit/test_retrieval_real_backend.py -q`（约 10 秒）确认 Windows 上 torch + sentence-transformers 能正常加载一个小模型；`$env:TWIN_LIVE=1; uv run pytest tests/integration/test_retrieval_live.py -s -q` 用真实模型再跑一遍（会下载模型，约一分钟）。
    - 如果访问不了 Hugging Face：在能访问的电脑上跑一次，再把整个 `data/models/embeddings/` 文件夹拷到本机同一位置；或设置环境变量 `HF_ENDPOINT` 指向你信任的镜像。
 
@@ -214,16 +214,16 @@
    - 向量库在 `data/vectors/`，只有窗口 id、向量、时间、15 分钟格、日类型，没有任何文字；`twin retrieval stats` 的输出里也只有计数。如果想自己确认：`data/vectors/` 下的文件用任意工具搜她的某句话，应当找不到。
 
 4. **何时重切留出集（`twin retrieval resplit`）**
-   - 背景：留出切分点在第一次计算后固定，之后导入的**更新的**消息全部落在切分点之后，算留出集、**不会进检索库**（评估集不能悄悄变化）。所以每次导入新记录后，最新的那一段对话要等你重切才会被她的“类似情况下怎么回”检索到。
+   - 背景：留出切分点导入时不移动，之后导入的**更新的**消息落在切分点之后，算留出集、不进训练集（评估集不能悄悄变化）。第 18 轮起（你的决定，D-880）检索库收录全部窗口：最新的对话导入后就能被她的“类似情况下怎么回”检索到，评估与训练只经 `AsOfView(t)` 看到样本时刻之前的窗口。`twin train export` 会先自动重切（D-881），所以多数情况下不需要手动重切。
    - 什么时候做：新记录积累到一定量（例如准备重训风格模型之前）。命令：
      ```
      uv run twin retrieval resplit            # 会先问一次；--yes 免问；--foreground 在应用没运行时就地执行排队的作业
      ```
-     它把切分点移到“今天的数据的最新 10%”，立刻把新进入留出集的窗口从索引里删掉、把退出留出集的窗口排队编码，并排队重算 pre_holdout 的画像与作息。**重切后，重切之前的评估结果与之后的不可比**（留出集换了），第 09b 轮起请在重切之后重新评估。
+     它把切分点移到“今天的数据的最新 10%”，只移动窗口的留出标记（检索库的向量不动，D-880），排队重算 pre_holdout 的画像与作息，并为人设卡的 pre_holdout 描述安排一个等你批准的批次。**重切后，重切之前的评估结果与之后的不可比**（留出集换了），但已存的结果和门槛判定都保留（D-884）；之后的评估只从新切分点之后取上下文。
    - 平时不需要重切。
 
 5. **每次导入之后**
-   - `uv run twin import <新导出>` 的导入后钩子会自动排队检索库的增量更新（只编码新增的、未留出的窗口；没有新消息时跳过）。导入报告“导入后钩子”一节里有 `retrieval` 一行。钩子的回填命令就是第 1 条的 `twin retrieval rebuild`。
+   - `uv run twin import <新导出>` 的导入后钩子会自动排队检索库的增量更新（只编码新增的窗口，留出期的也编码；没有新消息时跳过）。导入报告“导入后钩子”一节里有 `retrieval` 一行。钩子的回填命令就是第 1 条的 `twin retrieval rebuild`。
    - 如果钩子一行显示 failed 且写着 `retrieval.model` 与索引不一致：你改过模型，运行 `uv run twin retrieval rebuild`。
 
 6. **（后续轮次）**
@@ -280,7 +280,7 @@
 
 6. **导入新记录或重切留出集之后**
    - 导入：钩子会刷新统计规则；她的消息比上次生成描述时增加 ≥ 10% 时，会排一个新的描述生成批次（导入报告里有批次号和估算，等 `twin jobs approve`）。
-   - `twin retrieval resplit`：pre_holdout 的画像重算、统计规则刷新自动排队；pre_holdout 描述的重新生成要你批准（报告里有批次号）；按旧切分点做的表情包上下文修正会立刻清掉并重做（日常账户，不需批准）。
+   - `twin retrieval resplit`：pre_holdout 的画像重算、统计规则刷新自动排队；pre_holdout 描述的重新生成要你批准（输出里有批次号）；按旧切分点做的表情包上下文修正会立刻清掉并重做（日常账户，不需批准）。`twin train export` 自动重切时（第 18 轮，D-881..D-883）同样重建这些，描述的重新生成并入该次导出的批次（批准一次）。
    - `uv run twin persona status` 随时查看哪个范围的描述到期了。
 
 7. **（后续轮次）** 第 09 轮把 `render_full()` / `render_compact()`、`EmojiCodePolicy`、`StickerSelector`、`StickerRateController`、`describe_incoming_sticker` 接进回复引擎；第 11 轮通过 `write_corrections()` 写入 `[不要这样]`；第 12 轮的 `twin rollback` 会覆盖人设卡与提示词模板的回滚。这些都不需要你现在做什么。
@@ -419,7 +419,7 @@
    - 分词器：第一次导出会下载 `tokenizer.json`（约 11MB，先 Hugging Face 再 ModelScope，核对哈希）。两处都连不上时，手动下载 `Qwen/Qwen3-8B` 仓库里的 `tokenizer.json`，用 `--tokenizer <文件或目录>` 指定。
 
 2. **在真实数据上导出**
-   - `uv run twin train export --foreground`（应用没运行时；应用在运行就去掉 `--foreground`，应用会执行）。可用 `--from 2026-01-01 --to 2026-06-30` 限定本地日期范围；切分点始终是 `holdout_cutoff()`。
+   - `uv run twin train export --foreground`（应用没运行时；应用在运行就去掉 `--foreground`，应用会执行）。可用 `--from 2026-01-01 --to 2026-06-30` 限定本地日期范围；切分点始终是 `holdout_cutoff()`；导出先把它移到当时数据的最新 10% 并等 pre_holdout 数据重建（第 18 轮，你的决定，D-881、D-882；`export-status` 显示 `rebuilding`）。
    - 第一次通常停在 `waiting_for_plans`：它不写数据集，而是把“规划合成”排成一次性批任务并打印批次号与**估算费用**（上限，按峰时价）。你确认费用后：`uv run twin jobs approve <批次>`；应用不在运行时 `uv run twin jobs run --until-idle`；再运行一次 `uv run twin train export --foreground`，这次写出数据集。费用超过估算 20% 时批次会自己暂停并告警（R-LLM-014）；可以随时 `uv run twin train export-status` 看进度。
    - 完成后：`uv run twin train bundle --profile <档位> --dataset <打印出的目录>`，后面接 13a 的流程。
 
@@ -438,7 +438,7 @@
 5. **重训提醒**
    - 每次导入后自动检查，也可以手动 `uv run twin train retrain-check`：她的新消息达到上次训练数据的 10% 时发 `retrain_suggested` 告警，`/状态` 的“重训提醒”显示百分比。第一次训练完成之前没有基线，不会提醒。
    - 重训 = 重新 `twin train export`（新版本号）→ `bundle` → `remote all`，从基座全量训练，不在旧适配器上叠加。
-   - **注意（第 18 轮，D-818）：** 留出切分点不会自动移动，训练集只取切分点之前的样本，所以上次之后导入的新聊天在 `twin retrieval resplit` 之前都落在留出集里——不进训练集、也不进检索库，不重切就重训，训练集与上次几乎一样。切分点之后的回复块明显超过配置的留出比例（超过两倍且多出 10 个百分点以上）时，`twin train retrain-check`、`twin train export`、导入报告“数据质量提示”和 `twin profile show` 都会提示先运行 `twin retrieval resplit`（重切后之前的评估结果与之后不可比）。是否让程序在导入时自动重切，等你决定。
+   - **注意（第 18 轮，D-818、D-881，你的决定）：** 导入不移动留出切分点，训练集只取切分点之前的样本；`twin train export` 每次先把切分点移到当时数据的最新 10%，重建 pre_holdout 的画像、作息、人设卡统计与表情包上下文标签，人设卡描述的重新生成并入该次导出的批任务估价（批准一次）。所以重训时直接 `twin train export` 即可，上次之后导入的聊天会进入新的训练集。切分点之后的回复块明显超过配置的留出比例时，`twin train retrain-check`、导入报告“数据质量提示”和 `twin profile show` 照常提示；重切不作废已存的评估与门槛结果（D-884）。
    - **注意（第 18 轮，D-840）：要重新导出、重训。** 你发的表情包和引用，在训练集里以前写成`[表情包:开心]` 和截到 30 字、`]` 换成 `)` 的引用，而线上机器人读到的是`[表情包：一只笑着的猫（情绪：开心、大笑）]` 和整句引用——风格模型训练、评估时没见过线上那种写法。现在三处（线上、训练导出、评估沙盒）用同一个函数：表情包都是线上那种带描述的写法，引用都截到 30 字、`]` 写成 `)`（线上的长引用也一样截断）。所以：① 第 18 轮之前导出的数据集与用它训练的模型都是旧写法，请重新 `twin train export` → `twin train bundle` → `twin train remote all`，登记后重跑 `twin eval gate M5`；② 之前跑的盲测（M1/M4 的 DeepSeek 后端也一样）是在旧写法下测的，建议重新 `twin eval blind` 后再看门槛；③ 导出前先让表情包库给你发过的表情包都有描述（`uv run twin stickers tag-all`，先估价、你批准），没有描述的表情包在训练集里是 `[表情包]`。已经存进机器人会话里的旧引用行（整句）不会被改写，几轮之后就移出上下文窗口。
 
 6. **没有做、也不属于这一步的**
@@ -670,7 +670,7 @@
    - 用完：在微信里发 `/后端 deepseek`，`uv run twin model tunnel stop`，**再到 AutoDL 控制台关机**——实例按小时计费。隧道在线时每天（当地 `commands.morning_hour` 之后）会收到一条系统消息提醒这件事，`/状态` 也会显示；不想要就设 `style_model.tunnel.remind_remote: false`。
 
 4. **评估、门槛、上线（只有这样 M5 才可能通过）**
-   - `uv run twin model evaluate <id> --n 80`：从留出集抽 80 个**新的**上下文（以前盲测用过的不会再抽），三种方式（deepseek、style、hybrid）各生成一遍，估价后等你批准：`uv run twin jobs approve <批次号>`（批次号命令会打印）。每种方式和 deepseek 都要有 ≥ 50 对**有效**判断，跳过的不算，所以 `--n` 要留余量。
+   - `uv run twin model evaluate <id> --n 80`：从模型训练时的切分点之后抽 80 个**新的**上下文（以前盲测用过的不会再抽；第 18 轮 D-886：切分点锁在模型登记里），三种方式（deepseek、style、hybrid）各生成一遍，估价后等你批准：`uv run twin jobs approve <批次号>`（批次号命令会打印）。每种方式和 deepseek 都要有 ≥ 50 对**有效**判断，跳过的不算，所以 `--n` 要留余量。
    - `uv run twin model evaluate <id> --resume <运行号> --foreground`：在本窗口里生成（这时才启动模型的服务器）并让你判“哪条是她”；判完给出 M5 预览。样本不够会说还差多少对，再做一次 `twin model evaluate` 累积即可。
    - **风格样本（第 18 轮起 M5 的风格指标只看它，D-852）**：`uv run twin model evaluate <id> --style` 按她最稀有的比例指标（逗号率约 3%）达到 50 次期望事件自动定样本量（约 700 条回复/方式），估价后等你批准；`uv run twin model evaluate <id> --resume <样本运行号> --foreground` 生成（不用你判断），给出两种方式的风格指标（含每项期望事件数、引用率的参考数）和 M5 预览。还“样本不足”就再运行一次 `--style` 补足。**请告诉我这一步实际花了多少钱、生成用了多久**（hybrid 每条要一次 DeepSeek 规划，沙箱里没有真实费用）。
    - `uv run twin eval gate M5`：写下判定。**没过就留在这里改进，不要降门槛或改统计口径**；不过的话保留 DeepSeek，不阻塞第 15、16 轮。请把输出发给我。

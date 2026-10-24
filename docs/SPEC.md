@@ -272,7 +272,7 @@ safety:
 
 - **R-RET-001** 例子窗口：对她每个真实回复块，取其前面同一会话、间隔 ≤ 60 分钟内的最多 6 个合并轮次作为上下文；保存 `(context_ids, reply_ids, local_time, day_type)`。
 - **R-RET-002** 向量：本地 `sentence-transformers`（默认 `BAAI/bge-small-zh-v1.5`，可配 `BAAI/bge-m3`；有 CUDA 用 GPU，否则 CPU），对脱敏后的上下文（最后两轮加权）编码；批量、可续跑；模型首次运行下载并缓存。
-- **R-RET-003** 留出集：按时间最近 10% 的窗口不进入检索库，专供评估（R-EVAL）与训练测试集（R-TRN-006）；切分时刻只由唯一函数 `holdout_cutoff()` 提供（持久化；导入新数据不自动移动；`twin retrieval resplit` 显式重切），检索、训练、评估与 pre_holdout 范围的派生数据都调用它（R-TRN-013）。
+- **R-RET-003** 留出集：按时间最近 10% 的回复块是留出集，专供评估（R-EVAL）与训练测试集（R-TRN-006）。在线检索库收录全部窗口（含留出期）；评估与训练集导出的防泄露依赖 `AsOfView(t)` 的 `before=t`（只返回回复严格早于 t 的窗口）：留出窗口在库里，但对其自身样本时刻（以及任何更早的时刻）永远取不到，有注入测试。切分时刻只由唯一函数 `holdout_cutoff()` 提供（持久化；导入新数据不自动移动；`twin train export` 时自动重切，见 R-TRN-006；`twin retrieval resplit` 显式重切），训练、评估与 pre_holdout 范围的派生数据都调用它（R-TRN-013）；导入报告与 `twin profile show` 显示切分点之后现有的占比并在明显落后时提示（第 18 轮，用户决定，D-818、D-880、D-881）。
 - **R-RET-004** 只收她的真实回复；索引构建函数的输入类型只接受 `messages` 表记录，机器人回复无法进入（有测试）。
 - **R-RET-005** 查询：用当前对话最近几轮构造查询，取 top-k（默认 8），MMR 去冗余（λ=0.7），加"时段相近"和"新近度"加分，过滤与当前回复近乎相同的例子。渲染例子时，她的回复里机器人无法复现的行（图片、语音、通话、转账等事件文字）以"（此处她发了：…）"的上下文注记呈现，不作为可模仿的回复行（R-SAFE-006）。
 - **R-RET-006** 增量更新：导入新记录后只编码新增窗口；模型或参数变化时全量重建。
@@ -397,7 +397,7 @@ safety:
 - **R-TRN-003** 表示约定：目标（她的回复块）中连发用换行；表情包写成 `[表情包:<标签>]`；表情代码原样；引用写成首行 `[引用:...]`；机器人无法复现的行（图片、语音、视频、通话、转账、红包、位置、文件、链接、聊天记录、系统事件）从目标中删除，删除后为空则丢弃该样本（R-SAFE-006）。上下文（用户与她之前的轮次）中这些仍以事件文字呈现（R-IMP-007）。
 - **R-TRN-004** 只用她的真实消息作目标；机器人回复不得进入（导出函数只接受 `messages` 表；有测试）。
 - **R-TRN-005** hybrid 训练数据：按比例（默认 30%）为样本合成"规划"（DeepSeek 读她的真实回复反推 `{intent, facts_to_use, tone, bubble_hint}`，非高峰执行），放入提示词的规划字段，使风格模型学会"按规划用她的语气说"；其余样本不带规划，但训练与验证部分里前面没有用户轮次可答的（主动形态的）样本一律带规划，因为线上主动消息总带规划。
-- **R-TRN-006** 切分：按时间，最后 10% 为测试集（与 R-RET-003 留出集一致），之前 5% 为验证集，其余训练；不得随机打乱跨越时间边界。
+- **R-TRN-006** 切分：按时间，最后 10% 为测试集（与 R-RET-003 留出集一致），之前 5% 为验证集，其余训练；不得随机打乱跨越时间边界。`twin train export` 时自动重切：测试集 = 导出当时数据的最近 10%（`retrieval.holdout_ratio`），pre_holdout 画像/作息/人设卡/表情包上下文标签随之重建，重建完成之前导出不读取任何 pre_holdout 派生数据（R-TRN-013）；人设卡 `[自动-描述]` 的重新生成费用并入该次导出的一次性批任务估价（批准一次即可）。重切不作废已存的门槛结果；之后的评估只用新切分点之后的上下文，用过的上下文仍排除；`model_registry` 锁定模型训练时的切分点，M5 只在该点之后取样（第 18 轮，用户决定，D-881..D-886）。
 - **R-TRN-007** 脱敏：导出前过 R-LLM-009；同一实体在整个数据集中用一致的占位符。
 - **R-TRN-008** 训练包 `twin train bundle --profile <档位>`：生成 `bundle.tar.zst`（数据集、`dataset_info.json`、由模板生成的 LLaMA-Factory YAML、AutoDL 脚本、清单与 sha256），用口令（scrypt + AES-GCM）加密；口令不落盘。
 - **R-TRN-009** AutoDL 脚本（`training/autodl/`，bash，`set -euo pipefail`，可重复执行）：
@@ -426,7 +426,7 @@ safety:
 
 ## 22. 风格模型部署与后端（R-SRV）
 
-- **R-SRV-001** 模型登记 `model_registry`：版本、档位、量化、sha256、评估分数、是否启用；并锁定该模型训练时使用的 `template_version`、`persona_version`（pre_holdout 精简人设卡版本）、`profile_version`、`dataset_version`——该模型作为后端时，`StylePromptBuilder` 用这些锁定版本渲染。表与 `twin model register|list|show` 在第 13 轮（产物下载后登记），启用、切换与服务在第 14 轮。
+- **R-SRV-001** 模型登记 `model_registry`：版本、档位、量化、sha256、评估分数、是否启用；并锁定该模型训练时使用的 `template_version`、`persona_version`（pre_holdout 精简人设卡版本）、`profile_version`、`dataset_version` 与留出切分点（R-TRN-006）——该模型作为后端时，`StylePromptBuilder` 用这些锁定版本渲染。表与 `twin model register|list|show` 在第 13 轮（产物下载后登记），启用、切换与服务在第 14 轮。
 - **R-SRV-002** 本地推理：`scripts/windows/get_llamacpp.ps1` 下载固定版本的 llama.cpp Windows 发行包（有 NVIDIA 显卡选 CUDA 构建，并同时下载同版本的 `cudart` 运行库包；否则 CPU 构建），校验哈希；`twin model serve` 以子进程启动 `llama-server.exe`（端口 8081、上下文 4096、全部层上 GPU、并发 1），启用前做分词核对（R-TRN-011），健康检查，异常重启，随主程序退出；按显存自动推荐量化档（Q4_K_M/Q5_K_M/Q8_0）。
 - **R-SRV-003** 远程推理（无合适本地显卡时）：在 AutoDL 上用 vLLM 加载基座 + LoRA（只监听实例本机），本地用 `asyncssh` 端口转发隧道接入（`style_model.tunnel`）；`StyleModelClient` 用 `vllm_completion` 模式；`twin model tunnel` 管理隧道与重连；`/状态` 显示远程实例按小时计费的提醒。
 - **R-SRV-004** 后端选择：`/后端` 指令；风格模型不可用时自动回退 deepseek 后端并告警；回退与恢复记录在案。
