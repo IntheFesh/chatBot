@@ -290,7 +290,14 @@ async def test_an_import_from_another_process_runs_in_the_application_with_visib
     # ---- `twin import <dir>`: queued, and nothing happens in this process ------------------------
     code, out = world.cli("settings", "set", "target.username", WIFE)  # she is the one to imitate
     assert code == 0, out
-    code, out = world.cli("import", str(first.root))
+    # `twin run` holds the "run" lock while the application lives; the world's application is
+    # assembled in this process without it, and the command now looks at that lock (R18-F1, D-826)
+    running = InstanceLock(LOCK_RUN, locks_dir=world.services.paths.locks_dir)
+    assert running.acquire()
+    try:
+        code, out = world.cli("import", str(first.root))
+    finally:
+        running.release()
     assert code == 0 and "the running application executes it" in out, out
     assert count_messages(world.services) == messages and shots == []
     code, status = world.cli("import", "status")
