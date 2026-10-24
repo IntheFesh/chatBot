@@ -151,6 +151,7 @@ def build_kit(
         set_timezone=switch,
         drop_caches=(calendar.invalidate, zones.invalidate),
         history=history,
+        min_sleep_minutes=settings.activity.sleep_min_hours * 60.0,
     )
     time.attach_states(planner)
     return ScheduleKit(calendar, time, planner, ScheduleEvents(), zones)

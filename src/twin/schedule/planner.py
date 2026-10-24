@@ -48,6 +48,7 @@ from twin.schedule.events import (
     TimezoneSwitched,
 )
 from twin.schedule.plan_builder import (
+    DEFAULT_MIN_SLEEP_MINUTES,
     PlanRequest,
     QuotaRange,
     build_plan,
@@ -135,8 +136,10 @@ class DailyPlanner:
         salt: InstallSalt | None = None,
         greetings: GreetingLog | None = None,
         history: TimezoneHistory | None = None,
+        min_sleep_minutes: float = DEFAULT_MIN_SLEEP_MINUTES,
     ) -> None:
         self._clock = clock
+        self._min_sleep_minutes = min_sleep_minutes  # ``activity.sleep_min_hours`` (D-757)
         self._time = time_service
         self._config = config
         self._model_source = model_source
@@ -191,7 +194,7 @@ class DailyPlanner:
             self._time.day_type(day + timedelta(days=1)),
             routine_hash,
             [quota.minimum, quota.maximum, quota.enabled],
-            [self._config.min_awake_h, self._config.meal_jitter_min],
+            [self._config.min_awake_h, self._config.meal_jitter_min, self._min_sleep_minutes],
         )
 
     def _request(
@@ -224,6 +227,7 @@ class DailyPlanner:
             inputs_hash=self._inputs_hash(day, zone, routine_hash),
             routine_hash=routine_hash,
             created_at=self._clock.now_utc(),
+            min_sleep_minutes=self._min_sleep_minutes,
         )
 
     # ------------------------------------------------------------------ making

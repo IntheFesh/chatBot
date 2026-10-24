@@ -34,6 +34,7 @@ from twin.clock import Clock
 from twin.commands.rating import rating_command
 from twin.commands.status import ProactiveStatus
 from twin.engine.component import EngineComponent
+from twin.engine.machine import STOP_GRACE_S
 from twin.engine.pacing import PacingModel
 from twin.engine.pipeline import ReplyPipeline
 from twin.engine.sender import BubbleSender
@@ -98,8 +99,10 @@ class ProactiveComponent:
         kit: ScheduleKit,
         *,
         first_tick: bool = True,
+        stop_grace_s: float = STOP_GRACE_S,
     ) -> None:
         self.scheduler = scheduler
+        self._stop_grace_s = stop_grace_s
         self._services = services
         self._kit = kit
         self._first_tick = first_tick
@@ -113,7 +116,17 @@ class ProactiveComponent:
         self._supervisor.spawn("tick", self._loop, restart_on_exit=True)
 
     async def stop(self) -> None:
-        await self._supervisor.stop()
+        """Stop the ticks; a bubble that is being handed to the channel is let finish first.
+
+        For at most ``stop_grace_s`` real seconds (the engine's grace, D-721): the bubble is on
+        the user's phone as soon as the channel has it, and is written to ``bot_turns`` and the
+        proactive log before the task is cancelled; nothing new is begun meanwhile (D-756).
+        """
+        try:
+            await self.scheduler.hold_sending(self._stop_grace_s)
+            await self._supervisor.stop()
+        finally:
+            self.scheduler.release_sending()
 
     def health(self) -> ComponentHealth:
         return self._supervisor.health()

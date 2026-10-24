@@ -21,7 +21,10 @@ States
                 (R-ENG-002; the user's own p75 pause when ``engine.quiet_window_adaptive`` is on) or
                 ``engine.max_wait_s`` have passed since the first one.  The messages are screened
                 for a crisis (R-SAFE-001) the moment collecting ends - never later than a night's
-                sleep - and a confirmed crisis is answered at once, out of the role.
+                sleep - and a confirmed crisis is answered at once, out of the role.  The answer
+                is noted in the round before its first bubble and every pass of the driver
+                finishes it before anything else: a kill, a stop or a failed write halfway
+                through never hands those messages to the persona (D-750).
 ``DECIDING``    when does she answer?  :class:`~twin.engine.decision.Decider` draws it from her
                 state
                 (R-ENG-003, R-ENG-004, R-SCOPE-006) and the state waits for it, ``planned_send_at``
@@ -43,14 +46,20 @@ States
                 alert is written (R-ENG-010).  Nothing but her words is ever sent.
 ``SENDING``     :class:`~twin.engine.sender.BubbleSender` sends the bubbles at her pace.  A message
                 of the user stops it: what is out stays, the rest is dropped and the round goes on
-                at DECIDING with "what she already said" (R-ENG-009).
+                at DECIDING with "what she already said" (R-ENG-009).  A first bubble that never
+                left the machine (the network) makes the round try again 2 to 10 minutes later,
+                like a failed generation (D-751); a probe that begins before the first bubble is
+                out sends the round back to wait for it (D-752).
 
 Recovery after a restart (and on ``Resumed``, R-SCH-005): ``COLLECTING`` starts its quiet window
 afresh (the messages that piled up in the channel while the process was away join the same round);
 ``DECIDING`` keeps a planned time that lies ahead (the "after she wakes" queue survives) and draws a
 new one when it has passed - never a reply the moment the machine wakes; ``GENERATING`` goes to
 ``DECIDING`` for a fresh draw; ``SENDING`` goes on with the bubbles that were not out, or, if the
-user wrote meanwhile, continues like an interruption.
+user wrote meanwhile, continues like an interruption - but the rest of a reply that is partly out
+is dropped when she is in deep sleep now or its last bubble is more than ``STALE_REST_S`` ago,
+and a reply none of whose bubbles is out yet is decided again (queued to her waking) when she is
+in deep sleep now (D-753).
 
 A step of the driver that fails is tried again after a few seconds (alert ``engine_error``); after
 five failures in a row the round is given up: one short answer of hers goes out first, once per
@@ -71,10 +80,13 @@ A correction in plain words ("她不会这么说") is no command.  The engine ha
 messages to the :class:`~twin.engine.correction_port.CorrectionPort` once the reply to them is out
 (round 11) and sends the question it returns as one more system message; a message of the user
 that is the "yes" to an open question is taken by the same port, answered at once like a command
-and marked ``is_command`` (it is not conversation, memory or learning).
+and marked ``is_command`` (it is not conversation, memory or learning).  A system message is
+written down only when the channel delivered it (or may have, ``AMBIGUOUS``); a question whose
+message was not delivered is withdrawn, so the user's next "是" is chat (D-755).
 
 While a channel probe runs (``probe_active``) the engine says nothing (D-684): the user's messages
-are stored and screened for a crisis, the round waits in COLLECTING, commands are not run, and when
+are stored and screened for a crisis, the round waits in COLLECTING, commands are not run (what
+the router would not take for a command - "/::)", "/ 吃饭" - is chat and waits too, D-754), and when
 the probe ends the round is decided afresh from that moment with the short "just seen" pause.  The
 answer to a crisis is the one exception (it goes out as an urgent send, D-685).
 
@@ -121,7 +133,7 @@ from twin.engine.history import HistoryLoader
 from twin.engine.kit import EngineKit
 from twin.engine.pacing import PacingModel, first_bubble_lead
 from twin.engine.rounds import RoundStore
-from twin.engine.roundstate import Outgoing, RoundData
+from twin.engine.roundstate import CrisisAnswer, Outgoing, RoundData
 from twin.engine.safety.crisis import CrisisOutcome
 from twin.engine.sender import (
     BubbleSender,
@@ -153,6 +165,9 @@ STEP_FAILURES_BEFORE_RESET = 5
 STOP_GRACE_S = 10.0  # real seconds a stop waits for a bubble that is being handed over (D-721)
 LEAD_MAX_S = 30.0  # the reply is begun at most this long before her delay ends (D-723)
 LEAD_SMOOTHING = 0.3  # weight of the newest reply in the running estimate of its lead
+# the rest of a reply that a stop cut in two is not sent after this long a silence (D-753): the
+# conversation has gone quiet by then (the default ``memory.quiet_minutes`` of R-MEM-007)
+STALE_REST_S = 30 * 60.0
 SYSTEM_PREFIX = "⚙️ "
 COMMAND_FAILED_REPLY = "⚙️ 这条指令没有处理成功，请稍后再试。"
 CORRECTION_TIMEOUT_S = 30.0  # the question after a correction in plain words may not hold her up
@@ -164,6 +179,7 @@ CRISIS_CONTEXT_TURNS = 4
 STATE_IDLE, STATE_COLLECTING, STATE_DECIDING = "IDLE", "COLLECTING", "DECIDING"
 STATE_GENERATING, STATE_SENDING = "GENERATING", "SENDING"
 DEFAULT_BACKEND = "deepseek"
+FALLBACK_BACKEND = "fallback"  # her short answer of the last resort (never a style sample)
 
 
 class DraftWriter(Protocol):
@@ -498,6 +514,10 @@ class ConversationEngine:
         if not added.created and not await self._lost(record.id, record.is_command):
             return  # delivered again after a restart: it is queued or answered already
         if (slash or confirming) and await self._probe_running():
+            if slash and not self._recognised(item.text):  # "/::)", "/ 吃饭": chat (D-754)
+                await asyncio.to_thread(self._rounds.set_command, record.id, False)
+                await self._register((record.id,))
+                return
             log.info("command_held_for_probe")  # stored as a command row; not run, not answered
             return
         if confirming and self._corrections is not None:
@@ -507,6 +527,7 @@ class ConversationEngine:
                 return
             await asyncio.to_thread(self._rounds.set_command, record.id, False)
         elif slash and self._commands is not None:
+            began = self._clock.now_utc()  # a question the command asks is asked from here on
             try:
                 outcome = await self._commands.handle(
                     item.text, CommandContext(at=message.at, inbound_id=record.id)
@@ -515,10 +536,15 @@ class ConversationEngine:
                 log.warning("command_failed", error=type(exc).__name__)
                 outcome = CommandOutcome(COMMAND_FAILED_REPLY)
             if outcome is not None:
-                await self._answer_command(outcome)
+                await self._answer_command(outcome, asked_since=began)
                 return
             await asyncio.to_thread(self._rounds.set_command, record.id, False)
         await self._register((record.id,))
+
+    def _recognised(self, text: str) -> bool:
+        """Would the router take ``text`` for a command?  (Its own reading, nothing is run.)"""
+        port = self._commands
+        return port is not None and port.recognises(text)
 
     async def _confirmation(self, text: str, at: datetime, turn_id: str) -> CommandOutcome | None:
         """The "yes" to an open question about a correction (``None``: no answer after all)."""
@@ -536,13 +562,25 @@ class ConversationEngine:
         port = self._corrections
         if port is None or not answered:
             return
+        began = self._clock.now_utc()
         try:
             question = await asyncio.wait_for(port.propose(answered), CORRECTION_TIMEOUT_S)
         except Exception as exc:  # the question is optional: the conversation goes on without it
             log.warning("correction_proposal_failed", error=type(exc).__name__)
             return
-        if question:
-            await self._say_system(question)
+        if question and not await self._say_system(question):
+            await self._withdraw_question(began)
+
+    async def _withdraw_question(self, asked_since: datetime) -> None:
+        """A question asked from ``asked_since`` on never reached the user: it is closed, so that
+        his next "是" is not taken for its answer (D-755)."""
+        port = self._corrections
+        if port is None:
+            return
+        try:
+            await port.withdraw(asked_since)
+        except Exception as exc:  # at worst the question lapses with its window
+            log.warning("correction_withdraw_failed", error=type(exc).__name__)
 
     async def _lost(self, turn_id: str, is_command: bool) -> bool:
         """Is a message that was stored before neither queued nor answered (a crash in between)?"""
@@ -578,23 +616,35 @@ class ConversationEngine:
         self._wake.set()
         self._activity.set()
 
-    async def _answer_command(self, outcome: CommandOutcome) -> None:
-        """A command is answered the moment it arrives, in the system voice (R-CMD-001)."""
-        await self._say_system(outcome.reply)
+    async def _answer_command(
+        self, outcome: CommandOutcome, *, asked_since: datetime | None = None
+    ) -> None:
+        """A command is answered the moment it arrives, in the system voice (R-CMD-001).
+
+        ``asked_since``: when the command began; a question it asked (the fact question of
+        ``/不像 <说法>``, D-674) is withdrawn if the answer that carries it is not delivered.
+        """
+        delivered = await self._say_system(outcome.reply)
+        if not delivered and asked_since is not None:
+            await self._withdraw_question(asked_since)
         if outcome.redo:
             await self._redo()
 
-    async def _say_system(self, text: str) -> None:
-        """One system message, at once, stored as a command row (never memory, never a prompt)."""
+    async def _say_system(self, text: str) -> bool:
+        """One system message, at once, stored as a command row (never memory, never a prompt).
+
+        ``True`` if it was delivered - or may have been (``AMBIGUOUS``: it may be on his phone);
+        only then is it written down (D-755): a message the channel refused or could not send
+        is not "said".
+        """
         try:
             result = await self._channel.send_text(text)
         except ChannelError as exc:
             log.warning("system_message_not_sent", reason=type(exc).__name__)
-            return
-        if not result.ok:
+            return False
+        if not result.ok and result.kind is not OutboundKind.AMBIGUOUS:
             log.warning("system_message_refused", kind=result.kind.value, reason=result.reason)
-            if result.kind in (OutboundKind.WINDOW_REJECTED, OutboundKind.AUTH_EXPIRED):
-                return
+            return False
         at = self._clock.now_utc()
         await asyncio.to_thread(
             self._store.add_bubble,
@@ -602,6 +652,7 @@ class ConversationEngine:
             meta=ReplyMeta("command"),
             is_command=True,
         )
+        return True
 
     async def _redo(self) -> None:
         """``/重来``: write the reply to the previous round again (the old one is thrown away).
@@ -684,6 +735,10 @@ class ConversationEngine:
                 self._progress.set()
 
     async def _step(self, snap: ConversationSnapshot) -> None:
+        crisis = RoundData.of(snap).crisis
+        if crisis is not None:  # an answer to a crisis is finished first (D-750)
+            await self._answer_crisis(crisis)
+            return
         if snap.state == STATE_IDLE:
             await self._idle(snap)
         elif snap.state == STATE_COLLECTING:
@@ -747,6 +802,8 @@ class ConversationEngine:
         if not snap.pending or snap.round_id is None or snap.round_id == self._gave_up_round:
             return False  # nothing waits, or the answer was tried for this round and failed
         data = RoundData.of(snap)
+        if data.crisis is not None:
+            return False  # the round answers a crisis: never a word of the persona (D-750)
         if data.outgoing is not None and data.outgoing.reply_id is not None:
             return False  # a part of her reply is out: no second word on top of it
         self._gave_up_round = snap.round_id
@@ -1274,33 +1331,42 @@ class ConversationEngine:
         snap = await self._load()
         data = RoundData.of(snap)
         if data.retries < MAX_RETRIES:
-            decision = self._decider.retry(self._clock.now_utc())
-            log.warning(
-                "reply_failed_will_retry",
-                reason=reason,
-                attempt=data.retries + 1,
-                in_s=round(decision.delay_s),
-            )
-
-            def build(current: ConversationSnapshot) -> Change:
-                fresh = RoundData.of(current)
-                return Change(
-                    STATE_DECIDING,
-                    {
-                        "data": replace(
-                            fresh,
-                            retries=fresh.retries + 1,
-                            decision=decision,
-                            decided_for=len(current.pending),
-                            answering=(),
-                        ).to_json(),
-                        "planned_send_at": decision.send_at,
-                    },
-                )
-
-            await self._apply(build)
+            await self._retry_later(reason, data)
             return
         await self._short_answer(reason, draft, data)
+
+    async def _retry_later(self, reason: str, data: RoundData) -> None:
+        """The round is tried again in 2 to 10 minutes, a new draft (R-ENG-010; also D-751).
+
+        A draft that was made and could not be sent is dropped with it.
+        """
+        decision = self._decider.retry(self._clock.now_utc())
+        log.warning(
+            "reply_failed_will_retry",
+            reason=reason,
+            attempt=data.retries + 1,
+            in_s=round(decision.delay_s),
+        )
+        self._reasoning = None
+
+        def build(current: ConversationSnapshot) -> Change:
+            fresh = RoundData.of(current)
+            return Change(
+                STATE_DECIDING,
+                {
+                    "data": replace(
+                        fresh,
+                        retries=fresh.retries + 1,
+                        decision=decision,
+                        decided_for=len(current.pending),
+                        answering=(),
+                        outgoing=None,
+                    ).to_json(),
+                    "planned_send_at": decision.send_at,
+                },
+            )
+
+        await self._apply(build)
 
     async def _short_answer(self, reason: str, draft: ReplyDraft | None, data: RoundData) -> None:
         """The last resort: one of her short answers (never an error text), and an alert."""
@@ -1318,7 +1384,7 @@ class ConversationEngine:
             await self._complete(data.answering or await self._pending_ids())
             return
         meta = ReplyMeta(
-            "fallback",
+            FALLBACK_BACKEND,
             cost_usd=draft.cost_usd if draft else None,
             timings_ms=dict(draft.timings_ms) if draft else None,
             actions=tuple(action.to_json() for action in draft.actions) if draft else (),
@@ -1359,10 +1425,15 @@ class ConversationEngine:
             context = await self._crisis_context(snap)
             outcome = await self._crisis.handle(texts, context)
         marked = (*data.screened, *fresh_ids)
-        await self._edit(lambda d: replace(d, screened=marked))
         if outcome is None:
+            await self._edit(lambda d: replace(d, screened=marked))
             return False
-        await self._answer_crisis(outcome, snap)
+        log.warning("crisis_answered", severity=outcome.assessment.severity)
+        # the answer is noted with the mark, before its first bubble: whatever stops it halfway,
+        # the next pass finishes it - the persona never gets these messages (D-750)
+        answer = CrisisAnswer(tuple(outcome.bubbles), tuple(snap.pending))
+        await self._edit(lambda d: replace(d, screened=marked, crisis=answer))
+        await self._answer_crisis(answer)
         return True
 
     async def _crisis_context(self, snap: ConversationSnapshot) -> list[str]:
@@ -1371,16 +1442,39 @@ class ConversationEngine:
         window = await asyncio.to_thread(self._history.load, exclude_ids=turn_ids)
         return [turn.text for turn in window.turns[-CRISIS_CONTEXT_TURNS:]]
 
-    async def _answer_crisis(self, outcome: CrisisOutcome, snap: ConversationSnapshot) -> None:
-        """Step out of the role at once: the fixed answer, no pause, no persona (R-SAFE-001)."""
-        log.warning("crisis_answered", severity=outcome.assessment.severity)
+    async def _answer_crisis(self, answer: CrisisAnswer) -> None:
+        """Step out of the role at once: the fixed answer, no pause, no persona (R-SAFE-001).
+
+        ``answer`` is the round's note :class:`~twin.engine.roundstate.CrisisAnswer` as stored
+        (written by :meth:`_screen` before the first bubble); each bubble that is out leaves it.
+        Writing a bubble down is best-effort here: a write that fails is logged and the answer
+        goes on (a
+        bubble not written down is sent again after a restart - the hotline twice is better than
+        never).  A send that the channel could not make (``FAILED``: the network) is tried again
+        2 to 10 minutes later, at most ``MAX_RETRIES`` times; any other end of the send, or the
+        last try, ends the round as before.  Never the persona (D-750).
+        """
+        now = self._clock.now_utc()
+        if answer.retry_at is not None and answer.retry_at > now:
+            await self._wait_wake((answer.retry_at - now).total_seconds())
+            return
+        if answer.reply_id is not None or answer.retries:
+            log.info("crisis_answer_resumed", unsent=len(answer.unsent), retries=answer.retries)
         meta = ReplyMeta("safety", actions=({"step": "crisis_answer", "count": 1},))
-        bubbles = tuple(OutBubble("text", text) for text in outcome.bubbles)
-        recorder = _Recorder(self._store, meta)
+        recorder = _Recorder(self._store, meta, answer.reply_id)
 
         async def note(sent: SentBubble) -> None:
-            await recorder.record(sent)
-            await self._edit(last_outbound_at=sent.at)
+            try:
+                await recorder.record(sent)
+            except Exception as exc:  # the answer goes on: the row is not worth the hotline
+                log.warning("crisis_bubble_not_written", error=type(exc).__name__)
+            try:
+                await self._edit(
+                    lambda d: _crisis_sent(d, sent.bubble.text, recorder.reply_id),
+                    last_outbound_at=sent.at,
+                )
+            except Exception as exc:  # ... nor is the note: at worst a bubble is said again
+                log.warning("crisis_note_not_written", error=type(exc).__name__)
 
         async def keep(sent: SentBubble) -> None:
             await _written(note(sent))
@@ -1388,17 +1482,38 @@ class ConversationEngine:
         # a stop lets the whole answer go out and the round end: nothing else may be cut short
         self._safe_to_cancel.clear()
         try:
-            await self._sender.send(
-                bubbles,
+            report = await self._sender.send(
+                tuple(OutBubble("text", text) for text in answer.unsent),
                 pacing=PacingModel(),
-                wait=uninterruptible_pause(self._clock),
+                wait=self._crisis_pause,
                 on_sent=keep,
                 paced=False,
                 urgent=True,  # safety wins over a running probe (D-685); no other send sets this
             )
-            await self._complete(snap.pending)
+            if report.stop is StopReason.FAILED and answer.retries < MAX_RETRIES:
+                retry_at = self._decider.retry(self._clock.now_utc()).send_at
+                log.warning("crisis_answer_will_retry", attempt=answer.retries + 1)
+                await self._edit(lambda d: _crisis_retry(d, retry_at))
+                return
+            if report.stop is not None:
+                log.warning("crisis_answer_not_sent", reason=report.stop.value)
+            await self._complete(answer.answering)
         finally:
             self._safe_to_cancel.set()
+
+    async def _crisis_pause(self, seconds: float) -> bool:
+        """The pause before a send of the crisis answer is repeated (:func:`uninterruptible_pause`).
+
+        Nothing cuts it short; :attr:`waiting_until` says what the driver waits for, as for any
+        other wait (the pause is a whole number of microseconds, so that the moment said is the
+        moment it ends).
+        """
+        pause = timedelta(seconds=max(0.0, seconds))
+        self._waiting_until = self._clock.now_utc() + pause
+        try:
+            return await uninterruptible_pause(self._clock)(pause.total_seconds())
+        finally:
+            self._waiting_until = None
 
     # ----------------------------------------------------------------------- SENDING
 
@@ -1415,17 +1530,20 @@ class ConversationEngine:
         if outgoing is None or not outgoing.unsent:
             await self._finish_reply(data)
             return
+        if outgoing.reply_id is not None:
+            stale = await self._stale_rest(snap)
+            if stale is not None:
+                await self._drop_stale_rest(outgoing, stale)
+                return
         if any(p not in data.answering for p in snap.pending):
             await self._interrupted(snap, data, outgoing)
             return
         if outgoing.reply_id is None and (
-            await self._active_pause() is not None or await self._probe_running()
+            await self._active_pause() is not None
+            or await self._probe_running()
+            or await self._asleep_before_first(data)
         ):
-            await self._edit(
-                lambda d: replace(d, outgoing=None, decision=None),
-                state=STATE_DECIDING,
-                planned_send_at=None,
-            )
+            await self._draft_back_to_deciding()
             return
         pacing = await self._pacing_model()
         items = await asyncio.to_thread(self._rounds.inbound_items, data.answering)
@@ -1478,6 +1596,60 @@ class ConversationEngine:
             await asyncio.to_thread(self._store.reject_reply, thrown)  # a bubble that was in flight
             return
         await self._after_send(report, snap)
+
+    async def _draft_back_to_deciding(self) -> None:
+        """Nothing of the reply is out and it may not go out now (``/暂停``, a probe): the draft
+        is dropped and the round decided again when it may (D-686; D-752)."""
+        self._reasoning = None
+        await self._edit(
+            lambda d: replace(d, outgoing=None, decision=None),
+            state=STATE_DECIDING,
+            planned_send_at=None,
+        )
+
+    async def _asleep_before_first(self, data: RoundData) -> bool:
+        """Is she in deep sleep now, with nothing of a reply out that was not queued to her
+        waking?  (The re-judgement of D-722 for a reply that is made already, D-753.)
+
+        After a long stop the reply that was ready may meet her deep sleep: it is decided again
+        from now (queued to her waking) instead of being sent at night.  As in :meth:`_rejudge`
+        (whose memory of the moved time it shares), a reply that is queued to her waking, or
+        whose time was moved once already, is not moved again: no loop.
+        """
+        decision = data.decision
+        if decision is not None and (decision.woke_up or decision.send_at == self._rejudged_for):
+            return False
+        state = await asyncio.to_thread(self._decider.her_state, self._clock.now_utc())
+        if state is None or state.kind != "deep_sleep":
+            return False
+        if decision is not None:
+            self._rejudged_for = decision.send_at
+        log.info("reply_decided_again_asleep", her_state=state.kind, made=True)
+        return True
+
+    async def _stale_rest(self, snap: ConversationSnapshot) -> str | None:
+        """Is the rest of a reply that is partly out too late to send? (D-753)
+
+        ``"deep_sleep"``: by her plan she is asleep now; ``"gap"``: the last bubble is longer ago
+        than :data:`STALE_REST_S` (the process was stopped, the machine slept).  ``None``:
+        the reply goes on.  Asked when the sending of a reply begins or begins again - after a
+        restart, a wake-up of the machine or a failed step - never between two of its bubbles.
+        """
+        now = self._clock.now_utc()
+        state = await asyncio.to_thread(self._decider.her_state, now)
+        if state is not None and state.kind == "deep_sleep":
+            return "deep_sleep"
+        last = snap.last_outbound_at
+        if last is not None and (now - last).total_seconds() > STALE_REST_S:
+            return "gap"
+        return None
+
+    async def _drop_stale_rest(self, outgoing: Outgoing, why: str) -> None:
+        """The rest of the reply is dropped and noted on it; the round ends (D-753)."""
+        log.info("send_dropped_stale", unsent=len(outgoing.unsent), reason=why)
+        noted = {"step": "send_dropped_stale", "count": len(outgoing.unsent), "detail": why}
+        await self._edit(lambda d: _with_extra(d, noted))
+        await self._finish_reply(RoundData.of(await self._load()), aborted=True)
 
     async def _settle_in_doubt(self, data: RoundData, outgoing: Outgoing) -> None:
         """The process stopped while a bubble was being handed to the channel: it counts as sent.
@@ -1559,10 +1731,35 @@ class ConversationEngine:
             data = RoundData.of(current)
             if data.outgoing is not None:
                 await self._interrupted(current, data, data.outgoing)
-        else:  # the session, the login, the count or the channel ended the reply
+        else:  # the session, the login, the count, the channel or a probe ended the reply
+            data = RoundData.of(await self._load())
+            out = data.outgoing
+            if out is not None and out.reply_id is None:  # nothing of it is out
+                if report.stop is StopReason.PROBE:  # the probe began meanwhile: wait for it
+                    log.info("reply_held_for_probe_before_first_bubble")
+                    await self._draft_back_to_deciding()
+                    return
+                if self._send_retryable(report, data, out):
+                    await self._retry_later("send_failed", data)
+                    return
             stopped = {"step": "send_stopped", "detail": report.stop.value}
             await self._edit(lambda d: _with_extra(d, stopped))
             await self._finish_reply(RoundData.of(await self._load()), aborted=True)
+
+    @staticmethod
+    def _send_retryable(report: SendReport, data: RoundData, outgoing: Outgoing) -> bool:
+        """Is a reply none of whose bubbles left the machine tried again later? (D-751)
+
+        Only when the channel could not reach the platform (``NETWORK``, also after the sender
+        repeated it), while the round has retries left, and never her short answer of the last
+        resort (it ends the round as before: no loop).
+        """
+        return (
+            report.stop is StopReason.FAILED
+            and report.failed_kind is OutboundKind.NETWORK
+            and data.retries < MAX_RETRIES
+            and outgoing.meta.backend != FALLBACK_BACKEND
+        )
 
     async def _interrupted(
         self, snap: ConversationSnapshot, data: RoundData, outgoing: Outgoing
@@ -1852,6 +2049,28 @@ def _with_extra(data: RoundData, action: dict[str, Any]) -> RoundData:
     if out is None:
         return data
     return replace(data, outgoing=replace(out, extra_actions=(*out.extra_actions, action)))
+
+
+def _crisis_sent(data: RoundData, text: str, reply_id: str | None) -> RoundData:
+    """The notes with one more bubble of the answer to a crisis out (and its reply row)."""
+    answer = data.crisis
+    if answer is None:
+        return data
+    rest = list(answer.unsent)
+    with contextlib.suppress(ValueError):
+        rest = rest[rest.index(text) + 1 :]
+    return replace(
+        data,
+        crisis=replace(answer, unsent=tuple(rest), reply_id=reply_id or answer.reply_id),
+    )
+
+
+def _crisis_retry(data: RoundData, at: datetime) -> RoundData:
+    """The notes with the answer to a crisis to be tried again at ``at``."""
+    answer = data.crisis
+    if answer is None:
+        return data
+    return replace(data, crisis=replace(answer, retries=answer.retries + 1, retry_at=at))
 
 
 def uninterruptible_pause(clock: Clock) -> Wait:

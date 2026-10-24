@@ -13,7 +13,10 @@ What it decides, in this order:
 night).  A night is drawn from the sleep window of the type of the day she wakes on: her fall-asleep
 and wake-up clock times each get an offset from the median, drawn from the offsets observed in her
 history (:meth:`CircularStats.offsets`); the pair is accepted only if the length of the sleep lies
-between the 5th and the 95th percentile of the sleep lengths those offsets give.  A manual
+between the 5th and the 95th percentile of the sleep lengths those offsets give - and is never
+shorter than ``activity.sleep_min_hours`` (or her usual length, if that is shorter): the two
+offsets are drawn apart, and for an irregular sleeper the 5th percentile of their difference can
+be below zero, a night that ends before it begins (D-757).  A manual
 correction is a fixed window, so it wins by construction.  The morning is not drawn again when the
 plan of the previous day (same time zone) already holds that night: the two plans agree.  The
 night also starts at least ``schedule.min_awake_h`` after the wake-up.
@@ -46,7 +49,7 @@ from zoneinfo import ZoneInfo
 
 import orjson
 
-from twin.config.settings import ScheduleConfig
+from twin.config.settings import ActivityConfig, ScheduleConfig
 from twin.profile.activity_model import ActivityModel, SleepWindow
 from twin.profile.circular import CircularStats
 from twin.profile.localtime import SLOT_MINUTES, SLOTS_PER_DAY, format_minute
@@ -79,6 +82,9 @@ MEAL_DEFAULT: dict[MealKind, int] = {
 MEAL_MINUTES: dict[MealKind, int] = {"breakfast": 20, "lunch": 40, "dinner": 50}
 MEAL_PEAK_RATIO = 1.25  # a meal peak must stand this far above the mean of its search window
 QUOTA_ITERATIONS = 80
+# the shortest night of a plan unless the request says otherwise: ``activity.sleep_min_hours``,
+# the shortest sleep the routine model counts as a night at all (D-757)
+DEFAULT_MIN_SLEEP_MINUTES = ActivityConfig().sleep_min_hours * 60.0
 
 
 @dataclass(frozen=True)
@@ -113,6 +119,7 @@ class PlanRequest:
     inputs_hash: str  # everything that decides the plan, for "is the plan stale?"
     routine_hash: str  # the routine alone: nights are only taken over between equal routines
     created_at: datetime
+    min_sleep_minutes: float = DEFAULT_MIN_SLEEP_MINUTES  # ``activity.sleep_min_hours`` (D-757)
 
 
 # ---------------------------------------------------------------------- seeds
@@ -150,12 +157,18 @@ def _offset(stats: CircularStats, rng: random.Random) -> float:
     return 0.0 if stats.offsets.is_empty else float(stats.offsets.sample(rng))
 
 
-def duration_bounds(window: SleepWindow) -> tuple[float, float]:
+def duration_bounds(
+    window: SleepWindow, min_minutes: float = DEFAULT_MIN_SLEEP_MINUTES
+) -> tuple[float, float]:
     """The 5th and 95th percentile of the length of her sleep, in minutes.
 
     The history keeps the fall-asleep and the wake-up offsets separately, so the lengths are the
     median length plus the difference of one offset of each, drawn with a fixed generator (the
     bounds of a window never change between calls).  A fixed window has exactly one length.
+
+    The lower bound is at least ``min_minutes`` (``activity.sleep_min_hours``), or the median
+    length if that is shorter: drawn apart, the two offsets of an irregular sleeper can make a
+    5th percentile below zero - a night that ends before it begins (D-757).
     """
     median = window.duration_min()
     if window.onset.offsets.is_empty and window.wake.offsets.is_empty:
@@ -165,7 +178,11 @@ def duration_bounds(window: SleepWindow) -> tuple[float, float]:
         median + _offset(window.wake, rng) - _offset(window.onset, rng)
         for _ in range(DURATION_SAMPLES)
     )
-    return lengths[int(0.05 * (len(lengths) - 1))], lengths[int(0.95 * (len(lengths) - 1))]
+    low = lengths[int(0.05 * (len(lengths) - 1))]
+    high = lengths[int(0.95 * (len(lengths) - 1))]
+    floor = min(min_minutes, median) if median > 0 else min_minutes
+    low = max(low, floor)
+    return low, max(high, low)
 
 
 class _Notes:
@@ -201,11 +218,12 @@ def _sample_episode(
     *,
     edge_minutes: int,
     onset_not_before: datetime | None,
+    min_minutes: float = DEFAULT_MIN_SLEEP_MINUTES,
 ) -> SleepEpisode:
     """Draw the night that ends on ``wake_day`` (see the module description)."""
     median_wake = window.wake.median
     median_length = window.duration_min()
-    low, high = duration_bounds(window)
+    low, high = duration_bounds(window, min_minutes)
     chosen: tuple[float, float] | None = None
     last: tuple[float, float] = (0.0, 0.0)
     for _ in range(ACCEPT_ATTEMPTS):
@@ -228,7 +246,7 @@ def _sample_episode(
         wake = notes.instant("wake", wake_day, median_wake + wake_offset)
         if onset_not_before is not None and onset < onset_not_before:
             onset = onset_not_before
-            if wake <= onset:
+            if wake < onset + timedelta(minutes=low):  # not inverted, nor shorter than allowed
                 wake = onset + timedelta(minutes=length)
         return SleepEpisode(onset, wake, edge_minutes, window.source)
     onset_offset, wake_offset = chosen
@@ -277,6 +295,7 @@ def _morning(
         notes,
         edge_minutes=edge,
         onset_not_before=None,
+        min_minutes=request.min_sleep_minutes,
     )
     return _clip(fresh, request.go_to_bed_at)
 
@@ -303,6 +322,7 @@ def _night(
         notes,
         edge_minutes=edge,
         onset_not_before=not_before,
+        min_minutes=request.min_sleep_minutes,
     )
     return _clip(fresh, request.go_to_bed_at)
 

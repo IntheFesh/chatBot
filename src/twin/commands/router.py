@@ -35,7 +35,7 @@ from twin.commands.import_commands import ImportCommands
 from twin.commands.import_report import ImportNotifyStore
 from twin.commands.learn_commands import LearnCommands
 from twin.commands.memory_commands import MemoryCommands
-from twin.commands.parse import is_command_text, parse_command
+from twin.commands.parse import ParsedCommand, is_command_text, parse_command
 from twin.commands.registry import CommandCall, CommandRegistry, CommandSpec, UsageError
 from twin.commands.round11 import Round11Commands, register_round11
 from twin.commands.routine_commands import KitSchedule, RoutineCommands, ScheduleControl
@@ -88,9 +88,16 @@ class CommandRouter:
         """Does this message count as a command (the engine marks its rows ``is_command``)?"""
         return is_command_text(text)
 
-    async def handle(self, text: str, context: CommandContext) -> CommandOutcome | None:
+    def recognises(self, text: str) -> bool:
+        """Is ``text`` a command for :meth:`handle` (the same reading; nothing is run, D-754)?"""
+        return self._parse(text) is not None
+
+    def _parse(self, text: str) -> ParsedCommand | None:
         # with the table at hand the parser also reads "/ 状态", "/思考，开" and "/思考开" (D-672)
-        parsed = parse_command(text, self._registry.find)
+        return parse_command(text, self._registry.find)
+
+    async def handle(self, text: str, context: CommandContext) -> CommandOutcome | None:
+        parsed = self._parse(text)
         if parsed is None:
             return None
         spec = self._registry.find(parsed.name)

@@ -60,6 +60,10 @@ class ScriptedCommands:
         self.before: Callable[[str, Any], None] | None = None
         self.error: Exception | None = None
 
+    def recognises(self, text: str) -> bool:
+        """The command reading of this router: the commands it has replies for."""
+        return text.replace("／", "/").strip() in self.replies
+
     async def handle(self, text: str, context: Any) -> Any:
         self.seen.append((text, context))
         if self.before is not None:

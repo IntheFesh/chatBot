@@ -17,13 +17,21 @@ the window and the count, a sticker only through the sticker sender.  What diffe
 
 The scheduler is told about the first bubble at once (``on_first``): that is when the log row is
 written, before the rest of the message is sent.
+
+*A stop of the application* (:meth:`ProactiveSender.hold`, D-756, as the engine's D-721): no new
+bubble is begun, and a bubble that is being handed to the channel is let finish and is written
+down - for at most a few real seconds.  A task that is cancelled while the channel still has a
+bubble (the grace ran out: the channel never answered) writes it down as sent "in doubt"
+(``bubble_in_doubt`` in the actions; the rule of D-552: a bubble said twice hurts more than one
+that is missing), so the log, the spacing and the day's count know of it after the restart.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 
 from twin.clock import Clock
@@ -47,7 +55,7 @@ class SendOutcome:
     reply_id: str | None = None
     first_at: datetime | None = None
     stop: StopReason | None = None
-    interrupted_by: str | None = None  # user | sleep | resume (with stop INTERRUPTED)
+    interrupted_by: str | None = None  # user | sleep | resume | stop (stop INTERRUPTED)
     texts: list[str] = field(default_factory=list)
 
     @property
@@ -76,6 +84,24 @@ class ProactiveSender:
         self._wait_for_arrival = wait_for_arrival
         self._asleep = asleep
         self._epoch = epoch
+        self._holding = False  # the application is stopping: no new bubble is begun
+        # clear while a bubble is being handed to the channel and written down (D-756)
+        self._safe_to_cancel = asyncio.Event()
+        self._safe_to_cancel.set()
+
+    async def hold(self, grace_s: float) -> None:
+        """Begin no new bubble; wait up to ``grace_s`` real seconds for the one being handed over.
+
+        The stop of the application calls this before it cancels the task (D-756); the grace is
+        real time because the channel's answer takes real (network) time.
+        """
+        self._holding = True
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._safe_to_cancel.wait(), grace_s)
+
+    def release(self) -> None:
+        """The stop is over: a later call of :meth:`send` sends again."""
+        self._holding = False
 
     async def send(
         self,
@@ -96,8 +122,16 @@ class ProactiveSender:
         ]
         epoch = self._epoch()
         reply: list[str | None] = [None]
+        in_flight: list[tuple[OutBubble, datetime] | None] = [None]
 
         async def wait(seconds: float) -> bool:
+            # a pause: the channel has nothing of this message in hand now (a sticker that was
+            # skipped, a send that never left the machine and is about to be repeated)
+            in_flight[0] = None
+            self._safe_to_cancel.set()
+            if self._holding:
+                outcome.interrupted_by = "stop"
+                return True
             if await self._wait_for_arrival(since_arrivals, seconds):
                 outcome.interrupted_by = "user"
                 return True
@@ -109,16 +143,54 @@ class ProactiveSender:
                 return True
             return False
 
+        async def about_to_send(bubble: OutBubble) -> None:
+            self._safe_to_cancel.clear()  # from here until ``keep``: a stop lets the send finish
+            in_flight[0] = (bubble, self._clock.now_utc())
+
         async def keep(sent: SentBubble) -> None:
             # the bubble is out: write it down even if the program is stopped meanwhile
-            await _written(self._record(sent, meta, reply, outcome, on_first))
+            try:
+                await _written(self._record(sent, meta, reply, outcome, on_first))
+            finally:
+                in_flight[0] = None
+                self._safe_to_cancel.set()
 
-        report: SendReport = await self._sender.send(out, pacing=pacing, wait=wait, on_sent=keep)
+        try:
+            report: SendReport = await self._sender.send(
+                out, pacing=pacing, wait=wait, on_sent=keep, on_sending=about_to_send
+            )
+        except asyncio.CancelledError:
+            doubt = in_flight[0]
+            if doubt is not None:  # cancelled while the channel had it: it counts as sent
+                in_flight[0] = None
+                await _written(self._in_doubt(doubt, meta, reply, outcome, on_first))
+            raise
+        finally:
+            self._safe_to_cancel.set()
         outcome.skipped = len(report.skipped)
         outcome.stop = report.stop
         if report.stop is not StopReason.INTERRUPTED:
             outcome.interrupted_by = None
         return outcome
+
+    async def _in_doubt(
+        self,
+        doubt: tuple[OutBubble, datetime],
+        meta: ReplyMeta,
+        reply: list[str | None],
+        outcome: SendOutcome,
+        on_first: FirstBubble,
+    ) -> None:
+        """A bubble the channel had when the task was cancelled: written down as sent (D-756)."""
+        bubble, began = doubt
+        log.warning("proactive_bubble_in_doubt", kind=bubble.kind)
+        noted = replace(meta, actions=(*meta.actions, {"step": "bubble_in_doubt", "count": 1}))
+        first = reply[0] is None
+        await self._record(
+            SentBubble(bubble, began, None, ambiguous=True), noted, reply, outcome, on_first
+        )
+        if not first and reply[0] is not None:
+            await asyncio.to_thread(self._store.update_meta, reply[0], noted)
 
     async def _record(
         self,

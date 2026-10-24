@@ -4,10 +4,12 @@ The row has fixed columns for the state, the waiting messages, the bubbles alrea
 planned send time; everything else the state machine must remember to go on after a restart is
 here, as one typed record that round-trips through JSON: the quiet window's clocks, the ids that
 are being answered and the ids that were screened for a crisis, the decision (when and why), the
-failures so far, and the reply that is being sent (its numbers and the bubbles still to send).
+failures so far, the reply that is being sent (its numbers and the bubbles still to send), and
+the out-of-role answer to a crisis while it is being sent (:class:`CrisisAnswer`, D-750).
 
 None of it is ever the text of a message of the user; the bubbles still to send are the bot's own
-words and the whole column is sealed like the rest of the table.
+words (the answer to a crisis is a fixed text) and the whole column is sealed like the rest of the
+table.
 """
 
 from __future__ import annotations
@@ -116,6 +118,43 @@ class Outgoing:
 
 
 @dataclass(frozen=True)
+class CrisisAnswer:
+    """The out-of-role answer to a crisis that is being sent (R-SAFE-001, D-750).
+
+    It is written in the same step that marks the messages screened - before its first bubble goes
+    out - and kept until the round ends.  Every pass of the driver finishes it before anything
+    else: a process that stopped in the middle of it (a kill, a stop whose grace ran out, a write
+    that failed) sends the rest at its next pass, and the persona never answers those messages.
+    ``retries``/``retry_at``: a send the channel could not make is tried again later (bounded).
+    """
+
+    unsent: tuple[str, ...]  # the fixed bubbles still to send
+    answering: tuple[str, ...]  # ids of the messages it answers: they leave when it is out
+    reply_id: str | None = None  # its row in ``bot_turns`` once the first bubble is written down
+    retries: int = 0  # sends of it that the channel could not make
+    retry_at: datetime | None = None  # ... and when it is tried again
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "unsent": list(self.unsent),
+            "answering": list(self.answering),
+            "reply_id": self.reply_id,
+            "retries": self.retries,
+            "retry_at": _iso(self.retry_at),
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> CrisisAnswer:
+        return cls(
+            unsent=tuple(str(text) for text in data.get("unsent") or ()),
+            answering=tuple(str(i) for i in data.get("answering") or ()),
+            reply_id=data.get("reply_id"),
+            retries=int(data.get("retries", 0)),
+            retry_at=_moment(data.get("retry_at")),
+        )
+
+
+@dataclass(frozen=True)
 class RoundData:
     """The typed form of ``conversation_state.data`` (see the module description)."""
 
@@ -134,12 +173,14 @@ class RoundData:
     continuation: bool = False  # the reply continues one that was cut short
     skip_quiet: bool = False  # the user asked for another try: nothing to wait for
     outgoing: Outgoing | None = field(default=None)
+    crisis: CrisisAnswer | None = None  # the answer to a crisis that is being sent (D-750)
 
     @classmethod
     def of(cls, snapshot: ConversationSnapshot) -> RoundData:
         data = snapshot.data
         decision = data.get("decision")
         outgoing = data.get("outgoing")
+        crisis = data.get("crisis")  # rows of before D-750 have none
         return cls(
             quiet_from=_moment(data.get("quiet_from")),
             collect_from=_moment(data.get("collect_from")),
@@ -152,6 +193,7 @@ class RoundData:
             continuation=bool(data.get("continuation", False)),
             skip_quiet=bool(data.get("skip_quiet", False)),
             outgoing=Outgoing.from_json(outgoing) if outgoing else None,
+            crisis=CrisisAnswer.from_json(crisis) if crisis else None,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -167,4 +209,5 @@ class RoundData:
             "continuation": self.continuation,
             "skip_quiet": self.skip_quiet,
             "outgoing": self.outgoing.to_json() if self.outgoing else None,
+            "crisis": self.crisis.to_json() if self.crisis else None,
         }

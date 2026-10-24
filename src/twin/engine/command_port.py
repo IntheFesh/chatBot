@@ -26,4 +26,12 @@ class CommandOutcome:
 class CommandPort(Protocol):
     """``None`` means the message is not a command and goes through the normal chat path."""
 
+    def recognises(self, text: str) -> bool:
+        """Would :meth:`handle` take ``text`` for a command?  It runs nothing (D-754).
+
+        The engine asks this while a channel probe holds every command back: what the router
+        would not take for a command ("/::)", "/ 吃饭") is chat and waits in the round.
+        """
+        ...
+
     async def handle(self, text: str, context: CommandContext) -> CommandOutcome | None: ...

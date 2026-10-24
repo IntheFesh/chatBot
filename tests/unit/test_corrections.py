@@ -35,6 +35,7 @@ from tests.support.engine_harness import (
 )
 from tests.support.memory import make_memory
 from tests.support.waiting import wait_until
+from twin.channel.base import OutboundKind, OutboundResult
 from twin.commands import texts
 from twin.engine import machine
 from twin.engine.command_port import CommandContext, CommandOutcome
@@ -571,6 +572,10 @@ class BrokenPort:
         self.calls.append("propose")
         raise RuntimeError("the service is down")
 
+    async def withdraw(self, asked_since: datetime) -> None:
+        self.calls.append("withdraw")
+        raise RuntimeError("the service is down")
+
 
 async def test_a_failing_service_never_costs_the_user_a_reply(
     services: Services, clock: ManualClock
@@ -851,3 +856,173 @@ async def test_a_yes_for_a_reply_that_is_gone_is_told_so_and_closes_the_question
     assert outcome == CommandOutcome(texts.PREFIX + texts.NOT_LIKE_NOTHING)
     assert rig.service.pending() is None  # the question is closed whether or not it recorded
     assert await rig.service.confirm(CommandContext(now + timedelta(seconds=40), "in-2")) is None
+
+
+# ------------------------------------------- R18-B6 (D-755): a question that never reached him
+
+REFUSALS = [
+    OutboundResult.failure(OutboundKind.REJECTED, "bad_request"),
+    OutboundResult.failure(OutboundKind.NETWORK, "connect_error"),
+    OutboundResult.failure(OutboundKind.WINDOW_REJECTED, "window_elapsed"),
+]
+
+
+@pytest.mark.parametrize("refusal", REFUSALS, ids=lambda r: r.kind.value)
+async def test_r18_b6_a_question_the_channel_does_not_deliver_is_withdrawn(
+    rig: Rig, judge: Judge, refusal: OutboundResult
+) -> None:
+    """R18-B6: her reply goes out, the question after it does not.
+
+    Before: the question stayed open (and a refused or failed one was even written down as said),
+    so the user's next "是" - an answer to her, not to a question he never saw - was swallowed as
+    the confirmation and recorded a "不像".  Now nothing is written down, the question is closed,
+    and "是" is chat.
+    """
+    reply_id = await first_exchange(rig)
+    rig.replies("好吧 我改改")
+    rig.harness.channel.results.extend([OutboundResult.success(message_id="o1"), refusal])
+    await rig.say("她不会这么说")
+    assert len(judge.asked) == 1  # it was a correction, and the question was tried
+    assert rig.said[-1] == "好吧 我改改"
+    assert rig.service.pending() is None
+    assert QUESTION not in [row.text for row in stored(rig)]  # no "said" row of it either
+    rig.replies("嗯？")
+    await rig.say("是", advance=30)
+    assert rig.said[-1] == "嗯？"  # answered by her, as chat
+    assert rig.recorder.feedback_of(reply_id) == []
+    yes_row = next(r for r in stored(rig) if r.direction == "in" and r.text == "是")
+    assert not yes_row.is_command
+
+
+async def test_r18_b6_a_question_with_an_unknown_outcome_counts_as_asked(
+    rig: Rig, judge: Judge
+) -> None:
+    """R18-B6: the channel cannot say whether it arrived: it may be on his phone, it stays open."""
+    reply_id = await first_exchange(rig)
+    rig.replies("好吧 我改改")
+    rig.harness.channel.results.extend(
+        [
+            OutboundResult.success(message_id="o1"),
+            OutboundResult.failure(OutboundKind.AMBIGUOUS, "read_timeout"),
+        ]
+    )
+    await rig.say("她不会这么说")
+    assert rig.service.pending() is not None
+    assert QUESTION in [row.text for row in stored(rig)]
+    await rig.say("是", advance=30)
+    assert rig.said[-1] == DONE
+    assert [f.type for f in rig.recorder.feedback_of(reply_id)] == ["not_like"]
+
+
+async def test_r18_b6_a_command_answer_that_carries_a_question_and_is_not_delivered_withdraws_it(
+    rig: Rig,
+) -> None:
+    """R18-B6: ``/不像 <说法>`` stores the fact question while it runs (D-674); when its answer
+    is refused the question is closed too, and a later "是" is chat."""
+    reply_id = await first_exchange(rig)
+    commands = rig.harness.commands
+    pending = PendingStore(rig.harness.services)
+
+    def ask(text: str, context: Any) -> None:
+        moment = rig.harness.clock.now_utc()
+        pending.put(PendingCorrection(reply_id, moment, KIND_FACT, FACT))
+
+    commands.before = ask
+    rig.harness.channel.results.append(OutboundResult.failure(OutboundKind.REJECTED, "x"))
+    await rig.harness.message("/不像 她不会这么说")
+    assert rig.service.pending() is None
+    rig.replies("嗯？")
+    await rig.say("是", advance=30)
+    assert rig.said[-1] == "嗯？" and remembered(rig) == []
+
+
+async def test_r18_b6_an_older_question_is_not_withdrawn_by_a_system_message_that_fails(
+    rig: Rig,
+) -> None:
+    """R18-B6: only the question asked for the message that failed is closed, not one before."""
+    reply_id = await first_exchange(rig)
+    rig.service._store(PendingCorrection(reply_id, rig.harness.clock.now_utc()))
+    rig.harness.clock.tick(5)
+    rig.harness.channel.results.append(OutboundResult.failure(OutboundKind.REJECTED, "x"))
+    await rig.harness.engine.notify("导入完成")
+    assert rig.service.pending() is not None
+    assert texts.PREFIX + "导入完成" not in [row.text for row in stored(rig)]
+
+
+class QuestionThenBroken(BrokenPort):
+    """A service that asks its question and then cannot close it."""
+
+    async def propose(self, answered: Sequence[str]) -> str | None:
+        self.calls.append("propose")
+        return QUESTION
+
+
+async def test_r18_b6_a_withdrawal_that_fails_never_costs_the_user_a_reply(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-B6: the question was refused and the service cannot close it: the talk goes on."""
+    harness = build_harness(services, clock)
+    port = QuestionThenBroken()
+    harness.engine.attach_corrections(port)
+    await harness.engine.start()
+    try:
+        harness.writer.add(make_draft("嗯嗯"), make_draft("什么呀"))
+        harness.channel.results.extend(
+            [
+                OutboundResult.success(message_id="o1"),
+                OutboundResult.failure(OutboundKind.REJECTED, "bad_request"),
+            ]
+        )
+        await harness.message("你好")
+        await run_to_idle(harness.engine, harness.clock)
+        assert port.calls[-2:] == ["propose", "withdraw"]
+        port.confirmed = False
+        await harness.message("在吗")
+        await run_to_idle(harness.engine, harness.clock)
+        assert harness.channel.texts[:2] == ["嗯嗯", "什么呀"]  # (then the question, delivered)
+    finally:
+        await harness.engine.stop()
+
+
+async def test_r18_b6_withdraw_closes_only_a_question_asked_from_that_moment_on(rig: Rig) -> None:
+    """R18-B6: ``withdraw`` leaves an older question (the user saw it) and an empty slot alone."""
+    reply_id = await first_exchange(rig)
+    clock = rig.harness.clock
+    await rig.service.withdraw(clock.now_utc())  # nothing is open: nothing happens
+    assert rig.service.pending() is None
+    rig.service._store(PendingCorrection(reply_id, clock.now_utc()))
+    clock.tick(5)
+    await rig.service.withdraw(clock.now_utc())
+    assert rig.service.pending() is not None  # asked before: kept
+    await rig.service.withdraw(clock.now_utc() - timedelta(seconds=5))
+    assert rig.service.pending() is None  # asked at that moment: closed
+
+
+async def test_r18_b6_a_command_answer_that_cannot_be_sent_is_not_said(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-B6: the channel raises on a command's answer, and no correction service is attached:
+    nothing is written down as said, and the conversation goes on."""
+    from twin.channel.base import ChannelError
+
+    commands = ScriptedCommands(状态=CommandOutcome(texts.PREFIX + "一切正常"))
+    harness = build_harness(services, clock, commands=commands)
+    original = harness.channel.send_text
+    calls = {"n": 0}
+
+    async def broken(text: str, quote: Any = None, **kwargs: Any) -> OutboundResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ChannelError("the platform cannot be reached")
+        return await original(text, quote, **kwargs)
+
+    harness.channel.send_text = broken  # type: ignore[method-assign]
+    await harness.engine.start()
+    try:
+        await harness.message("/状态")
+        assert [r.text for r in _rows(harness) if r.direction == "out"] == []
+        await harness.message("在吗")
+        await run_to_idle(harness.engine, harness.clock)
+        assert harness.channel.texts == ["好的"]
+    finally:
+        await harness.engine.stop()
