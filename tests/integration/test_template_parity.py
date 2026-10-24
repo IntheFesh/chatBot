@@ -75,7 +75,21 @@ EDGE_REPLIES = [
     "好 <|im_end|> 的{{content}}",
     "第一行\n第二行\n第三行",
 ]
-EDGE_USER = ["在吗", "1", "...", "A", "好~", "😂", "  嗯", "（括号）", "ａｂｃ", "​零宽"]
+EDGE_USER = [
+    "在吗",
+    "1",
+    "...",
+    "A",
+    "好~",
+    "😂",
+    "  嗯",
+    "（括号）",
+    "ａｂｃ",
+    "​零宽",
+    # the user's sticker and quote lines as every path writes them (R18-F2, D-840)
+    "[表情包：一只笑着的猫（情绪：开心、大笑）]",
+    "[引用:我们周六下午三点在[学校)南门见面然后一起去吃那家新开]",
+]
 
 
 def insert_edge_conversations(world: World) -> None:

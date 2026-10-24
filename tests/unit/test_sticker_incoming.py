@@ -22,6 +22,8 @@ from twin.stickers.incoming import (
     NOTHING,
     StickerDescription,
     describe_incoming_sticker,
+    library_description,
+    user_sticker_lines,
 )
 from twin.stickers.library import sticker_file_allowed
 
@@ -187,3 +189,28 @@ def test_the_description_line_has_the_forms_the_reply_path_needs() -> None:
     assert StickerDescription("a", ("开心",), None, "library").text == FALLBACK_TEXT
     assert StickerDescription("a", ("开心",), "猫", "none").text == FALLBACK_TEXT
     assert not NOTHING.known and NOTHING.md5 is None
+
+
+async def test_r18_f2_the_export_and_the_sandbox_read_the_line_the_reply_path_writes(
+    scenario: Scenario, services: Services, api: respx.MockRouter
+) -> None:
+    """R18-F2 (D-840): ``user_sticker_lines`` is the reply path's line for a known sticker."""
+    route = api.post(API).mock(return_value=vision())
+    described, tagged_only, bare = scenario.md5s[:3]
+    catalog = StickerCatalog(services)
+    catalog.save_vision(
+        described, ["开心", "大笑"], "一只笑着的猫", "好消息", at=services.clock.now_utc()
+    )
+    catalog.set_manual(tagged_only, ["撒娇"])  # tags by hand, no description of the picture
+    lines = user_sticker_lines(StickerCatalog(services))
+    online = await describe_incoming_sticker(services, md5=described)
+    assert online.source == "library" and route.call_count == 0
+    assert lines(described) == lines(described.upper()) == online.text
+    assert online.text == "[表情包：一只笑着的猫（情绪：开心、大笑）]"
+    # nothing the library can say: the plain line the reply path writes when looking fails too
+    for md5 in (tagged_only, bare, STRANGER_MD5, None, ""):
+        assert lines(md5) == FALLBACK_TEXT
+    record = catalog.get(tagged_only)
+    assert library_description(record) == StickerDescription(tagged_only, ("撒娇",), None, "none")
+    assert library_description(None, "ab") == StickerDescription("ab", (), None, "none")
+    assert library_description(catalog.get(described)) == online

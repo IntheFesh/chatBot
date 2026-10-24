@@ -24,7 +24,9 @@ from tests.support.tiny_tokenizer import (
     build_tiny_tokenizer,
     tiny_qwen_tokenizer,
 )
+from twin.ingest.events import quote_line
 from twin.services import Services
+from twin.stickers.incoming import StickerDescription
 from twin.training import bundle, lf_template, parity_check
 from twin.training.dataset_dir import DatasetError, ParityCase, load_dataset_dir
 from twin.training.export import ExportOptions, TrainingSetExporter
@@ -121,6 +123,25 @@ def test_a_context_that_starts_with_digits_punctuation_and_spaces_still_matches(
     for first in ("123", "...", "  留白", "（括号）", "A", "ａｂｃ", "​零宽"):
         case = case_of("系统", [first, "好", "嗯"], "好的")
         assert check_case(case, tokenizer, engine, CUTOFF_LEN).problems == []
+
+
+USER_LINES = [  # the user's sticker and quote as the bot, the export and the sandbox write them
+    StickerDescription(None, ("开心", "大笑"), "一只笑着的猫", "library").text,
+    StickerDescription(None, (), None, "none").text,
+    f"{quote_line('我们周六下午三点在[学校]南门见面然后一起去吃那家新开的火锅店好不好')}\n好呀",
+]
+
+
+@pytest.mark.parametrize("user", USER_LINES)
+def test_r18_f2_the_users_sticker_and_quote_lines_are_token_identical(
+    folder: Path, user: str
+) -> None:
+    """R18-F2 (D-840): the lines every path now writes for the user tokenise as in training."""
+    tokenizer, engine = slots(folder)
+    for turns in ([user], [user, "嗯", user], ["在吗", "在呢", user]):
+        for reply in ("好的", "[表情包:开心]", "[引用:好呀]\n嗯"):
+            result = check_case(case_of("系统", turns, reply), tokenizer, engine, CUTOFF_LEN)
+            assert result.problems == [] and result.passed
 
 
 def test_a_sample_near_the_length_limit_is_accepted_and_one_above_it_is_reported(
