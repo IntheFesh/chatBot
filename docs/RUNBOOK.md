@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 
 ### 1.3 配置向导 `twin setup`
 
-向导一次问一件事，已经有的答案会显示出来、不改就保留，所以可以重复运行：
+向导一次问一件事，已经有的答案会显示出来、不改就保留，所以可以重复运行。数据库建好以后再运行时，目标会话和时区显示的是**正在生效**的值（存在数据库里，可能已被 `/时区` 改过），改了立即生效：时区是一次正常的切换（写入时区历史，与 `twin timezone set` 相同，D-830）；目标会话在库里已经导入了别人的会话时不改，提示先 `twin purge`（一个数据库只放一个目标会话）：
 
 ```powershell
 uv run twin setup
@@ -93,7 +93,7 @@ uv run twin config show                       # 生效配置（秘密和个人 i
 uv run twin settings list                     # 存在数据库里的运行时设置
 ```
 
-配置优先级：命令行 `--set 键.路径=值` > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config\config.yaml` > 默认值。运行时可变的设置（时区、思考模式、后端、主动范围、暂停状态）存数据库，由指令或 `twin settings set` 修改，重启后保留。
+配置优先级：命令行 `--set 键.路径=值` > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config\config.yaml` > 默认值。运行时可变的设置（时区、思考模式、后端、主动范围、暂停状态）存数据库，由指令或 `twin settings set` 修改，重启后保留；`twin settings set time.bot_timezone …` 与 `twin timezone set …` 是同一次切换（写入时区历史，过去的对话仍按当时的时区定日期，D-829）。
 
 ### 1.4 体检与 DeepSeek 探针
 

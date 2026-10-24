@@ -101,13 +101,14 @@ def timezone_show() -> None:
     )
 
 
-@timezone_app.command("set")
-@command(CommandKind.LIGHT)
-def timezone_set(
-    name: Annotated[str, typer.Argument(help="IANA name, e.g. Asia/Shanghai or America/Chicago")],
-) -> None:
-    """Switch the bot to another time zone and plan the rest of the day there (R-SCH-002)."""
-    services = get_cli_context().services()
+def switch_from_the_command_line(services: Services, name: str) -> None:
+    """Switch the bot's time zone from a command and say what happened (R-SCH-002).
+
+    The one route of the command line - ``twin timezone set``, ``twin settings set
+    time.bot_timezone`` and ``twin setup`` - into the planner's ``switch_timezone``, the
+    implementation ``/时区`` uses too: the switch is written to ``timezone_history`` (so the bot's
+    past stays dated in the old zone) and the rest of the day is planned there (D-829, D-830).
+    """
     try:
         validate_zone(name)
     except TimezoneError as exc:
@@ -124,6 +125,15 @@ def timezone_set(
         "A running application notices within two seconds; messages already waiting for their "
         "delay keep their time, proactive candidates are drawn again from the new plan."
     )
+
+
+@timezone_app.command("set")
+@command(CommandKind.LIGHT)
+def timezone_set(
+    name: Annotated[str, typer.Argument(help="IANA name, e.g. Asia/Shanghai or America/Chicago")],
+) -> None:
+    """Switch the bot to another time zone and plan the rest of the day there (R-SCH-002)."""
+    switch_from_the_command_line(get_cli_context().services(), name)
 
 
 @timezone_app.command("history")

@@ -20,7 +20,7 @@
 3. **初始化数据库并空跑应用**
    - 做什么：`uv run twin db upgrade`，然后 `uv run twin run`。
    - 预期：先打印生效配置（YAML，个人信息已打码），随后日志依次出现 `component_started`（state_watcher、heartbeat、job_worker）和 `application_running`。按 Ctrl+C，或直接关闭控制台窗口：日志出现 `application_stopping` → `component_stopped` ×3 → `application_stopped`，进程正常退出（退出码 0）。`data/logs/twin.log` 里是一行一个 JSON，且不含任何聊天正文。
-   - 再开第二个 PowerShell 窗口，应用运行期间执行 `uv run twin run`：应立即报 `another 'run' instance is already running` 并退出（退出码 4）。执行 `uv run twin settings set time.bot_timezone Asia/Shanghai`：运行中的应用 2 秒内在日志里记录 `state_changed`。
+   - 再开第二个 PowerShell 窗口，应用运行期间执行 `uv run twin run`：应立即报 `another 'run' instance is already running` 并退出（退出码 4）。执行 `uv run twin timezone set Asia/Shanghai`（`uv run twin settings set time.bot_timezone Asia/Shanghai` 与它等价：同样是一次时区切换，写入时区历史，D-829）：运行中的应用 2 秒内在日志里记录 `state_changed`；测完用 `uv run twin timezone set America/Chicago` 切回。
    - 防休眠：应用运行期间 `powercfg /requests` 的 SYSTEM 一栏应出现 `python.exe`（`SetThreadExecutionState(ES_SYSTEM_REQUIRED)` 生效）；退出应用后消失。
 
 4. **（可选）安装提交前隐私扫描**
