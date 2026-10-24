@@ -20,10 +20,12 @@ on the instance (R-ARCH-006).
     the last export ended;
 ``export-dpo``
     writes the preference pairs of ``/不像 <正确说法>`` (the only reader of ``preference_pairs``) as
-    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset (HEAVY:
-    it queues the ``training_export_dpo`` job and ``--foreground`` runs it here when the
-    application is stopped; no model is called, but it makes the system segment of every pair
-    again and scans the file; ``export-status`` shows how it ended, round 17 item 29, D-713);
+    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset - only the
+    pairs stored before its hold-out cut-off, a fifth of them held out in ``dpo_holdout.jsonl``
+    for the stack choice (D-860, D-861) - (HEAVY: it queues the ``training_export_dpo`` job and
+    ``--foreground`` runs it here when the application is stopped; no model is called, but it
+    makes the system segment of every pair again and scans the file; ``export-status`` shows how
+    it ended, round 17 item 29, D-713);
 ``retrain-check``
     compares her messages now with the ones the last training covered (R-TRN-012) and raises
     the ``retrain_suggested`` alert when it is time (the post-import hook calls the same code).
@@ -44,7 +46,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from twin.learning.pairs import PreferencePairStore, dpo_hint
+from twin.learning.pairs import dpo_hint, dpo_pair_counts
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import (
@@ -319,24 +321,33 @@ def format_dpo_state(state: dict[str, Any]) -> list[str]:
         return lines
     if kind != "done":
         return lines
+    held = int(state.get("held_out") or 0)
+    trained = state.get("trained", state.get("pairs"))
     lines.append(
-        f"  dataset {state.get('dataset_version')}: {state.get('pairs')} preference pair(s) "
-        "in dpo_train.jsonl"
+        f"  dataset {state.get('dataset_version')}: {trained} preference pair(s) "
+        f"in dpo_train.jsonl, {held} held out in dpo_holdout.jsonl for the stack choice"
     )
     lines.append(f"  in {state.get('directory')}")
     if state.get("regenerated"):
         lines.append(
-            f"  {state.get('regenerated')} system segment(s) made again for the card "
-            f"{state.get('persona_version')} and the template {state.get('template_version')} "
-            "the adapter is locked to"
+            f"  every system segment made again as of its pair's moment ({state.get('regenerated')}"
+            f"), with the card {state.get('persona_version')} and the template "
+            f"{state.get('template_version')} the adapter is locked to"
         )
     skipped = state.get("skipped") or {}
     if skipped:
         lines.append("  left out: " + ", ".join(f"{why} {n}" for why, n in sorted(skipped.items())))
+    later = int(state.get("after_cutoff") or 0)
+    if later:
+        cutoff = str(state.get("cutoff") or "?")
+        lines.append(
+            f"  {later} pair(s) were made after the hold-out cut-off {cutoff} of the dataset: "
+            "they wait for an export with a later cut-off (D-860)"
+        )
     if not state.get("enough"):
         lines.append(
-            f"  DPO needs at least {state.get('minimum')} pairs; with fewer, dpo.sh skips the step "
-            "(more come with /不像 <正确说法>)"
+            f"  DPO needs at least {state.get('minimum')} pairs made before the hold-out cut-off; "
+            "with fewer, dpo.sh skips the step (more come with /不像 <正确说法>)"
         )
     lines.append("  next: twin train bundle --profile <profile> --dataset <that directory>")
     return lines
@@ -492,9 +503,12 @@ def retrain_check_command() -> None:
     if status.suggested:
         typer.echo("export the data again with `twin train export`, then train from the base model")
     _warn_about_the_holdout(services)
-    pairs = PreferencePairStore(services.db, services.clock).count()
-    typer.echo(f"preference pairs: {pairs}")
-    hint = dpo_hint(pairs, services.settings.training.dpo_min_pairs)
+    usable, later = dpo_pair_counts(services)  # DPO trains on the ones before the cut-off only
+    typer.echo(
+        f"preference pairs: {usable + later} ({usable} before the hold-out cut-off, "
+        f"{later} after it)"
+    )
+    hint = dpo_hint(usable, services.settings.training.dpo_min_pairs, later=later)
     if hint:
         typer.echo(hint)
 

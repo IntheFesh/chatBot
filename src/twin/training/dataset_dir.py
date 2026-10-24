@@ -8,6 +8,8 @@
     <dataset>/sft_val.jsonl
     <dataset>/sft_test.jsonl
     <dataset>/dpo_train.jsonl     optional: preference pairs (ShareGPT with chosen / rejected)
+    <dataset>/dpo_holdout.jsonl   optional: the preference pairs held out of the DPO training, in
+                                  the same form; the stack choice scores them (D-861)
     <dataset>/parity_cases.jsonl  optional: samples for the template check on the instance
                                   (R-TRN-011): a sample plus ``prompt``, the inference prompt the
                                   style backend would send for it
@@ -41,6 +43,7 @@ from twin.training import lf_template
 from twin.training.layout import (
     FILE_DATASET_META,
     FILE_DPO,
+    FILE_DPO_HOLDOUT,
     FILE_PARITY,
     FILE_TEST,
     FILE_TRAIN,
@@ -62,6 +65,7 @@ class DatasetCounts(BaseModel):
     val: int = Field(ge=0)
     test: int = Field(ge=0)
     dpo: int = Field(default=0, ge=0)
+    dpo_holdout: int = Field(default=0, ge=0)
     parity: int = Field(default=0, ge=0)
 
 
@@ -179,6 +183,8 @@ class DatasetDir:
         names = [FILE_TRAIN, FILE_VAL, FILE_TEST]
         if self.has_dpo:
             names.append(FILE_DPO)
+        if self.meta.counts.dpo_holdout > 0:
+            names.append(FILE_DPO_HOLDOUT)
         if self.has_parity:
             names.append(FILE_PARITY)
         return names
@@ -214,6 +220,7 @@ def write_dataset_dir(
     val: Iterable[SftSample],
     test: Iterable[SftSample],
     dpo: Iterable[DpoSample] = (),
+    dpo_holdout: Iterable[DpoSample] = (),
     parity: Iterable[ParityCase] = (),
     redacted: bool,
     plan_ratio: float = 0.0,
@@ -234,6 +241,14 @@ def write_dataset_dir(
     counts["dpo"] = _write_lines(directory / FILE_DPO, (s.to_json() for s in pairs)) if pairs else 0
     if not pairs:
         (directory / FILE_DPO).unlink(missing_ok=True)
+    held = list(dpo_holdout)
+    if held and not pairs:
+        raise DatasetError("held-out preference pairs need pairs to train on")
+    counts["dpo_holdout"] = (
+        _write_lines(directory / FILE_DPO_HOLDOUT, (s.to_json() for s in held)) if held else 0
+    )
+    if not held:
+        (directory / FILE_DPO_HOLDOUT).unlink(missing_ok=True)
     cases = list(parity)
     counts["parity"] = (
         _write_lines(directory / FILE_PARITY, (c.to_json() for c in cases)) if cases else 0
@@ -247,6 +262,7 @@ def write_dataset_dir(
             FILE_VAL,
             FILE_TEST,
             *([FILE_DPO] if pairs else []),
+            *([FILE_DPO_HOLDOUT] if held else []),
             *([FILE_PARITY] if cases else []),
         )
     }
@@ -283,33 +299,48 @@ def derive_with_dpo(
     *,
     dataset_version: str,
     created_at: str,
+    holdout: Iterable[DpoSample] = (),
     stats: Mapping[str, Any] | None = None,
 ) -> DatasetDir:
-    """A new dataset directory: the files of ``base`` as they are, plus a preference file.
+    """A new dataset directory: the files of ``base`` as they are, plus the preference files.
 
     A dataset version names one content (``dataset_versions``), so adding the preference pairs
     makes a new version rather than changing the old one: the SFT files are copied byte for byte
-    (their hashes stay), ``dpo_train.jsonl`` is written, and ``dataset_meta.json`` gets the new
-    version id, the count and the hashes.  The result is read back and checked like any dataset.
+    (their hashes stay), ``dpo_train.jsonl`` is written (and ``dpo_holdout.jsonl`` with the pairs
+    ``holdout`` keeps out of the training for the stack choice, D-861), and ``dataset_meta.json``
+    gets the new version id, the counts and the hashes.  The result is read back and checked like
+    any dataset.
     """
     if directory.exists() and any(directory.iterdir()):
         raise DatasetError(f"{directory} is not empty; use a new directory")
     samples = list(dpo)
+    held = list(holdout)
     if not samples:
         raise DatasetError("a preference file needs at least one pair")
     directory.mkdir(parents=True, exist_ok=True)
+    preference_files = (FILE_DPO, FILE_DPO_HOLDOUT)
     try:
         for name in base.data_files():
-            if name != FILE_DPO:
+            if name not in preference_files:
                 shutil.copy2(base.path / name, directory / name)
         count = _write_lines(directory / FILE_DPO, (sample.to_json() for sample in samples))
+        held_count = (
+            _write_lines(directory / FILE_DPO_HOLDOUT, (sample.to_json() for sample in held))
+            if held
+            else 0
+        )
         meta = base.meta.model_dump(by_alias=True)
         meta["dataset_version"] = dataset_version
         meta["created_at"] = created_at
-        meta["counts"] = {**meta["counts"], "dpo": count}
+        meta["counts"] = {**meta["counts"], "dpo": count, "dpo_holdout": held_count}
         meta["files"] = {
-            **{name: digest for name, digest in base.meta.files.items() if name != FILE_DPO},
+            **{
+                name: digest
+                for name, digest in base.meta.files.items()
+                if name not in preference_files
+            },
             FILE_DPO: file_sha256(directory / FILE_DPO),
+            **({FILE_DPO_HOLDOUT: file_sha256(directory / FILE_DPO_HOLDOUT)} if held else {}),
         }
         meta["stats"] = {**base.meta.stats, **dict(stats or {})}
         validated = DatasetMeta.model_validate(meta)
@@ -427,6 +458,8 @@ def load_dataset_dir(directory: Path) -> DatasetDir:
         )
     if meta.counts.train < 1 or meta.counts.val < 1 or meta.counts.test < 1:
         raise DatasetError("the train, validation and test splits must each have a sample")
+    if meta.counts.dpo_holdout > 0 and meta.counts.dpo < 1:
+        raise DatasetError("held-out preference pairs need pairs to train on")
     result = DatasetDir(directory, meta)
     expected_files = set(result.data_files())
     if set(meta.files) != expected_files:
@@ -438,6 +471,7 @@ def load_dataset_dir(directory: Path) -> DatasetDir:
         FILE_VAL: meta.counts.val,
         FILE_TEST: meta.counts.test,
         FILE_DPO: meta.counts.dpo,
+        FILE_DPO_HOLDOUT: meta.counts.dpo_holdout,
         FILE_PARITY: meta.counts.parity,
     }
     for name in sorted(expected_files):
@@ -446,7 +480,9 @@ def load_dataset_dir(directory: Path) -> DatasetDir:
             raise DatasetError(f"{name} is missing")
         if file_sha256(path) != meta.files[name]:
             raise DatasetError(f"{name} does not match its recorded sha256")
-        actual = _check_file(path, pairwise=name == FILE_DPO, parity=name == FILE_PARITY)
+        actual = _check_file(
+            path, pairwise=name in (FILE_DPO, FILE_DPO_HOLDOUT), parity=name == FILE_PARITY
+        )
         if actual != counts[name]:
             raise DatasetError(f"{name} has {actual} samples but the metadata says {counts[name]}")
     return result

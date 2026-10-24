@@ -49,6 +49,7 @@ def test_a_written_dataset_directory_loads_back_with_counts_and_hashes(tmp_path:
         "val": 2,
         "test": 3,
         "dpo": 4,
+        "dpo_holdout": 0,
         "parity": 0,
     }
     assert loaded.has_dpo and loaded.data_files() == [
@@ -282,7 +283,14 @@ def test_the_manifest_names_the_versions_the_profile_and_the_hashes(
     assert manifest["template_version"] == lf_template.TEMPLATE_VERSION
     assert manifest["persona_version"] == "v3" and manifest["profile_version"]
     assert manifest["llamafactory_version"] == "0.9.5" and manifest["llama_cpp_tag"] == "b11177"
-    assert manifest["counts"] == {"train": 40, "val": 6, "test": 6, "dpo": 3, "parity": 0}
+    assert manifest["counts"] == {
+        "train": 40,
+        "val": 6,
+        "test": 6,
+        "dpo": 3,
+        "dpo_holdout": 0,
+        "parity": 0,
+    }
     assert manifest["epochs"] == 3 and manifest["has_dpo"] is True
     paths = {f["path"] for f in manifest["files"]}
     assert {
@@ -312,6 +320,39 @@ def test_a_bundle_without_pairs_has_no_dpo_data_or_config(tmp_path: Path) -> Non
     paths = {f["path"] for f in result.manifest["files"]}
     assert "data/dpo_train.jsonl" not in paths and "config/dpo.yaml" not in paths
     assert result.manifest["has_dpo"] is False
+
+
+def test_the_held_out_pairs_travel_in_the_bundle_but_are_no_dataset_of_the_training(
+    tmp_path: Path,
+) -> None:
+    """R18-E6 (D-861): ``dpo_holdout.jsonl`` is checked and packed like the training pairs, and
+    ``dataset_info.json`` does not name it, so LLaMA-Factory never trains on those pairs."""
+    dataset = write_synthetic_dataset(tmp_path / "ds", pairs=8, held_out=2)
+    assert dataset.meta.counts.dpo_holdout == 2
+    assert dataset.data_files()[-1] == "dpo_holdout.jsonl"
+    result = build(dataset, tmp_path)
+    members = dict(bundle.iter_bundle(result.path, PASSPHRASE))
+    held = members["data/dpo_holdout.jsonl"].decode("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in held] == ["p8", "p9"]
+    info = json.loads(members["data/dataset_info.json"])
+    assert "dpo_holdout.jsonl" not in json.dumps(info)
+    assert info["twin_dpo_train"]["file_name"] == "dpo_train.jsonl"
+    assert result.manifest["counts"]["dpo_holdout"] == 2
+    (tmp_path / "ds" / "dpo_holdout.jsonl").write_text(held[0] + "\n", encoding="utf-8")
+    with pytest.raises(DatasetError, match=r"dpo_holdout\.jsonl does not match"):
+        load_dataset_dir(tmp_path / "ds")
+
+
+def test_held_out_pairs_without_pairs_to_train_on_are_refused(tmp_path: Path) -> None:
+    with pytest.raises(DatasetError, match="need pairs to train on"):
+        write_synthetic_dataset(tmp_path / "ds", pairs=0, held_out=1)
+    write_synthetic_dataset(tmp_path / "ok", pairs=1, held_out=1)
+    meta_path = tmp_path / "ok" / "dataset_meta.json"
+    meta = json.loads(meta_path.read_text("utf-8"))
+    meta["counts"]["dpo"] = 0  # a metadata file that says so is refused when it is read
+    meta_path.write_text(json.dumps(meta), "utf-8")
+    with pytest.raises(DatasetError, match="need pairs to train on"):
+        load_dataset_dir(tmp_path / "ok")
 
 
 def test_the_bundle_uses_the_work_directory_and_the_dpo_minimum_it_is_given(

@@ -590,7 +590,7 @@
    - 请告诉我：规则里有没有出现具体的日期、事件或事实（本地检查和第二次审查应当挡住；如果漏了，把那条规则发给我）。
 
 4. **DPO 导出（有 200 条偏好对之后再做，不到时只是演练）**
-   - `uv run twin train export-dpo`（第 17 轮起是重任务：排进队列由应用执行，应用没在运行时加 `--foreground`，结果用 `twin train export-status` 查看）：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl` 的新数据集目录；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
+   - `uv run twin train export-dpo`（第 17 轮起是重任务：排进队列由应用执行，应用没在运行时加 `--foreground`，结果用 `twin train export-status` 查看）：以最新的 SFT 数据集为底，生成带 `dpo_train.jsonl`（与留出 1/5 供选栈的 `dpo_holdout.jsonl`）的新数据集目录，只用留出切分点之前存下的偏好对（第 18 轮，D-860、D-861；之后的对会提示留到下次）；不到 `training.dpo_min_pairs`（200）对时会提示，训练脚本在实例上会跳过 DPO 这一步。偏好对攒够时会有一条 `dpo_ready` 告警（`/状态` 的告警一行里能看到）。
    - 用 `uv run twin train bundle --profile <档位> --dataset <新目录>` 打包；真实训练在第 14 轮。
 
 5. **M2 复判**（所有指令存在之后重新判；`/记住` 的事实现在算“机器人对话”的一组）

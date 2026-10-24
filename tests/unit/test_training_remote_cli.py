@@ -613,6 +613,9 @@ for stack in sft dpo; do
     printf '{"id": "te0", "text": "a reply of the %s stack"}\\n' "$stack" \\
         >"$TWIN_HOME/artifacts/eval/$stack/eval_generations.jsonl"
     echo '{"val_loss": 1.2, "generated": 1}' >"$TWIN_HOME/artifacts/eval/$stack/eval_metrics.json"
+    scores='{"id": "p0", "chosen_logp": -3.5, "rejected_logp": -4.0, '
+    scores+='"chosen_tokens": 3, "rejected_tokens": 4}'
+    echo "$scores" >"$TWIN_HOME/artifacts/eval/$stack/pair_logps.jsonl"
 done
 echo "evaluated both stacks"
 """
@@ -636,6 +639,28 @@ def synthetic_score(stack: str, passed: int, val_loss: float | None = 1.2) -> An
         for index, key in enumerate(keys)
     )
     return StackScore(stack, lines, val_loss, 12)
+
+
+def synthetic_verdict(keep: str) -> Any:
+    """A verdict of the round-18 rule (D-862): DPO better on the pairs, or not shown better."""
+    from twin.training.stack_choice import (
+        STAT_IMPLICIT,
+        Interval,
+        PreferenceCheck,
+        StyleGuard,
+        choose_stack,
+    )
+
+    shown = keep == "dpo"
+    preference = PreferenceCheck(
+        STAT_IMPLICIT,
+        40,
+        0.75 if shown else 0.5,
+        Interval(0.625, 0.875) if shown else Interval(0.375, 0.625),
+        "sft",
+    )
+    style = StyleGuard(12, 0.0, Interval(-0.01, 0.01), 0.1, 0.1, 0, 0)
+    return choose_stack(synthetic_score("sft", 3), synthetic_score("dpo", 5), preference, style)
 
 
 @posix_only
@@ -688,18 +713,48 @@ def test_the_dpo_step_records_how_the_reference_model_was_chosen_and_a_fallback_
 
 
 @posix_only
+def test_the_dpo_step_says_how_many_pairs_were_trained_held_out_and_left_for_later(
+    instance: Instance,
+) -> None:
+    """R18-DPO13/R18-E6 (D-860, D-861): the training report counts the three kinds of pairs."""
+    uploaded(instance)
+    record = {
+        "mode": "layered",
+        "reference": "sft",
+        "reference_quantization_bit": None,
+        "fallback": False,
+        "fallback_reason": None,
+        "per_device_batch": 1,
+        "accumulation": 16,
+        "pairs": 160,
+        "held_out_pairs": 40,
+        "after_cutoff_pairs": 12,
+    }
+    script = DPO_SCRIPT.replace("{RECORD}", json.dumps(record))
+    (instance.workdir / "autodl" / "dpo.sh").write_text(script, encoding="utf-8")
+    done = instance.cli("train", "remote", "dpo")
+    assert done.exit_code == 0, done.output
+    assert (
+        "dpo: trained on 160 preference pairs; 40 held out for the stack choice; 12 made after "
+        "the hold-out cut-off wait for a later export" in done.output
+    )
+    step = instance.latest_run().steps["dpo"]
+    assert (step["pairs"], step["held_out_pairs"], step["after_cutoff_pairs"]) == (160, 40, 12)
+
+
+@posix_only
 def test_the_eval_step_compares_the_two_stacks_and_tells_the_instance_which_is_kept(
     instance: Instance, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R17-49d (D-655): both stacks' generations go to the judge; its winner is written back."""
     import twin.training.cli as training_cli
-    from twin.training.stack_choice import StackFiles, choose_stack
+    from twin.training.stack_choice import StackFiles
 
     seen: list[StackFiles] = []
 
     def judge(services: Services, files: StackFiles) -> Any:
         seen.append(files)
-        return choose_stack(synthetic_score("sft", 3), synthetic_score("dpo", 5))
+        return synthetic_verdict("dpo")
 
     monkeypatch.setattr(training_cli, "judge_stacks", judge)
     uploaded(instance)
@@ -707,11 +762,13 @@ def test_the_eval_step_compares_the_two_stacks_and_tells_the_instance_which_is_k
     done = instance.cli("train", "remote", "eval")
     assert done.exit_code == 0, done.output
     assert (
-        "stack kept: dpo (dpo has more style metrics within +-30% of hers: 5 for dpo against 3"
-        in (done.output)
+        "stack kept: dpo (dpo is better on the held-out preference pairs (75.0% of 40 pairs, "
+        "90% interval 62.5% to 87.5%) and its style is not significantly worse)" in done.output
     )
     assert len(seen) == 1
     assert set(seen[0].generations) == {"sft", "dpo"}
+    assert set(seen[0].pair_scores) == {"sft", "dpo"}
+    assert '"id": "p0"' in seen[0].pair_scores["dpo"]
     assert "a reply of the dpo stack" in seen[0].generations["dpo"]
     assert seen[0].metrics["sft"]["val_loss"] == 1.2 and seen[0].metrics["dpo"]["generated"] == 1
     assert (instance.workdir / "state" / "stack_choice").read_text("utf-8") == "dpo\n"

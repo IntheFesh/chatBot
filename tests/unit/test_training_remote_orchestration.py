@@ -307,11 +307,23 @@ async def test_a_train_job_that_fails_is_a_failed_step_and_reads_nothing(rig: Ri
 
 
 async def test_dpo_says_which_model_was_the_reference(rig: Rig) -> None:
-    reference = {"reference": "sft", "fallback": False, "reference_quantization_bit": 4}
+    reference = {
+        "reference": "sft",
+        "fallback": False,
+        "reference_quantization_bit": 4,
+        "pairs": 160,
+        "held_out_pairs": 40,
+        "after_cutoff_pairs": 3,
+    }
     rig.session.handle.texts[f"{ARTIFACTS}/{DPO_REFERENCE_FILE}"] = json.dumps(reference)
     assert (await rig.steps.dpo(RUN)).ok
     assert record(rig, "dpo")["reference"] == "sft"
+    assert record(rig, "dpo")["held_out_pairs"] == 40  # R18-E6 (D-861)
     assert any("explicit, 4-bit" in line for line in rig.echoed)
+    assert any(
+        "trained on 160 preference pairs; 40 held out for the stack choice; 3 made after" in line
+        for line in rig.echoed
+    )
 
 
 async def test_dpo_without_a_reference_record_was_skipped_and_says_nothing(rig: Rig) -> None:
@@ -343,6 +355,24 @@ async def test_an_evaluation_with_both_stacks_compares_them_and_tells_the_instan
     assert json.loads(written[f"{ARTIFACTS}/{STACK_CHOICE_JSON}"][0])["keep"] == "dpo"
     assert record(rig, "eval")["stack_kept"] == "dpo"
     assert "stack kept: dpo" in rig.echoed
+    assert files.pair_scores == {} and files.reference is None  # an old package: nothing scored
+
+
+async def test_the_held_out_pairs_and_the_dpo_reference_reach_the_judge(rig: Rig) -> None:
+    """R18-E6 (D-862, D-863): the scores of the held-out pairs under both stacks and how DPO's
+    reference model was chosen (it decides which statistic the main criterion uses)."""
+    base = f"{ARTIFACTS}/eval"
+    texts = rig.session.handle.texts
+    texts[f"{base}/dpo/eval_metrics.json"] = json.dumps({"eval_loss": 1.1})
+    for stack in ("sft", "dpo"):
+        texts[f"{base}/{stack}/eval_generations.jsonl"] = f"{stack}-lines"
+        texts[f"{base}/{stack}/pair_logps.jsonl"] = f"{stack}-pair-scores"
+    texts[f"{ARTIFACTS}/dpo/dpo_reference.json"] = json.dumps({"reference": "base"})
+    assert (await rig.steps.evaluate(RUN)).ok
+    [files] = rig.judged
+    assert files.pair_scores == {"sft": "sft-pair-scores", "dpo": "dpo-pair-scores"}
+    assert files.reference == {"reference": "base"}
+    assert any("paired bootstrap" in line for line in rig.echoed)
 
 
 async def test_a_comparison_that_cannot_be_made_fails_the_evaluation_without_a_verdict(

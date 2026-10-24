@@ -39,9 +39,12 @@ def write_synthetic_dataset(
     val: int = 6,
     test: int = 6,
     pairs: int = 0,
+    held_out: int = 0,
     redacted: bool = True,
     version: str = "ds-test-01",
+    holdout_cutoff: str = "2026-09-01T00:00:00+00:00",
 ) -> DatasetDir:
+    """``pairs`` preference pairs to train on, ``held_out`` more for the stack choice (D-861)."""
     return write_dataset_dir(
         directory,
         dataset_version=version,
@@ -49,11 +52,12 @@ def write_synthetic_dataset(
         template_version=lf_template.TEMPLATE_VERSION,
         persona_version="v3",
         profile_version="01TESTPROFILEVERSION00000",
-        holdout_cutoff="2026-09-01T00:00:00+00:00",
+        holdout_cutoff=holdout_cutoff,
         train=[sample(i, turns=1 + 2 * (i % 4), prefix="tr") for i in range(train)],
         val=[sample(i, prefix="va") for i in range(val)],
         test=[sample(i, prefix="te") for i in range(test)],
         dpo=[pair(i) for i in range(pairs)],
+        dpo_holdout=[pair(i) for i in range(pairs, pairs + held_out)],
         redacted=redacted,
         plan_ratio=0.3,
         stats={"note": "synthetic"},

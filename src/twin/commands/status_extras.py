@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable
 
 from twin.commands import texts
 from twin.ingest.runs import UNFINISHED, latest_run
-from twin.learning.pairs import PreferencePairStore, dpo_hint
+from twin.learning.pairs import dpo_hint, dpo_pair_counts
 from twin.memory.replay import REPLAY_JOB
 from twin.ops.jobs import JobQueue
 from twin.services import Services
@@ -58,8 +58,8 @@ def dpo_line(services: Services) -> StatusLine:
     """The reminder that there are enough preference pairs for DPO (R-TRN-012)."""
 
     def read() -> str | None:
-        pairs = PreferencePairStore(services.db, services.clock).count()
-        hint = dpo_hint(pairs, services.settings.training.dpo_min_pairs)
+        usable, later = dpo_pair_counts(services)  # only pairs before the cut-off (D-860)
+        hint = dpo_hint(usable, services.settings.training.dpo_min_pairs, later=later)
         return texts.STATUS_DPO.format(text=hint) if hint else None
 
     async def line() -> str | None:

@@ -49,7 +49,7 @@ from twin.engine.readiness import status_lines
 from twin.engine.turns import BotTurnMessages, BotTurnStore
 from twin.learning.corrections import FactProposer, PendingStore
 from twin.learning.dislike import NotLikeRecorder
-from twin.learning.pairs import PreferencePairStore
+from twin.learning.pairs import PreferencePairStore, dpo_pair_counts
 from twin.learning.sample import LazyViewSource, SampleBuilder, ViewSource
 from twin.memory.lifeline import LifelineStore
 from twin.memory.manage import MemoryManager
@@ -205,6 +205,7 @@ class CommandRouter:
                     services.alerts,
                     lambda: services.settings.training.dpo_min_pairs,
                     FactProposer(services, llm.client, turn_store, PendingStore(services)),
+                    dpo_pairs=lambda: dpo_pair_counts(services),
                 ),
                 cost=CostCommands(sources),
                 imports=ImportCommands(services, import_notes or ImportNotifyStore(services)),
