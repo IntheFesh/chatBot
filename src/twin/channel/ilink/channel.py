@@ -323,7 +323,18 @@ class IlinkChannel(Channel):
     # -------------------------------------------------------- introspection
 
     def capabilities(self) -> ChannelCapabilities:
-        window_h, quota, gif = self._measured
+        return self.capabilities_for(self._measured)
+
+    @staticmethod
+    def capabilities_for(
+        measured: tuple[float | None, int | None, bool | None],
+    ) -> ChannelCapabilities:
+        """What the channel reports, from what the M0 probe measured (no channel needed).
+
+        The style report reads the abilities of the running channel through this, without
+        starting one (R-EVAL-002, D-851): the one definition of what this channel can do.
+        """
+        window_h, quota, gif = measured
         return ChannelCapabilities(
             supports_quote=False,
             supports_typing=True,

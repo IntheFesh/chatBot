@@ -11,18 +11,29 @@ by moving a threshold):
    is not one) - with fewer the verdict is ``insufficient`` and says how many pairs are missing;
 2. the way's guess rate is **lower** than the DeepSeek backend's, by a one-sided two-proportion
    test with ``p < 0.1`` (the user finds it harder to tell the model from her than DeepSeek);
-3. the six core **style metrics** of the way's replies on those contexts (median text length,
-   comma rate, median burst size, sticker share, emoji-code rate, quote rate) are each within
-   +-30 % of her profile (``pre_holdout`` scope, R-EVAL-002).
+3. the six core **style metrics** of the way's replies (median text length, comma rate, median
+   burst size, sticker share, emoji-code rate, quote rate) are each within +-30 % of her profile
+   (``pre_holdout`` scope, R-EVAL-002) - measured on the model's **style sample**, not on the pairs
+   of the blind test (round 18, user decision, D-852): ``twin model evaluate <id> --style`` sizes it
+   so that the rarest share has 50 expected events (:mod:`twin.eval.style_sample`).  A metric the
+   sandbox channel cannot produce is not measurable and left out (D-851); a share with fewer than
+   50 expected events is "not enough", and so is the way, with the command that adds replies.
+
+The verdict of a way is ``insufficient`` while it lacks judgements; ``failed`` when it does not
+guess less often than DeepSeek (no style sample can change that, so none is waited for); then
+``insufficient`` while its style evidence is missing or short of events; otherwise ``passed`` when
+the style metrics pass and ``failed`` when they do not.
 
 If both ways pass, the one with the lower guess rate is the winner (a tie goes to ``style``, which
 is cheaper); ``twin model activate`` then makes it ``backend.active``.  If neither passes the
-DeepSeek backend stays the default: that does not block anything later.
+DeepSeek backend stays the default: that does not block anything later.  The gate is ``failed``
+only when both ways failed; while one of them still lacks evidence it is ``insufficient``.
 
 The evidence is every blind run that was drawn for the model (``params.model_id``), pooled: more
 contexts can be added with another ``twin model evaluate`` and never overlap (a context is used
-once).  ``twin eval gate M5`` judges the model evaluated most recently; ``twin model activate <id>``
-judges the model it is asked to activate, with :func:`judge_model`.
+once); and every style sample drawn for it, pooled the same way.  ``twin eval gate M5`` judges
+the model evaluated most recently; ``twin model activate <id>`` judges the model it is asked to
+activate, with :func:`judge_model`.
 """
 
 from __future__ import annotations
@@ -31,11 +42,18 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from twin.eval.blind import MIN_VALID, blind_report
+from twin.eval.blind import MIN_VALID, MODEL_PARAM, blind_report
 from twin.eval.gates import Check, GateContext, GateVerdict, Verdict, gate_judge
 from twin.eval.stats import ProportionTest, two_proportion_test
 from twin.eval.store import EvalStore, RunView
-from twin.eval.style_metrics import StyleError, StyleReport, style_of_runs
+from twin.eval.style_metrics import (
+    MIN_EXPECTED_EVENTS,
+    MetricResult,
+    StyleError,
+    StyleReport,
+    style_of_runs,
+)
+from twin.eval.style_sample import sample_runs
 
 if TYPE_CHECKING:
     from twin.services import Services
@@ -44,7 +62,6 @@ BASELINE: Final = "deepseek"
 WAYS: Final = ("style", "hybrid")  # in the order a tie is decided
 EVAL_BACKENDS: Final = (BASELINE, *WAYS)
 P_THRESHOLD: Final = 0.1  # R-SRV-005: one-sided p of "the way guesses less often than DeepSeek"
-MODEL_PARAM: Final = "model_id"
 
 StyleOf = Callable[["Services", EvalStore, Sequence[RunView], str], StyleReport]
 
@@ -90,10 +107,23 @@ class WayResult:
         return self.style is not None and self.style.passed
 
     @property
+    def style_short(self) -> bool:
+        """The style evidence is missing, or a share of it is short of expected events."""
+        return (
+            self.style_error is not None
+            or self.style is None
+            or (self.style.verdict == "insufficient")
+        )
+
+    @property
     def verdict(self) -> Verdict:
-        if not self.enough or self.style_error is not None:
+        if not self.enough:
             return "insufficient"
-        return "passed" if self.lower and self.style_ok else "failed"
+        if not self.lower:
+            return "failed"  # the blind test settled it: no style sample can change that (D-852)
+        if self.style_short:
+            return "insufficient"
+        return "passed" if self.style_ok else "failed"
 
 
 def evaluation_runs(store: EvalStore, model_id: str) -> list[RunView]:
@@ -191,16 +221,46 @@ def way_checks(way: WayResult) -> list[Check]:
         detail = way.style_error or "没有风格指标"
         style = Check(f"{name}：留出集风格指标每项偏差在 ±30% 内", False, detail)
     else:
-        failing = [r.label for r in report.results if r.counts and r.status != "pass"]
         style = Check(
             f"{name}：留出集风格指标每项偏差在 ±30% 内",
             way.style_ok,
-            "六项都在范围内" if way.style_ok else "不在范围内的指标：" + "、".join(failing),
+            style_detail(report),
             None,
             0.30,
             report.messages,
         )
     return [enough, lower, style]
+
+
+def _events(result: MetricResult) -> str:
+    return "—" if result.expected is None else f"{result.expected:.1f}"
+
+
+def style_detail(report: StyleReport) -> str:
+    """What the style check says: the verdict, then the expected events and the reference."""
+    if report.verdict == "insufficient":
+        short = report.insufficient
+        head = "样本不足：" + (
+            "、".join(f"{r.label} 期望事件 {_events(r)} < {MIN_EXPECTED_EVENTS}" for r in short)
+            if short
+            else "没有能判定的指标"
+        )
+    elif report.passed:
+        head = "可判定的各项都在范围内"
+    else:
+        failing = [r.label for r in report.results if r.counts and r.status != "pass"]
+        head = "不在范围内的指标：" + "、".join(failing)
+    parts = [head]
+    events = [f"{r.label} {_events(r)}" for r in report.results if r.expected is not None]
+    if events:
+        parts.append("期望事件数：" + "、".join(events))
+    left_out = [r.label for r in report.results if not r.counts]
+    if left_out:
+        parts.append("通道做不到、不计入：" + "、".join(left_out))
+    share = report.quoted_share
+    if share is not None:
+        parts.append(f"参考（不计入）：{share:.0%} 的回复模型写了 [引用:…]")
+    return "；".join(parts)
 
 
 def _way_values(way: WayResult) -> dict[str, Any]:
@@ -214,7 +274,12 @@ def _way_values(way: WayResult) -> dict[str, Any]:
         "z": way.test.z if way.test is not None else None,
         "lower": way.lower,
         "style_passed": way.style_ok,
+        "style_verdict": way.style.verdict if way.style is not None else None,
         "style_error": way.style_error,
+        "expected": {
+            r.key: r.expected for r in (way.style.results if way.style is not None else [])
+        },
+        "quoted_share": way.style.quoted_share if way.style is not None else None,
         "worst_metric": worst.key if worst is not None else None,
         "worst_deviation": worst.deviation if worst is not None else None,
         "verdict": way.verdict,
@@ -246,8 +311,9 @@ def judge_model(ctx: GateContext, model_id: str, *, style_of: StyleOf | None = N
             "M5", "insufficient", (check,), check.detail, (), {MODEL_PARAM: model_id}
         )
     totals = tally(store, runs)
+    samples = sample_runs(store, model_id)
     measure = style_of or style_of_runs
-    ways = [way_result(ctx.services, store, runs, totals, backend, measure) for backend in WAYS]
+    ways = [way_result(ctx.services, store, samples, totals, backend, measure) for backend in WAYS]
     checks = tuple(check for way in ways for check in way_checks(way))
     winner = winner_of(ways)
     if winner is not None:
@@ -257,7 +323,8 @@ def judge_model(ctx: GateContext, model_id: str, *, style_of: StyleOf | None = N
             f"{BASELINE} 的 {_percent(winner.baseline_rate)}（p = "
             f"{winner.test.p_less if winner.test else float('nan'):.3f}），风格指标都在范围内"
         )
-    elif any(way.verdict == "failed" for way in ways):
+    elif all(way.verdict == "failed" for way in ways):
+        # only when no way can pass any more; a way still short of evidence keeps it open (D-852)
         verdict = "failed"
         summary = "未通过：" + "；".join(
             f"{way.backend} {c.name.split('：', 1)[1]}（{c.detail}）"
@@ -274,6 +341,8 @@ def judge_model(ctx: GateContext, model_id: str, *, style_of: StyleOf | None = N
             if missing
             else "证据不足：" + "；".join(c.detail for c in checks if not c.passed)
         )
+        if any(way.enough and way.lower and way.style_short for way in ways):
+            summary += f"；补充风格样本：twin model evaluate {model_id} --style"
     values: dict[str, Any] = {
         MODEL_PARAM: model_id,
         "baseline": {"judged": totals[BASELINE][0], "correct": totals[BASELINE][1]},
@@ -281,9 +350,12 @@ def judge_model(ctx: GateContext, model_id: str, *, style_of: StyleOf | None = N
         "winner": winner.backend if winner is not None else None,
         "p_threshold": P_THRESHOLD,
         "minimum_valid": MIN_VALID,
+        "minimum_expected_events": MIN_EXPECTED_EVENTS,
         "tolerance": 0.30,
+        "style_samples": [run.id for run in samples],
     }
-    return GateVerdict("M5", verdict, checks, summary, tuple(run.id for run in runs), values)
+    evidence = tuple(run.id for run in runs) + tuple(run.id for run in samples)
+    return GateVerdict("M5", verdict, checks, summary, evidence, values)
 
 
 @gate_judge("M5")

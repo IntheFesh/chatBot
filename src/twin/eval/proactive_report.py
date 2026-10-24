@@ -12,7 +12,13 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 
-from twin.eval.proactive_audit import Audit, DayAudit
+from twin.eval.proactive_audit import Audit, DayAudit, describe_reasons
+from twin.eval.proactive_gate import (
+    M3_DAYS,
+    M3_EXEMPT_MAX,
+    M3_OBSERVATION_DAYS,
+    judge_days,
+)
 from twin.schedule.proactive.store import LogEntry
 from twin.schedule.proactive.types import KIND_LABELS, REASON_LABELS
 
@@ -41,7 +47,7 @@ def print_audit(console: Console, audit: Audit) -> None:
     for column in (
         "日期",
         "已监测",
-        "计入观察",
+        "观察日",
         "条数",
         "范围",
         "深睡",
@@ -59,14 +65,12 @@ def print_audit(console: Console, audit: Audit) -> None:
             else (f"{day.low}-{day.high}" if day.enabled is not False else "关")
         )
         verdict = "合规" if day.compliant else "；".join(day.problems)
-        if day.compliant and day.excused and day.low is not None and day.sent < day.low:
-            verdict = "合规（少于下限，但被窗口/暂停等拦下）"
-        if day.compliant and day.notes:  # watched and quiet, but not a day of "会主动" (R17-14)
+        if day.compliant and day.notes:  # excused, off, paused or not watched (D-663, D-850)
             verdict = "；".join(["合规", *day.notes])
         days.add_row(
             Text(day.day.isoformat()),
             Text("是" if day.observed else "否"),
-            Text("是" if day.active else "否"),
+            Text("是" if day.observation else ("免责" if day.exempt else "否")),
             Text(str(day.sent)),
             Text(span),
             Text(str(day.deep_sleep)),
@@ -97,21 +101,25 @@ def print_audit(console: Console, audit: Audit) -> None:
         )
     else:
         console.print(Text("这段时间没有 /评分。"))
+    verdict, summary = judge_days(audit)
     console.print(
         Text(
-            f"连续观察 {audit.streak}/{len(audit.days)} 天。"
-            + ("" if audit.complete else f"还差 {audit.missing_days} 天。")
+            f"观察日 {audit.observation_days}/{len(audit.days)} 天"
+            f"（M3：最近 {M3_DAYS} 天里至少 {M3_OBSERVATION_DAYS} 个观察日、"
+            f"免责日不超过 {M3_EXEMPT_MAX} 个）；免责日 {audit.exempt_days} 个"
             + (
-                f"其中 {audit.inactive_days} 天主动消息关闭或范围为 0-0，不计入观察。"
-                if audit.inactive_days
+                f"（拒绝原因：{describe_reasons(audit.exempt_reasons)}）"
+                if audit.exempt_days
                 else ""
-            ),
+            )
+            + f"；主动消息关闭、暂停或范围为 0-0 的 {audit.inactive_days} 天、"
+            f"程序没有运行的 {audit.unobserved_days} 天不计入观察。"
         )
     )
     console.print(
         Text(
-            "审计结论：" + ("合规" if audit.compliant and audit.complete else "不合规或未满"),
-            style="green" if audit.compliant and audit.complete else "red",
+            "审计结论：" + ("合规" if audit.compliant else "不合规") + f"；{summary}",
+            style="green" if verdict == "passed" else "red",
         )
     )
 

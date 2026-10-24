@@ -1,4 +1,9 @@
-"""The audit of the proactive messages: what the log of the last days says (R-EVAL-005)."""
+"""The audit of the proactive messages: what the log of the last days says (R-EVAL-005).
+
+Round 18 (R18-F6, D-850): the audit counts days of observation and excused days instead of a streak
+of watched days; the tests of the old streak were rewritten to the new counts (what they protect -
+a day switched off, planned for ``0-0`` or not watched is never observed - is unchanged).
+"""
 
 from __future__ import annotations
 
@@ -36,7 +41,7 @@ def test_a_week_that_kept_every_rule_is_compliant_and_counted_by_the_local_hour(
 ) -> None:
     books.good_week()
     result = audit(books)
-    assert result.compliant and result.complete and result.streak == 7
+    assert result.compliant and result.observation_days == 7 and result.exempt_days == 0
     assert (result.first_day, result.last_day) == (books.ago(7), books.ago(1))
     assert [day.sent for day in result.days] == [3] * 7
     assert result.sent == 21 and result.deep_sleep == 0
@@ -82,28 +87,33 @@ def test_the_count_must_be_inside_the_range_the_day_was_planned_with(books: Book
 
 
 @pytest.mark.parametrize(
-    ("reason", "excused"),
+    ("reason", "exempt", "observation"),
     [
-        ("window_closed", True),
-        ("quota_exhausted", True),
-        ("channel_unavailable", True),
-        ("paused", True),
-        ("disabled", True),
-        ("budget", True),
-        ("chase_limit", True),
-        ("spacing", False),
-        ("deep_sleep", False),
-        ("planner_declined", False),
+        ("window_closed", True, False),
+        ("quota_exhausted", True, False),
+        ("channel_unavailable", True, False),
+        ("budget", True, False),
+        ("chase_limit", True, False),
+        ("probe_running", True, False),
+        # the user's own decisions take the day out: not excused, not observed either (D-850)
+        ("paused", False, False),
+        ("disabled", False, False),
+        # what the schedule itself refused excuses nothing: a day of observation, below its range
+        ("spacing", False, True),
+        ("deep_sleep", False, True),
+        ("planner_declined", False, True),
     ],
 )
 def test_a_day_below_its_minimum_is_excused_only_by_what_the_schedule_cannot_help(
-    books: Books, reason: str, excused: bool
+    books: Books, reason: str, exempt: bool, observation: bool
 ) -> None:
+    """R18-F6 (D-850): an excused day is no violation and no day of observation."""
     books.good_week(days=6, last=2)
     books.day(books.ago(1), (), refused=(reason,))
     last = audit(books).days[-1]
-    assert last.excused is excused and last.count_ok is excused
-    assert last.compliant is excused
+    assert last.exempt is exempt and last.observation is observation
+    assert last.count_ok is not observation and last.compliant is not observation
+    assert last.excused is exempt  # a refusal from outside the schedule was logged
 
 
 def test_a_day_above_its_maximum_is_never_excused(books: Books) -> None:
@@ -129,11 +139,11 @@ def test_what_the_window_suppressed_is_counted(books: Books) -> None:
     assert result.suppressed_window == 3
 
 
-def test_a_day_with_the_switch_off_is_not_observed_and_ends_the_streak(books: Books) -> None:
+def test_a_day_with_the_switch_off_is_not_observed(books: Books) -> None:
     """R17-14 (D-663): a day with proactive messages off is no day of "会主动" to observe.
 
     It sends nothing, so it breaks no rule (it stays ``compliant``), but it shows nothing of
-    what M3 is about either: it does not count towards the seven days and ends the streak.
+    what M3 is about either: it does not count among the days of observation.
     """
     books.good_week(days=5, last=3)
     books.day(books.ago(2), (), enabled=False)
@@ -141,10 +151,9 @@ def test_a_day_with_the_switch_off_is_not_observed_and_ends_the_streak(books: Bo
     result = audit(books)
     off = result.days[-2]
     assert off.observed and off.count_ok and off.compliant and not off.active
-    assert off.problems == [] and off.notes == ["当天主动消息关闭/范围 0-0，不计入观察"]
-    assert [day.active for day in result.days] == [True] * 5 + [False, True]
-    assert result.inactive_days == 1
-    assert result.streak == 1 and not result.complete and result.missing_days == 6
+    assert off.problems == [] and off.notes == ["当天主动消息关闭、暂停或范围 0-0，不计入观察"]
+    assert [day.observation for day in result.days] == [True] * 5 + [False, True]
+    assert result.inactive_days == 1 and result.observation_days == 6
     assert result.compliant  # nothing was broken: the week is just not enough
 
 
@@ -165,7 +174,7 @@ def test_a_range_of_0_0_is_not_observed(books: Books) -> None:
     books.day(books.ago(1), (), low=0, high=0, enabled=True)
     last = audit(books).days[-1]
     assert last.observed and last.compliant and not last.active
-    assert audit(books).streak == 0 and audit(books).inactive_days == 1
+    assert audit(books).observation_days == 6 and audit(books).inactive_days == 1
     books.day(books.ago(1), (Sent(9),), low=0, high=0, enabled=True)
     assert not audit(books).days[-1].compliant
 
@@ -175,7 +184,8 @@ def test_a_day_with_a_range_from_zero_to_something_is_active(books: Books) -> No
     books.good_week(days=6, last=2)
     books.day(books.ago(1), (), low=0, high=3, enabled=True)
     last = audit(books).days[-1]
-    assert last.active and last.compliant and audit(books).streak == 7
+    assert last.active and last.observation and last.compliant
+    assert audit(books).observation_days == 7
 
 
 def test_a_switch_that_was_off_for_part_of_the_day_does_not_count(books: Books) -> None:
@@ -187,8 +197,8 @@ def test_a_switch_that_was_off_for_part_of_the_day_does_not_count(books: Books) 
     )
     last = audit(books).days[-1]
     assert last.enabled is True  # the range row says on; a later row says off
-    assert not last.active and last.compliant
-    assert audit(books).streak == 0
+    assert not last.active and not last.observation and last.compliant
+    assert audit(books).observation_days == 6
 
 
 def test_an_unwatched_day_is_not_active_and_is_not_counted_as_inactive(books: Books) -> None:
@@ -196,9 +206,10 @@ def test_an_unwatched_day_is_not_active_and_is_not_counted_as_inactive(books: Bo
     books.day(books.ago(3), (Sent(10),), opened=False)
     result = audit(books, 3)
     unwatched = result.days[0]
-    assert not unwatched.observed and not unwatched.active
+    assert not unwatched.observed and not unwatched.active and not unwatched.observation
     assert result.inactive_days == 0  # it is missing, not switched off
-    assert unwatched.notes == []
+    assert result.unobserved_days == 1
+    assert unwatched.notes == ["程序没有运行（当天没有记录），不计入观察"]
 
 
 def test_the_report_marks_the_days_that_do_not_count(books: Books) -> None:
@@ -210,10 +221,11 @@ def test_the_report_marks_the_days_that_do_not_count(books: Books) -> None:
     console = Console(file=buffer, width=240, color_system=None, highlight=False)
     print_audit(console, audit(books))
     shown = buffer.getvalue()
-    assert "计入观察" in shown
-    assert "合规；当天主动消息关闭/范围 0-0，不计入观察" in shown
+    assert "观察日" in shown
+    assert "合规；当天主动消息关闭、暂停或范围 0-0，不计入观察" in shown
     assert "发了 1 条，不在 0-0 范围内" in shown  # sending while off is a violation, not a note
-    assert "其中 2 天主动消息关闭或范围为 0-0，不计入观察" in shown
+    assert "主动消息关闭、暂停或范围为 0-0 的 2 天" in shown
+    assert "观察日 5/7 天" in shown and "审计结论：不合规" in shown
     assert "关" in shown  # the range column of a day with the switch off
 
 
@@ -221,8 +233,9 @@ def test_the_active_days_are_in_the_json(books: Books) -> None:
     books.good_week(days=6, last=2)
     books.day(books.ago(1), (), enabled=False)
     data = audit(books).to_json()
-    assert data["inactive_days"] == 1 and data["streak"] == 0
+    assert data["inactive_days"] == 1 and data["observation_days"] == 6
     assert [day["active"] for day in data["days"]] == [True] * 6 + [False]
+    assert [day["observation"] for day in data["days"]] == [True] * 6 + [False]
 
 
 def test_the_range_of_a_day_is_the_newest_the_log_knows(books: Books) -> None:
@@ -283,15 +296,17 @@ def test_two_edge_messages_a_week_are_inside_the_allowance(books: Books) -> None
     assert audit(books).compliant
 
 
-def test_a_day_the_scheduler_did_not_run_is_not_judged_and_ends_the_streak(books: Books) -> None:
+def test_a_day_the_scheduler_did_not_run_is_not_judged_and_not_observed(books: Books) -> None:
+    """R18-F6 (D-850): a day without its mark is not counted; it is no violation either."""
     books.good_week(days=2, last=1)
     books.day(books.ago(3), (Sent(10),), opened=False)  # messages, but no opening mark
     books.good_week(days=4, last=4)
     result = audit(books)
     assert [day.observed for day in result.days] == [True] * 4 + [False, True, True]
-    assert result.streak == 2 and not result.complete and result.missing_days == 5
+    assert result.observation_days == 6 and result.unobserved_days == 1
     unobserved = result.days[4]
-    assert unobserved.problems == ["程序没有运行（当天没有记录）"] and not unobserved.compliant
+    assert unobserved.problems == [] and unobserved.compliant and not unobserved.observation
+    assert unobserved.notes == ["程序没有运行（当天没有记录），不计入观察"]
 
 
 def test_ratings_of_the_period_are_averaged_and_older_ones_are_left_out(books: Books) -> None:
@@ -320,20 +335,38 @@ def test_audit_days_takes_an_explicit_period(books: Books) -> None:
         last_day=books.ago(2),
         now=books.clock.now_utc(),
     )
-    assert len(result.days) == 2 and result.complete and result.sent == 6
+    assert len(result.days) == 2 and result.observation_days == 2 and result.sent == 6
 
 
 def test_the_audit_is_written_out_as_plain_json(books: Books) -> None:
     books.good_week()
     books.rate(4)
     data = audit(books).to_json()
-    assert data["compliant"] is True and data["complete"] is True and data["streak"] == 7
+    assert data["compliant"] is True and data["observation_days"] == 7
+    assert data["exempt_days"] == 0 and data["exempt_reasons"] == {}
     assert data["rating_count"] == 1 and data["rating_mean"] == 4.0
     assert data["hours"] == {"10": 7, "15": 7, "20": 7}
     assert len(data["days"]) == 7 and data["days"][0]["hours"] == {"10": 1, "15": 1, "20": 1}
 
 
-def test_an_empty_log_has_a_streak_of_zero(books: Books) -> None:
+def test_an_empty_log_has_no_day_of_observation(books: Books) -> None:
     result = audit(books)
-    assert result.streak == 0 and result.sent == 0 and result.missing_days == 7
-    assert not result.complete and not result.compliant
+    assert result.observation_days == 0 and result.sent == 0 and result.unobserved_days == 7
+    assert result.compliant  # nothing broken, nothing observed: "not enough", never "passed"
+
+
+def test_r18_f6_an_excused_day_is_neither_a_violation_nor_observed_and_keeps_its_reasons(
+    books: Books,
+) -> None:
+    """R18-F6 (D-850): the reasons of the excused days are kept for the report."""
+    books.good_week(days=5, last=3)
+    books.day(books.ago(2), (), refused=("window_closed", "window_closed", "spacing"))
+    books.day(books.ago(1), (), refused=("budget",))
+    result = audit(books)
+    first, second = result.days[-2], result.days[-1]
+    assert first.exempt and first.compliant and not first.observation
+    assert first.exempt_reasons == {"window_closed": 2}  # what the schedule refused is no excuse
+    assert "免责日：发了 0 条，少于下限 1" in first.notes[0] and "被窗口抑制 2" in first.notes[0]
+    assert result.exempt_days == 2 and result.observation_days == 5
+    assert result.exempt_reasons == {"window_closed": 2, "budget": 1}
+    assert second.to_json()["exempt"] is True

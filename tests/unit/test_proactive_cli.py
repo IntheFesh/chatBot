@@ -152,7 +152,7 @@ def test_a_compliant_week_exits_with_zero_and_is_recorded(data_dir: Path) -> Non
     with_services(write_week)
     result = cli("eval", "proactive", "--days", "7")
     assert result.exit_code == 0, result.output
-    assert "审计结论：合规" in result.output and "连续观察 7/7 天" in result.output
+    assert "审计结论：合规" in result.output and "观察日 7/7 天" in result.output
     assert "发送时刻分布" in result.output and "10:00" in result.output
     assert "共发出 21 条；深睡时段 0 条" in result.output
     assert "这段时间没有 /评分" in result.output
@@ -172,7 +172,7 @@ def test_a_message_in_deep_sleep_exits_with_one(data_dir: Path) -> None:
     with_services(seed)
     result = cli("eval", "proactive")
     assert result.exit_code == 1
-    assert "深睡时段发了 1 条" in result.output and "审计结论：不合规或未满" in result.output
+    assert "深睡时段发了 1 条" in result.output and "审计结论：不合规" in result.output
     runs = with_services(lambda s: EvalStore(s.db, s.clock).list_runs("proactive_audit"))
     assert runs[0].verdict == "failed"
 
@@ -186,7 +186,7 @@ def test_days_the_program_did_not_watch_are_an_observation_period(data_dir: Path
     with_services(seed)
     result = cli("eval", "proactive", "--days", "7")
     assert result.exit_code == 1
-    assert "连续观察 3/7 天。还差 4 天。" in result.output
+    assert "观察日 3/7 天" in result.output and "还差 4 个" in result.output
     runs = with_services(lambda s: EvalStore(s.db, s.clock).list_runs("proactive_audit"))
     assert runs[0].verdict == "insufficient"
 
@@ -198,7 +198,9 @@ def test_the_week_so_far_can_include_today(data_dir: Path) -> None:
 
     with_services(seed)
     result = cli("eval", "proactive", "--days", "2", "--today")
-    assert result.exit_code == 0 and "共发出 4 条" in result.output
+    # two days hold two days of observation: the day rule of M3 (D-850) is not met yet
+    assert result.exit_code == 1 and "共发出 4 条" in result.output
+    assert "最近 2 天里有 2 个观察日，还差 5 个" in result.output
 
 
 def test_the_ratings_of_the_week_are_reported_and_the_gate_reads_them(data_dir: Path) -> None:
@@ -230,10 +232,10 @@ def test_a_week_with_the_switch_off_is_reported_as_not_counted_and_the_gate_asks
     with_services(seed)
     report = cli("eval", "proactive")
     assert report.exit_code == 1, report.output  # compliant, but not a week that counts
-    assert "计入观察" in report.output
-    assert "连续观察 0/7 天" in report.output
-    assert "其中 7 天主动消息关闭或范围为 0-0，不计入观察" in report.output
-    assert "审计结论：不合规或未满" in report.output
+    assert "观察日" in report.output
+    assert "观察日 0/10 天" in report.output
+    assert "主动消息关闭、暂停或范围为 0-0 的 7 天" in report.output
+    assert "审计结论：合规；观察期未满" in report.output
     gate = cli("eval", "gate", "M3")
     assert gate.exit_code == 1 and "样本不足" in gate.output and "主动消息关闭" in gate.output
     assert cli("eval", "gate", "M3", "--check").exit_code == 1

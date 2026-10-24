@@ -3,7 +3,9 @@
 ``evaluation_run`` writes a blind run the way ``twin model evaluate`` leaves it: one run drawn for
 a model (``params.model_id``), the same contexts answered by the DeepSeek backend and by the two
 ways of using the model, every pair judged.  ``style_report`` is the style metrics of one way as a
-:class:`~twin.eval.style_metrics.StyleReport` with the number of metrics outside the +-30 % chosen.
+:class:`~twin.eval.style_metrics.StyleReport` with the number of metrics outside the +-30 % chosen
+(and the shares too short of expected events, D-852); ``style_sample_run`` is the run of the
+model's style sample (``twin model evaluate --style``), which the gate measures.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from datetime import UTC, datetime
 from twin.eval.blind import MIN_VALID
 from twin.eval.store import EvalStore, NewItem, RunView
 from twin.eval.style_metrics import (
+    MIN_EXPECTED_EVENTS,
     STYLE_METRICS,
     MetricReading,
     StyleReport,
@@ -24,7 +27,7 @@ from twin.services import Services
 WHEN = datetime(2026, 9, 1, 12, tzinfo=UTC)
 BACKENDS = ("deepseek", "style", "hybrid")
 
-__all__ = ["BACKENDS", "MIN_VALID", "evaluation_run", "style_report"]
+__all__ = ["BACKENDS", "MIN_VALID", "evaluation_run", "style_report", "style_sample_run"]
 
 
 def evaluation_run(
@@ -80,12 +83,43 @@ def evaluation_run(
     return store.get_run(run.id)
 
 
-def style_report(backend: str, *, off: Sequence[str] = ()) -> StyleReport:
-    """The six metrics of a way: all within the tolerance, except the keys named in ``off``."""
+def style_report(
+    backend: str, *, off: Sequence[str] = (), short: Sequence[str] = ()
+) -> StyleReport:
+    """The six metrics of a way: all within the tolerance, except the keys named in ``off``;
+    the shares named in ``short`` have 3 expected events, too few to be judged (D-852)."""
     results = []
     for spec in STYLE_METRICS:
+        if spec.key in short:
+            results.append(
+                judge_metric(
+                    spec,
+                    MetricReading(0.03, 5000),
+                    MetricReading(0.03, 100),
+                    min_expected=MIN_EXPECTED_EVENTS,
+                )
+            )
+            continue
         measured = 2.0 if spec.key in off else 1.0
         results.append(judge_metric(spec, MetricReading(1.0, 100), MetricReading(measured, 100)))
     return StyleReport(
-        "eval_items", "pre_holdout", results, backend=backend, run_id="x", messages=100
+        "eval_items",
+        "pre_holdout",
+        results,
+        backend=backend,
+        run_id="x",
+        messages=100,
+        min_expected=MIN_EXPECTED_EVENTS,
+    )
+
+
+def style_sample_run(services: Services, model_id: str, *, status: str = "done") -> RunView:
+    """The style sample of ``model_id`` the way ``twin model evaluate --style`` leaves it."""
+    store = EvalStore(services.db, services.clock)
+    return store.create_run(
+        "style",
+        mode="holdout",
+        backends=["style", "hybrid"],
+        params={"model_id": model_id, "purpose": "sample", "min_expected": MIN_EXPECTED_EVENTS},
+        status=status,
     )

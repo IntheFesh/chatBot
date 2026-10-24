@@ -2,7 +2,9 @@
 
 ``eval_runs``
     one row per evaluation: a blind test (``blind``), a memory test (``memory``), a style
-    report that was kept (``style``), a stability report (``stability``, round 12), the audit of
+    report that was kept (``style``; with ``params.purpose = "sample"`` it is the style sample of
+    a model instead, whose items are generated replies nobody judges - round 18, D-852), a
+    stability report (``stability``, round 12), the audit of
     the proactive messages (``proactive_audit``, round 10), the verdict of a milestone gate
     (``gate``), and, from round 15, the audit of the bot's consistency with itself
     (``consistency``, R-EVAL-004), the month's cost against its ceiling (``cost``, R-EVAL-007)

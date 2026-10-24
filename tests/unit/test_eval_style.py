@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import ast
+import io
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from rich.console import Console
 
 from tests.support.export_world import World
+from twin.channel.base import ChannelCapabilities
 from twin.engine.conversation_log import conversation_since
 from twin.engine.turns import BotTurnStore, OutboundBubble, ReplyMeta
 from twin.eval.render import Candidate, CandidateLine
-from twin.eval.store import EvalStore, NewItem
+from twin.eval.report import print_style_report
+from twin.eval.store import EvalStore, NewItem, RunView
 from twin.eval.style_metrics import (
     STYLE_METRICS,
     TOLERANCE,
@@ -25,13 +30,16 @@ from twin.eval.style_metrics import (
     judge_metric,
     measure,
     read_metrics,
+    recorded_abilities,
     style_of_items,
     style_of_live,
+    style_of_runs,
 )
 from twin.profile.distribution import EmpiricalDistribution
 from twin.profile.snapshot import ProfileMetrics, assemble_metrics
 from twin.profile.values import Dist, Leaf, Rates, Scalar
 from twin.services import Services
+from twin.storage.eval_models import EvalItem
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "twin"
 BURST_GAP, SEGMENT_GAP = 120.0, 60.0
@@ -145,7 +153,7 @@ def test_nothing_in_the_style_report_counts_a_comma_itself() -> None:
 
 def test_a_profile_equal_to_the_output_passes_every_metric() -> None:
     measured = measure(candidate_recs(known_replies()), BURST_GAP, SEGMENT_GAP)
-    results = compare(profile_of(), measured, live=False)
+    results = compare(profile_of(), measured)
     assert [r.status for r in results] == ["pass"] * 6
     assert all(r.deviation == pytest.approx(0.0, abs=1e-6) for r in results)
 
@@ -182,7 +190,7 @@ def test_the_deviation_is_relative_to_hers() -> None:
 def test_a_known_bias_is_found_and_ranked_first() -> None:
     """Stickers at twice the share she uses them, everything else right."""
     measured = measure(candidate_recs(known_replies()), BURST_GAP, SEGMENT_GAP)
-    results = compare(profile_of(sticker=1 / 12), measured, live=False)
+    results = compare(profile_of(sticker=1 / 12), measured)
     failing = [r.key for r in results if r.status == "fail"]
     assert failing == ["sticker_share"]
     sticker = next(r for r in results if r.key == "sticker_share")
@@ -194,18 +202,31 @@ def test_a_known_bias_is_found_and_ranked_first() -> None:
 
 
 def test_the_quote_rate_is_not_measurable_where_the_channel_cannot_quote() -> None:
+    """R18-E2 (D-851): the rule is the channel's ability, the same for every source and backend.
+
+    Before round 18 this test pinned "``eval_items`` judges the quote rate even when the sandbox
+    channel cannot quote" (0 against 12.5 % failed); the user decided that a metric whose ability
+    the channel lacks is not measurable in both sources.  What stays judged: a channel that can
+    quote, and replies that went through no channel (the raw output of two adapter stacks).
+    """
     measured = measure(candidate_recs([reply(n) for n in range(10)]), BURST_GAP, SEGMENT_GAP)
-    results = compare(profile_of(), measured, live=True)
+    results = compare(profile_of(), measured, channel={"supports_quote": False})
     quote = next(r for r in results if r.key == "quote_rate")
     assert quote.status == "n/a" and not quote.counts and quote.deviation is None
     assert all(r.counts for r in results if r.key != "quote_rate")
-    other = compare(profile_of(), measured, live=False)
-    assert next(r for r in other if r.key == "quote_rate").status == "fail"  # 0 against 12.5 %
+    able = compare(profile_of(), measured, channel={"supports_quote": True})
+    assert next(r for r in able if r.key == "quote_rate").status == "fail"  # 0 against 12.5 %
+    raw = compare(profile_of(), measured)  # no channel in between: measured as it is
+    assert next(r for r in raw if r.key == "quote_rate").status == "fail"
+    unknown = compare(profile_of(), measured, channel={})  # nobody recorded the ability
+    found = next(r for r in unknown if r.key == "quote_rate")
+    assert found.status == "no_data" and found.counts  # unknown is no data, never a pass
+    assert [spec.needs for spec in STYLE_METRICS] == [None] * 5 + ["supports_quote"]
 
 
 def test_proportions_carry_a_wilson_interval_and_medians_do_not() -> None:
     measured = measure(candidate_recs(known_replies()), BURST_GAP, SEGMENT_GAP)
-    by_key = {r.key: r for r in compare(profile_of(), measured, live=False)}
+    by_key = {r.key: r for r in compare(profile_of(), measured)}
     low, high = by_key["comma_rate"].interval or (1.0, 0.0)
     assert low < 0.10 < high and by_key["text_length"].interval is None
 
@@ -277,7 +298,13 @@ async def test_the_live_source_measures_what_the_bot_really_sent_in_the_last_day
     by_key = {r.key: r for r in report.results}
     assert by_key["quote_rate"].status == "n/a"
     assert by_key["text_length"].measured.value == pytest.approx(8.0, abs=2.0)
-    assert by_key["emoji_code_rate"].measured.value == pytest.approx(0.5)
+    assert by_key["text_length"].days is None  # a median is judged on the week asked for
+    # 16 texts hold far fewer than 50 expected codes at her rate: since round 18 (D-852) the
+    # share is carried over the weeks before, here to the whole conversation (the old bubble
+    # 30 days ago included: 8 codes in 17 texts), and is still "not enough"
+    emoji = by_key["emoji_code_rate"]
+    assert emoji.status == "insufficient" and emoji.days == 35
+    assert emoji.measured.value == pytest.approx(8 / 17, abs=1e-5)
     wider = style_of_live(services, 60)
     assert wider.messages == 17
     with pytest.raises(StyleError, match="at least 1"):
@@ -313,3 +340,169 @@ def test_a_fresh_installation_has_no_profile_to_compare_with(services: Services)
     run = EvalStore(services.db, services.clock).create_run("blind", backends=["deepseek"])
     with pytest.raises(StyleError, match="no pre-holdout profile"):
         style_of_items(services, EvalStore(services.db, services.clock), run, "deepseek")
+
+
+# ------------------------------------------- round 18: what the channel can do (R18-E2, D-851)
+
+
+def sandbox_reply(index: int) -> Candidate:
+    """A reply the way the sandbox leaves it: a text with a comma and a code, a text, a sticker."""
+    return Candidate(
+        (
+            CandidateLine("text", text="你好，呀[拥抱]"),
+            CandidateLine("text", text="哈哈哈"),
+            CandidateLine("sticker", sticker_md5=f"{index % 7:032x}"),
+        ),
+        None,
+    )
+
+
+def sandbox_run(world: World, count: int, *, quoted_every: int) -> RunView:
+    """A blind run of the style backend as the generation leaves it (round 18 payload)."""
+    store = EvalStore(world.services.db, world.services.clock)
+    run = store.create_run("blind", mode="holdout", backends=["style"])
+    store.add_items(
+        run.id,
+        [
+            NewItem(
+                f"s{k}",
+                "style",
+                world.cutoff,
+                {"real": sandbox_reply(k).to_json()},
+                None,
+                "night",
+                "short",
+                k % 2 == 0,
+            )
+            for k in range(count)
+        ],
+    )
+    for item in store.items(run.id):
+        quoted = item.seq % quoted_every == 0
+        store.save_generated(
+            item.id,
+            {
+                "bot": sandbox_reply(item.seq).to_json(),
+                "draft": {
+                    "backend": "style",
+                    "fell_back": False,
+                    "attempts": 1,
+                    "actions": ["quote_removed"] if quoted else [],
+                    "violations": [],
+                    "quote_lines": 1 if quoted else 0,
+                },
+                "channel": {"supports_quote": False, "supports_typing": True},
+            },
+            cost_usd=0.0,
+        )
+    return store.get_run(run.id)
+
+
+def her_profile_with_quotes(count: int, monkeypatch: pytest.MonkeyPatch) -> ProfileMetrics:
+    """Her pre-holdout profile: the same replies, one in eight starting with a quote (6.25 %)."""
+    hers = [
+        Candidate(sandbox_reply(k).lines, "在干嘛" if k % 8 == 0 else None) for k in range(count)
+    ]
+    reference = measure(candidate_recs(hers), BURST_GAP, SEGMENT_GAP)
+    monkeypatch.setattr(
+        "twin.eval.style_metrics.load_profile",
+        lambda services, scope: (
+            SimpleNamespace(metrics=reference) if scope == "pre_holdout" else None
+        ),
+    )
+    return reference
+
+
+async def test_r18_e2_the_quote_rate_is_not_judged_where_the_sandbox_channel_could_not_quote(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-E2 (D-851): replies of the sandbox against a profile in which she quotes.
+
+    The sandbox channel cannot quote (like the running one, D-661), so the bot's replies never
+    quote and her quote rate is above 0: before round 18 the quote rate of the ``eval_items``
+    source was judged anyway (0 against 6.25 %, a deviation of -100 %) and M5's style criterion
+    could never pass.  Now it is "not measurable" there; the other metrics, all equal, pass.
+    """
+    her_profile_with_quotes(60, monkeypatch)
+    run = sandbox_run(world, 60, quoted_every=4)
+    report = style_of_runs(
+        world.services, EvalStore(world.services.db, world.services.clock), [run], "style"
+    )
+    by_key = {result.key: result for result in report.results}
+    assert by_key["quote_rate"].status == "n/a" and not by_key["quote_rate"].counts
+    assert all(r.status == "pass" for r in report.results if r.key != "quote_rate")
+    assert report.passed
+    # the reference number, outside the verdict: 15 of the 60 replies began with [引用:…]
+    assert report.quoted == (15, 60) and report.quoted_share == 0.25
+    assert report.to_json()["quoted"] == {"replies": 60, "with_quote": 15, "counted": False}
+    assert any("cannot do supports_quote" in note for note in report.notes)
+    buffer = io.StringIO()
+    print_style_report(Console(file=buffer, width=200, color_system=None), report)
+    shown = buffer.getvalue()
+    assert (
+        "参考（不计入判定）：后处理去掉引用行之前，模型在 60 条回复里有 15 条写了 [引用:…]（25.0%）"
+        in shown
+    )
+    assert "不可测" in shown and "通过" in shown
+
+
+async def test_r18_e2_the_reference_number_never_moves_the_verdict(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-E2 (D-851): however often the model wrote a quote, the verdict is the same."""
+    her_profile_with_quotes(60, monkeypatch)
+    store = EvalStore(world.services.db, world.services.clock)
+    verdicts = set()
+    for every in (1, 2, 60):
+        run = sandbox_run(world, 60, quoted_every=every)
+        report = style_of_runs(world.services, store, [run], "style")
+        verdicts.add(report.passed)
+        assert report.quoted is not None and report.quoted[0] == 60 // every
+    assert verdicts == {True}
+
+
+async def test_r18_e2_pairs_that_do_not_say_what_their_channel_could_do_have_no_quote_data(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-E2 (D-851): a pair generated before round 18 keeps no abilities: unknown, not n/a."""
+    her_profile_with_quotes(60, monkeypatch)
+    store = EvalStore(world.services.db, world.services.clock)
+    run = sandbox_run(world, 60, quoted_every=4)
+    items = store.items(run.id)
+    assert recorded_abilities(items)["supports_quote"] is False  # every pair says "no quotes"
+    with world.services.db.transaction(bump_state=False) as session:
+        for item in items:  # the pairs as round 17 left them: no record of the channel
+            row = session.get(EvalItem, item.id)
+            assert row is not None
+            row.payload = {k: v for k, v in dict(row.payload).items() if k != "channel"}
+    assert recorded_abilities(store.items(run.id))["supports_quote"] is None
+    report = style_of_runs(world.services, store, [run], "style")
+    quote = next(r for r in report.results if r.key == "quote_rate")
+    assert quote.status == "no_data" and not report.passed
+    assert any("do not say" in note for note in report.notes)
+
+
+async def test_r18_e2_the_live_source_asks_the_configured_channel(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-E2 (D-851): live judges a metric by the abilities of the channel ``channel.kind`` is.
+
+    Both real channels cannot quote, so the quote rate is "not measurable"; a channel that could
+    would have it judged - the rule is not written for one source.
+    """
+    services = world.services
+    now = services.clock.now_utc()
+    bot = BotTurnStore(services.db, services.clock)
+    bot.add_inbound(at=now - timedelta(days=1), kind="text", text="问题")
+    bot.add_reply(
+        [OutboundBubble("你好呀你好呀你好", now - timedelta(days=1) + timedelta(seconds=5))],
+        ReplyMeta("deepseek"),
+    )
+    report = style_of_live(services, 7)
+    assert next(r for r in report.results if r.key == "quote_rate").status == "n/a"
+    assert any("ilink channel cannot do supports_quote" in note for note in report.notes)
+    able = ChannelCapabilities(supports_quote=True, supports_typing=True)
+    monkeypatch.setattr("twin.eval.style_metrics.configured_capabilities", lambda services_: able)
+    judged = style_of_live(services, 7)
+    quote = next(r for r in judged.results if r.key == "quote_rate")
+    assert quote.counts and quote.status in ("fail", "insufficient")  # judged, not "n/a"

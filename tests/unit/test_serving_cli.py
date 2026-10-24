@@ -402,6 +402,54 @@ def test_evaluate_plans_generates_with_the_models_server_judges_and_previews_the
         )
 
 
+def answer_sample(world: World, run_id: str, texts: int, *, sticker: bool) -> None:
+    """Every reply of a style sample written the way the generation leaves it."""
+    store = EvalStore(world.services.db, world.services.clock)
+    lines: list[dict[str, object]] = [{"k": "text", "t": "你好呀你好呀你好"} for _ in range(texts)]
+    if sticker:
+        lines.append({"k": "sticker", "md5": "ab" * 16})
+    for item in store.items(run_id, with_payload=False):
+        store.save_generated(
+            item.id,
+            {
+                "bot": {"lines": lines, "quote": None},
+                "draft": {"backend": item.backend, "quote_lines": 1 if item.seq % 5 == 0 else 0},
+                "channel": {"supports_quote": False, "supports_typing": True},
+            },
+            cost_usd=0.0,
+        )
+
+
+def test_r18_e5_evaluate_style_plans_the_style_sample_and_resume_measures_it(
+    evaluated: tuple[World, ServingWorld],
+) -> None:
+    """R18-E5 (D-852): ``--style`` sizes, prices and queues the sample; ``--resume`` measures it."""
+    world, model = evaluated
+    code, out, _ = evaluate(model.model_id, "--style", "--n", "5")
+    assert code == 2 and "sizes itself" in out  # the blind test's --n means nothing here
+    code, out, screen = evaluate(model.model_id, "--style", "--seed", "5")
+    assert code == 0, out + screen
+    assert "风格样本" in screen and "最稀有的比例指标是" in screen and "不用你判断" in screen
+    assert "twin jobs approve" in screen and f"twin model evaluate {model.model_id}" in screen
+    store = EvalStore(world.services.db, world.services.clock)
+    (run,) = store.list_runs("style")
+    assert run.params["purpose"] == "sample" and run.params["model_id"] == model.model_id
+    assert set(run.backends) == {"style", "hybrid"} and run.batch_ids
+    items = store.items(run.id, with_payload=False)
+    assert len(items) == 2 * run.params["replies"] and run.params["replies"] > 100
+    code, _, screen = evaluate(model.model_id, "--resume", run.id)
+    assert code == 0 and f"还有 {len(items)} 条没有生成" in screen
+    # once generated (written here as the generation leaves it) the resume measures both ways
+    answer_sample(world, run.id, 5, sticker=True)
+    code, out, screen = evaluate(model.model_id, "--resume", run.id)
+    assert code == 0, out + screen
+    assert "风格指标" in screen and "期望事件数" in screen and "参考（不计入判定）" in screen
+    assert "M5" in screen and store.get_run(run.id).status == "done"
+    # every share has its 50 expected events: nothing more to plan
+    code, out, screen = evaluate(model.model_id, "--style")
+    assert code == 0 and "nothing more to generate" in screen
+
+
 def test_evaluate_refuses_a_run_that_was_drawn_for_another_model(
     evaluated: tuple[World, ServingWorld],
 ) -> None:

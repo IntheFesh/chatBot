@@ -467,10 +467,12 @@ uv run twin eval blind --resume <运行号> --foreground   # 生成；全部生�
 
 ```powershell
 uv run twin eval style --source live --days 7                              # 机器人最近 7 天真实输出 vs 她的 live 画像
-uv run twin eval style --source eval_items --run <盲测运行号> --backend deepseek   # 留出集上下文的输出 vs pre_holdout 画像
+uv run twin eval style --source eval_items --run <盲测运行号> --backend deepseek   # 留出集上下文的输出 vs pre_holdout 画像（--run 也可以是风格样本）
 ```
 
 六项核心指标（文字长度中位数、逗号率、连发中位数、表情包占比、表情代码率、引用率），**每项偏差在 ±30% 以内为通过**，有一项不通过退出码为 1。
+
+**通道做不到的指标不判**（第 18 轮，你的决定，D-851）：微信通道和终端通道都不能发引用，评估沙盒的内存通道也一样，所以两种来源下“引用率”都显示“不可测”，不计入通过判定，对所有后端一样。沙盒生成的每一对回复都记着当时通道能做什么，报告按这个判断，不是写死的；第 18 轮之前生成的回复没有这条记录，引用率显示“无数据”（重新生成即可）。留出集的报告另有一行**参考数（不计入判定）**：后处理把引用行去掉之前，模型有多大比例的回复写了 `[引用:…]`——想知道模型学没学到她的引用习惯，看这一行。
 
 ### 7.3 记忆测试（M2 ≥ 80%）
 
@@ -485,8 +487,17 @@ uv run twin eval memory --resume <运行号> --foreground         # DeepSeek 出
 ### 7.4 主动消息审计（M3）
 
 ```powershell
-uv run twin eval proactive --days 7        # 深睡时段 0 次、每天次数在范围内、间隔与追发零违规、边缘消息每周 ≤ 2、/评分 平均 ≥ 4
+uv run twin eval proactive                 # 最近 10 天：深睡时段 0 次、每天次数在范围内、间隔与追发零违规、边缘消息每周 ≤ 2、/评分 平均 ≥ 4
 ```
+
+M3 的观察口径（第 18 轮，你的决定，D-850）：看**最近 10 个自然日**，要有 **7 个观察日**，每个观察日发出的主动消息条数**严格**在当天的范围内。
+
+- **免责日**：当天发得比下限少，而且当天确有窗口关闭、条数用完、没登录、预算降级之类的外部拒绝。免责日既不算违规也不算观察日；10 天里**超过 3 个**免责日就判“样本不足”，报告列出这些拒绝的原因分布（例如“被窗口抑制 3、平台条数用完 1”）——这说明她想发却发不出去，要先解决窗口问题（每天给她发一条消息）。
+- 条数在范围内的日子照常是观察日，即使当天也有消息被窗口拦下。
+- 你 `/暂停` 或 `/主动 关` 的日子、范围是 0-0 的日子、程序没有运行的日子都**不算观察日**（不是违规，只是不计入）；关着的时候发出了消息仍是违规，任何一天超过上限都是违规。
+- 观察日不必连续：中间有一天没开电脑，不会让前面的天作废。
+
+`twin eval proactive` 的表格里“观察日”一列写“是 / 免责 / 否”，最后一行写观察日、免责日和不计入的天数；它的结论与 `twin eval gate M3` 的天数口径相同（只是不看 `/评分`），所以不足 7 个观察日时退出码为 1。
 
 ### 7.5 稳定性（M4）
 
@@ -556,12 +567,17 @@ uv run twin model tunnel stop             # 用完关闭，然后到 AutoDL 控�
 uv run twin model evaluate <模型号> --n 80              # 从留出集抽 80 个新上下文，deepseek / style / hybrid 各生成一遍，估价
 uv run twin jobs approve <批次号>
 uv run twin model evaluate <模型号> --resume <运行号> --foreground   # 生成（这时才启动模型服务器）并让你判“哪条是她”
+uv run twin model evaluate <模型号> --style             # 风格样本：样本量自动定（约 700 条回复/方式），估价
+uv run twin jobs approve <批次号>
+uv run twin model evaluate <模型号> --resume <样本运行号> --foreground   # 生成风格样本（不用判断），给出两种方式的风格指标
 uv run twin eval gate M5                                # 判定上线门槛
 uv run twin model activate <模型号>                      # 通过后：backend.active 设成猜对率更低的那种方式
 uv run twin model disable <模型号>                       # 停用；运行中的应用几秒内跟上
 ```
 
-上线门槛（R-SRV-005）：盲测里风格模型（style 或 hybrid 其中一种）的猜对率低于 deepseek 后端（单侧两比例检验 p < 0.1，每个后端各有 ≥ 50 对有效判断），**且**留出集六项风格指标都在 ±30% 以内。分词核对没过的模型任何情况下都不能激活。`--force` 能在门槛没过时强制启用，但会记审计、`/状态` 一直写“未通过门槛”、预算降级的最后一级不会切到它：
+上线门槛（R-SRV-005）：盲测里风格模型（style 或 hybrid 其中一种）的猜对率低于 deepseek 后端（单侧两比例检验 p < 0.1，每个后端各有 ≥ 50 对有效判断），**且**留出集六项风格指标都在 ±30% 以内。
+
+**风格指标看“风格样本”，不看盲测那几十对**（第 18 轮，你的决定，D-852）：她的逗号率只有 3% 左右，65 个上下文里同分布的模型三项稀有比例同时落在 ±30% 内的概率只有约四分之一。所以比例类指标要有 **≥ 50 次期望事件**（她的比率 × 机器人回复里的分母）才判定，不够就是“样本不足”（不是不通过）；`twin model evaluate <模型号> --style` 按最稀有的比例指标达到 50 次期望事件（再加 10% 余量，抵消分母的波动和生成失败的对子）自动定样本量——按她的比率约 700 条回复/方式，上限是留出集的可用上下文，不够时每个上下文用不同的随机种子多生成几份（种子记在每一条里）。它是一次性批任务，先估价：style 方式不调用 DeepSeek，hybrid 方式每条要一次 DeepSeek 规划。这些回复不用你判断；盲测仍按自己的 `--n`。生成完以后若还有指标“样本不足”（例如模型的回复比她短、文字气泡少），再运行一次 `--style` 会按模型实际的分母补足；够了会说“nothing more to generate”。盲测已经输给 deepseek 的方式直接判不通过，不必再做风格样本。通道做不到的指标（引用率）不计入，报告另附一个参考数：模型写了 `[引用:…]` 的回复占比。分词核对没过的模型任何情况下都不能激活。`--force` 能在门槛没过时强制启用，但会记审计、`/状态` 一直写“未通过门槛”、预算降级的最后一级不会切到它：
 
 ```powershell
 uv run twin model activate <模型号> --force
@@ -710,9 +726,9 @@ uv run twin purge --all
 | **M0 技术验证** | ClawBot 收发、主动窗口与条数、图片/GIF、正在输入；DeepSeek 思考开关与缓存命中 | 通道探针：主动消息在窗口内稳定送达（窗口 ≥ 12 小时、连发 ≥ 3 条）；DeepSeek 探针按 R-LLM-013 口径通过；否则停下评估企业微信通道 | `twin llm probe`（第 1.4 节）、`twin channel probe start`…`report`（第 2.3 节）、`twin eval gate M0`；见 `PENDING_USER_ACTIONS.md` 第 01、02 轮 | 待用户执行 |
 | **M1 能聊、像她** | 导入、画像、生成与节奏、表情代码 | 盲测猜对率 ≤ 70%（点估计，有效判断 ≥ 50 对） | 第 3、4、5、7.1 节；`twin eval gate M1`；第 09b 轮 | 待用户执行 |
 | **M2 记得住** | 表情包库、记忆、指令 | 记忆测试 ≥ 80%（20 题，10+10 构成完整） | 第 7.3 节；`twin eval gate M2`；第 09b、11 轮（指令全集完成后复判） | 待用户执行 |
-| **M3 有作息、会主动** | 作息与真实模式、主动消息、思考开关 | **连续 7 天**真实运行：深睡时段主动 0 次、每天次数在范围内、间隔与追发零违规；该周 `/评分` ≥ 4/5 | 先确认 R-CH-010（上面的提示）；`twin run` 跑满 7 天；每天给她发一条；`twin eval proactive --days 7`、`twin eval gate M3`；第 10 轮 | 待用户执行 |
+| **M3 有作息、会主动** | 作息与真实模式、主动消息、思考开关 | **最近 10 个自然日内有 7 个观察日**（免责日、暂停或关闭的日子不算；免责日超过 3 个为样本不足，第 7.4 节）：深睡时段主动 0 次、每个观察日次数在范围内、间隔与追发零违规；这段时间 `/评分` ≥ 4/5 | 先确认 R-CH-010（上面的提示）；`twin run` 跑满 7 个观察日；每天给她发一条；`twin eval proactive`、`twin eval gate M3`；第 10 轮 | 待用户执行 |
 | **M4 持续成长** | 学习、增量导入、运维 | **无人值守 7 天**（全部由计划任务启动，期间做一次断网演练，学习和增量导入各成功一次）；**新的**盲测 ≤ 60% | 第 1.5、7.1、7.5 节；`twin eval stability --days 7`、`twin eval gate M4`；第 12 轮 | 待用户执行 |
-| **M5 风格模型** | 训练、评估、量化部署 | R-SRV-005（第 8.3 节）；不通过则保留 DeepSeek 后端（不阻塞其他任何事） | 第 6、8 章；`twin model evaluate`、`twin eval gate M5`；第 13、14 轮 | 待用户执行（若训练） |
+| **M5 风格模型** | 训练、评估、量化部署 | R-SRV-005（第 8.3 节）；不通过则保留 DeepSeek 后端（不阻塞其他任何事） | 第 6、8 章；`twin model evaluate`（盲测）与 `twin model evaluate --style`（风格样本）、`twin eval gate M5`；第 13、14 轮 | 待用户执行（若训练） |
 
 汇总所有门槛、各项度量和证据来源的报告：`twin eval report`（第 15 轮，见第 7.7 节）；打 `v1.0.0` 之前的完整检查在 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md)。
 
@@ -750,7 +766,7 @@ uv run twin purge --all
 | `twin eval cost` | 轻量修改 | Month cost of the daily account against the 15 dollar line; one-time batches are listed apart (R-EVAL-007). |
 | `twin eval gate` | 轻量修改 | Judge a milestone; exit code 0 passed, 1 not passed, 2 not reached yet (R-EVAL-010). |
 | `twin eval memory` | 轻量修改 | Memory test: twenty questions from the fact store, judged and reviewed (R-EVAL-003). |
-| `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant. |
+| `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 unless M3's days hold. |
 | `twin eval report` | 轻量修改 | The summary report of the stored M0–M5 and measure results (R-EVAL-008). |
 | `twin eval runs` | 只读 | List the recent evaluation runs. |
 | `twin eval stability` | 轻量修改 | The stability report of the last days, from the health snapshots (R-EVAL-006). |

@@ -8,8 +8,9 @@
     application is not running), judging (the screen), reporting.
 ``style``
     the six core style metrics of what the bot wrote against her profile: the last days of the
-    real conversation (``--source live``) or the replies generated for a blind run
-    (``--source eval_items --run <id> --backend <name>``); the numbers are kept as a ``style`` run.
+    real conversation (``--source live``) or the replies generated for a blind run or for the
+    style sample of a model (``--source eval_items --run <id> --backend <name>``); the numbers are
+    kept as a ``style`` run.  A share with fewer than 50 expected events is "not enough" (D-852).
 ``memory``
     the memory test: twenty questions (ten from real records, ten from the conversation with the
     bot), asked in the sandbox, judged by DeepSeek and reviewed by you.  Same steps as ``blind``.
@@ -73,6 +74,7 @@ from twin.eval.memory_test import (
     summarize,
 )
 from twin.eval.proactive_audit import audit_recent
+from twin.eval.proactive_gate import M3_DAYS, judge_days
 from twin.eval.proactive_report import print_audit
 from twin.eval.report import (
     print_blind_report,
@@ -82,7 +84,15 @@ from twin.eval.report import (
 )
 from twin.eval.samples import StickerDescriber
 from twin.eval.store import EvalStore, EvalStoreError, RunView
-from twin.eval.style_metrics import StyleError, style_of_items, style_of_live
+from twin.eval.style_metrics import (
+    MIN_EXPECTED_EVENTS,
+    STYLE_METRICS,
+    StyleError,
+    holds_replies,
+    style_of_items,
+    style_of_live,
+)
+from twin.eval.style_sample import PLAN_MARGIN, StylePlan
 from twin.eval.summary_report import VERDICT_WORDS, write_report
 from twin.eval.ui import BlindSession, KeySource, TerminalKeys
 from twin.llm.errors import LlmError
@@ -162,6 +172,20 @@ def _run_of(store: EvalStore, run_id: str, kind: str) -> RunView:
         raise CliError(str(exc), ExitCode.FAILURE) from exc
     if run.kind != kind:
         raise CliError(f"run {run.id} is a {run.kind} run, not a {kind} run", ExitCode.FAILURE)
+    return run
+
+
+def _replies_run_of(store: EvalStore, run_id: str) -> RunView:
+    """A run whose generated replies can be measured: a blind run or a style sample (D-852)."""
+    try:
+        run = store.get_run(run_id)
+    except EvalStoreError as exc:
+        raise CliError(str(exc), ExitCode.FAILURE) from exc
+    if not holds_replies(run):
+        raise CliError(
+            f"run {run.id} is a {run.kind} run, not a blind run or a style sample",
+            ExitCode.FAILURE,
+        )
     return run
 
 
@@ -324,19 +348,7 @@ def continue_blind(
     """Go on with a blind run from wherever it is: generate (``generate`` runs the jobs here),
     judge on the screen, report.  ``twin model evaluate --resume`` uses the same steps with
     a ``generate`` that starts the model's server first."""
-    pending = store.counts(run.id)["pending"]
-    if pending and foreground:
-        if app_is_running(services):
-            typer.echo("the application is running and will execute the approved jobs")
-        else:
-            generate(services)
-            pending = store.counts(run.id)["pending"]
-    if pending:
-        console.print(Text(f"还有 {pending} 对没有生成（任务排队、等待批准或正在执行）："))
-        _print_batches(console, services, run)
-        console.print(
-            Text("批准后用 twin jobs run --until-idle 或加 --foreground 执行，再回到这里。")
-        )
+    if _still_pending(services, console, store, run, foreground=foreground, generate=generate):
         return
     run = _finish_blind(store, run)
     describe = StickerDescriber(StickerCatalog(services))
@@ -350,6 +362,101 @@ def continue_blind(
         console.print(Text(f"没做完：{resume_command} --resume {run.id}"))
 
 
+def _still_pending(
+    services: Services,
+    console: Console,
+    store: EvalStore,
+    run: RunView,
+    *,
+    foreground: bool,
+    generate: Callable[[Services], None],
+    unit: str = "对",
+) -> bool:
+    """Generate here when asked (``generate``); say what still waits and return whether any does."""
+    pending = store.counts(run.id)["pending"]
+    if pending and foreground:
+        if app_is_running(services):
+            typer.echo("the application is running and will execute the approved jobs")
+        else:
+            generate(services)
+            pending = store.counts(run.id)["pending"]
+    if pending:
+        console.print(Text(f"还有 {pending} {unit}没有生成（任务排队、等待批准或正在执行）："))
+        _print_batches(console, services, run)
+        console.print(
+            Text("批准后用 twin jobs run --until-idle 或加 --foreground 执行，再回到这里。")
+        )
+    return bool(pending)
+
+
+# ----------------------------------------------------------------- style sample
+
+
+def describe_style_plan(
+    console: Console, services: Services, plan: StylePlan, *, resume_command: str
+) -> None:
+    """What the style sample of a model holds, why that many, its cost and how to go on."""
+    run = plan.run
+    labels = {spec.key: spec.label for spec in STYLE_METRICS}
+    console.print(
+        Text(
+            f"风格样本 {run.id}：{plan.contexts} 个上下文，每种方式 {plan.replies} 条回复 × "
+            f"{len(run.backends)} 种方式（{'、'.join(run.backends)}）；这些回复不用你判断"
+        )
+    )
+    rarest = plan.rarest
+    if rarest is not None:
+        console.print(
+            Text(
+                f"最稀有的比例指标是{labels.get(rarest, rarest)}：每条回复期望 "
+                f"{plan.per_reply[rarest]:.3f} 次，要有 {MIN_EXPECTED_EVENTS} 次期望事件需要约 "
+                f"{plan.have + plan.needed} 条回复（含 {PLAN_MARGIN - 1:.0%} 余量）"
+                + (f"；已有 {plan.have} 条，这次补 {plan.replies} 条" if plan.have else "")
+            )
+        )
+    if plan.copies > 1:
+        console.print(
+            Text(
+                f"留出集只有 {plan.available} 个可用上下文：每个上下文最多生成 {plan.copies} 份，"
+                "每份用不同的随机种子（种子记在每一条里，可以复现）",
+                style="yellow",
+            )
+        )
+    console.print(Text("盲测照常按自己的 --n 另做；M5 的风格指标只看这份样本"))
+    console.print(
+        Text(
+            f"生成费用估算 ${plan.estimated_usd:.4f}（一次性批任务，按峰值价估算；"
+            "style 方式不调用 DeepSeek）"
+        )
+    )
+    _print_batches(console, services, run)
+    console.print(
+        Text(
+            f"批准并跑完后：{resume_command} --resume {run.id}"
+            "（--foreground 可在这里执行已批准的任务）"
+        )
+    )
+
+
+def continue_style_sample(
+    services: Services,
+    console: Console,
+    store: EvalStore,
+    run: RunView,
+    *,
+    foreground: bool,
+    generate: Callable[[Services], None],
+) -> bool:
+    """Generate the replies of a style sample; ``True`` (and the run done) when none is left."""
+    if _still_pending(
+        services, console, store, run, foreground=foreground, generate=generate, unit="条"
+    ):
+        return False
+    if run.status != "done":
+        store.update_run(run.id, status="done")
+    return True
+
+
 # ------------------------------------------------------------------------ style
 
 
@@ -358,7 +465,9 @@ def continue_blind(
 def eval_style(
     source: Annotated[str, typer.Option("--source", help="live or eval_items")] = "live",
     days: Annotated[int, typer.Option("--days", min=1, help="Days of the live conversation")] = 7,
-    run: Annotated[str | None, typer.Option("--run", help="Blind run (eval_items)")] = None,
+    run: Annotated[
+        str | None, typer.Option("--run", help="Blind run or style sample (eval_items)")
+    ] = None,
     backend: Annotated[str | None, typer.Option("--backend", help="Backend (eval_items)")] = None,
 ) -> None:
     """Style metrics of the bot against her profile, within +-30 % (R-EVAL-002)."""
@@ -373,7 +482,7 @@ def eval_style(
                     "--source eval_items needs --run <id> and --backend <name>", ExitCode.USAGE
                 )
             store = _store(services)
-            report = style_of_items(services, store, _run_of(store, run, "blind"), backend)
+            report = style_of_items(services, store, _replies_run_of(store, run), backend)
         else:
             raise CliError("--source is live or eval_items", ExitCode.USAGE)
     except StyleError as exc:
@@ -384,7 +493,7 @@ def eval_style(
         mode="live" if report.source == "live" else "holdout",
         backends=[report.backend] if report.backend else [],
         status="done",
-        verdict="passed" if report.passed else "failed",
+        verdict=report.verdict,
         params={
             "source": report.source,
             "days": report.days,
@@ -485,12 +594,12 @@ def eval_gate(
 def eval_proactive(
     days: Annotated[
         int, typer.Option("--days", min=1, max=60, help="How many completed local days")
-    ] = 7,
+    ] = M3_DAYS,
     today: Annotated[
         bool, typer.Option("--today", help="Include today so far (a day that is not over)")
     ] = False,
 ) -> None:
-    """Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant."""
+    """Audit the proactive messages of the last days (R-EVAL-005); exit 1 unless M3's days hold."""
     services = _services()
     console = _interaction.console()
     audit = audit_recent(
@@ -502,17 +611,17 @@ def eval_proactive(
         days=days,
         include_today=today,
     )
-    good = audit.compliant and audit.complete
+    verdict, _ = judge_days(audit)  # the day rule of M3: 7 days of observation, 3 excused (D-850)
     run = _store(services).create_run(
         "proactive_audit",
         status="done",
-        verdict="passed" if good else ("insufficient" if not audit.complete else "failed"),
+        verdict=verdict,
         params={"days": days, "first_day": str(audit.first_day), "last_day": str(audit.last_day)},
         summary=audit.to_json(),
     )
     print_audit(console, audit)
     console.print(Text(f"审计记录：{run.id}"))
-    if not good:
+    if verdict != "passed":
         raise typer.Exit(1)
 
 

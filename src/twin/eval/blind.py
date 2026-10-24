@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from twin.channel.configured import abilities_of
 from twin.config.runtime import THINKING_CHAT
 from twin.engine.style_models import StyleModels
 from twin.engine.style_runtime import StyleRuntime
@@ -69,11 +70,13 @@ JOB_SIZE = 10  # pairs per job
 REPLY_COMPLETION_TOKENS = 600  # the DeepSeek backend's cap on a reply (an upper bound)
 PLAN_COMPLETION_TOKENS = 400  # the planner's cap of the hybrid backend
 MIN_VALID = 50  # R-EVAL-001: a gate counts only with this many valid judgements
+MODEL_PARAM = "model_id"  # ``params`` key of a run drawn for a model (R-SRV-005)
 
 FAIL_FELL_BACK = "fell_back"
 FAIL_NO_REPLY = "no_reply"
 FAIL_EMPTY = "empty"
 FAIL_NOT_DEPLOYED = "not_deployed"
+QUOTE_STEPS = frozenset({"quote_removed", "stray_quote_removed"})  # post-processing steps (D-851)
 
 
 class EvalError(RuntimeError):
@@ -388,6 +391,31 @@ def _store_plan(
         for (sample, backend), side in zip(pairs, sides, strict=True)
     ]
     store.add_items(run.id, items)
+    run, batch_ids, total = queue_generation(kit, store, run, prices)
+    return BlindPlan(
+        run=run,
+        samples=len(drawn.samples),
+        pairs=len(items),
+        estimated_usd=total,
+        batch_ids=batch_ids,
+        requested=requested,
+        excluded=drawn.excluded,
+        strata=drawn.strata,
+    )
+
+
+def queue_generation(
+    kit: SandboxKit,
+    store: EvalStore,
+    run: RunView,
+    prices: Mapping[tuple[str, str], float],
+) -> tuple[RunView, list[str], float]:
+    """Queue the generation of a run's items as one-time batches that wait for the approval.
+
+    ``prices`` is the estimate of each (sample, backend) pair; the jobs of ``JOB_SIZE`` items
+    are packed into batches under the batch limit (R-LLM-014).  The blind test and the style
+    sample of a model (D-852) queue the same way; a pair too dear for any batch cancels the run.
+    """
     stored = store.items(run.id, with_payload=False)
     estimate_of = {item.id: prices[(item.sample_key, item.backend)] for item in stored}
     jobs = [stored[i : i + JOB_SIZE] for i in range(0, len(stored), JOB_SIZE)]
@@ -420,16 +448,7 @@ def _store_plan(
         raise
     total = sum(job_usd)
     run = store.update_run(run.id, batch_ids=batch_ids, params={"estimated_usd": round(total, 6)})
-    return BlindPlan(
-        run=run,
-        samples=len(drawn.samples),
-        pairs=len(items),
-        estimated_usd=total,
-        batch_ids=batch_ids,
-        requested=requested,
-        excluded=drawn.excluded,
-        strata=drawn.strata,
-    )
+    return run, batch_ids, total
 
 
 # -------------------------------------------------------------------- generate
@@ -449,14 +468,23 @@ def draft_facts(
     attempts: int,
     actions: Sequence[dict[str, Any]],
     kinds: Sequence[str],
+    *,
+    quote_kept: bool = False,
 ) -> dict[str, Any]:
-    """What is kept of how a reply came about: codes and numbers, never text."""
+    """What is kept of how a reply came about: codes and numbers, never text.
+
+    ``quote_lines`` counts the ``[引用:…]`` lines the model wrote - the ones the post-processing
+    removed (the channel cannot quote, or a quote not on the first line) plus the one it kept -
+    for the reference number of the style report (D-851).
+    """
+    removed = sum(int(a.get("count", 1)) for a in actions if a.get("step") in QUOTE_STEPS)
     return {
         "backend": backend,
         "fell_back": fell_back,
         "attempts": attempts,
         "actions": [a.get("step") for a in actions],
         "violations": list(kinds),
+        "quote_lines": removed + (1 if quote_kept else 0),
     }
 
 
@@ -473,7 +501,9 @@ async def generate_item(
         draft.attempts,
         draft.actions_json(),
         [v.kind for v in draft.violations],
+        quote_kept=bool(draft.quote),
     )
+    channel = abilities_of(reply.channel)  # what the style report reads (D-851)
     reason: str | None = None
     if draft.needs_fallback:
         reason = f"fallback:{draft.fallback_reason}"
@@ -486,14 +516,14 @@ async def generate_item(
     if reason is not None:
         store.save_generated(
             item.id,
-            {"failure": reason, "draft": facts},
+            {"failure": reason, "draft": facts, "channel": channel},
             cost_usd=draft.cost_usd,
             status="failed",
         )
         return "failed"
     store.save_generated(
         item.id,
-        {"bot": reply.candidate.to_json(), "draft": facts},
+        {"bot": reply.candidate.to_json(), "draft": facts, "channel": channel},
         cost_usd=draft.cost_usd,
     )
     return "generated"
@@ -509,7 +539,7 @@ async def generate_items(
     summary = GenerateSummary()
     items = [store.item(item_id) for item_id in item_ids]
     wanted = any(item.status == "pending" and item.backend in STYLE_BACKENDS for item in items)
-    model_id = run.params.get("model_id")
+    model_id = run.params.get(MODEL_PARAM)
     models: StyleModels | None = None
     llm = build_llm_runtime(services)
     style: StyleRuntime | None = None

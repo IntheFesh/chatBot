@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import io
+import re
 import sys
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -869,9 +870,16 @@ def test_the_terminal_channel_is_not_the_product_channel() -> None:
         "assembly.py",
         "channel/chat.py",
         "channel/cli.py",
+        "channel/configured.py",  # reads the class's capabilities only (R18-E2, D-851; below)
         "channel/echo.py",
         "cli.py",
     }
+    # the style report asks what the configured channel can do without starting one: the module
+    # names the console channel only for its capability definition and never builds a channel
+    configured = (SRC / "channel" / "configured.py").read_text(encoding="utf-8")
+    uses = re.findall(r"LocalConsoleChannel\.?(\w*)", configured)
+    assert uses and set(uses) <= {"", "capabilities_for"}
+    assert "LocalConsoleChannel(" not in configured and "from_services" not in configured
 
 
 def test_nothing_in_the_repository_answers_with_an_echo() -> None:

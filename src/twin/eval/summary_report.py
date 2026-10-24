@@ -101,9 +101,9 @@ MILESTONES: tuple[MilestoneSpec, ...] = (
         "M3",
         "有作息、会主动",
         "F6 作息与真实模式、F7 主动、F9 思考开关",
-        "连续 7 天真实运行：深睡时段主动 0 次、每天次数在范围内、间隔与追发零违规；"
-        "该周 /评分 ≥ 4/5",
-        "`twin eval proactive`（观察满 7 天后）",
+        "最近 10 个自然日内有 7 个观察日（口径见 R-EVAL-005）：深睡时段主动 0 次、"
+        "每个观察日次数在范围内、间隔与追发零违规；这段时间 /评分 ≥ 4/5",
+        "`twin eval proactive`（最近 10 天内有 7 个观察日后）",
     ),
     MilestoneSpec(
         "M4",
@@ -376,7 +376,18 @@ def blind_section(ctx: Context) -> Section:
 
 
 PROPORTION_METRICS = frozenset(spec.key for spec in STYLE_METRICS if spec.proportion)
-STYLE_STATUS = {"pass": "通过", "fail": "不通过", "n/a": "不适用", "no_data": "无数据"}
+STYLE_STATUS = {
+    "pass": "通过",
+    "fail": "不通过",
+    "n/a": "不适用",
+    "no_data": "无数据",
+    "insufficient": "样本不足",
+}
+STYLE_VERDICTS = {
+    "passed": "每项偏差在 ±30% 内：通过",
+    "failed": "有指标超出 ±30%：不通过",
+    "insufficient": "比例类指标的期望事件不到 50 次：样本不足",
+}
 
 
 def _style_value(key: str, value: object) -> str:
@@ -391,6 +402,7 @@ def _style_table(run: RunView) -> list[str]:
     for metric in run.summary.get("metrics", []):
         key = str(metric.get("key"))
         deviation = metric.get("deviation")
+        expected = metric.get("expected")
         rows.append(
             [
                 metric.get("label"),
@@ -398,9 +410,10 @@ def _style_table(run: RunView) -> list[str]:
                 _style_value(key, (metric.get("measured") or {}).get("value")),
                 "—" if deviation is None else f"{deviation * 100:+.1f}%",
                 STYLE_STATUS.get(str(metric.get("status")), "—"),
+                "—" if not isinstance(expected, int | float) else f"{expected:.1f}",
             ]
         )
-    return table(["指标", "她（画像）", "机器人", "相对偏差", "结论"], rows)
+    return table(["指标", "她（画像）", "机器人", "相对偏差", "结论", "期望事件数"], rows)
 
 
 def style_section(ctx: Context) -> Section:
@@ -436,9 +449,9 @@ def style_section(ctx: Context) -> Section:
     parts += [(f"留出集：{backend} 后端对 pre_holdout 画像", run) for backend, run in holdout]
     for title, run in parts:
         section.runs.append(run.id)
-        verdict = (
-            "每项偏差在 ±30% 内：通过" if run.summary.get("passed") else "有指标超出 ±30%：不通过"
-        )
+        # a report kept before round 18 has no verdict, only "passed" (D-852)
+        found = run.summary.get("verdict") or ("passed" if run.summary.get("passed") else "failed")
+        verdict = STYLE_VERDICTS.get(str(found), STYLE_VERDICTS["failed"])
         section.lines += [
             "",
             f"**{title}**（记录 `{run.id}`，{ctx.stamp(run.created_at)}；"
@@ -541,6 +554,15 @@ def consistency_section(ctx: Context) -> Section:
     return section
 
 
+def _observation_days(summary: dict[str, Any]) -> str:
+    """``7/10 天（免责 2）``; an audit stored before round 18 kept its streak instead (D-850)."""
+    days = len(summary.get("days", []))
+    if "observation_days" in summary:
+        exempt = summary.get("exempt_days") or 0
+        return f"{summary['observation_days']}/{days} 天" + (f"（免责 {exempt}）" if exempt else "")
+    return f"连续 {summary.get('streak', '—')}/{days} 天"
+
+
 def proactive_section(ctx: Context) -> Section:
     section = Section()
     run = latest_run(ctx.store, "proactive_audit")
@@ -554,7 +576,7 @@ def proactive_section(ctx: Context) -> Section:
         [
             "评估记录",
             "日期范围",
-            "连续观察",
+            "观察日",
             "主动消息",
             "深睡时段",
             "间隔 / 追发违规",
@@ -567,7 +589,7 @@ def proactive_section(ctx: Context) -> Section:
             [
                 f"`{run.id}`",
                 f"{s.get('first_day', '—')} 至 {s.get('last_day', '—')}",
-                f"{s.get('streak', '—')}/{len(s.get('days', []))} 天",
+                _observation_days(s),
                 s.get("sent", "—"),
                 s.get("deep_sleep", "—"),
                 f"{s.get('spacing_violations', '—')} / {s.get('chase_violations', '—')}",

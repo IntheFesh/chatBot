@@ -261,10 +261,11 @@ def test_a_style_report_is_kept_as_a_run_of_numbers_for_the_summary(cli_world: W
     assert code == 1 and "评估记录：" in screen
     store = EvalStore(cli_world.services.db, cli_world.services.clock)
     live = store.latest_run("style")
-    assert live is not None and live.status == "done" and live.verdict == "failed"
+    assert live is not None and live.status == "done" and live.verdict == "insufficient"
     assert live.mode == "live" and live.backends == ()
     assert live.params == {"source": "live", "days": 7, "blind_run": None, "backend": None}
     assert live.summary["source"] == "live" and live.summary["passed"] is False
+    assert live.summary["verdict"] == "insufficient"  # too few expected events (D-852)
     assert [m["key"] for m in live.summary["metrics"]] == [
         "text_length",
         "comma_rate",
@@ -335,7 +336,7 @@ def test_the_memory_test_is_planned_asked_reviewed_and_decides_m2(
 
 def test_the_gate_commands_exit_with_0_1_and_2(cli_world: World) -> None:
     code, out, screen = run("gate", "M3")  # wired by round 10: no observed days yet
-    assert code == 1 and "还差 7 天" in screen and "未通过（样本不足）" in screen
+    assert code == 1 and "还差 7 个" in screen and "未通过（样本不足）" in screen
     # M4 is judged since round 12, M5 since round 14: nothing was evaluated yet, so both are 1
     assert run("gate", "M4")[0] == 1
     code, _, screen = run("gate", "M5")
