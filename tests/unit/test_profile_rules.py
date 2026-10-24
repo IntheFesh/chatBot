@@ -161,6 +161,20 @@ def test_latency_rule() -> None:
     assert has(lines, "回复通常很快（中位约 18 秒）", "可以到 48 秒以上")
 
 
+def test_a_slow_median_is_not_called_fast() -> None:
+    """R18-F11: a median of 1020 seconds is seventeen minutes, not "回复通常很快" (D-904)."""
+    lines = lines_for(reply_latency_s=dist({600: 20, 1020: 60, 3000: 20}))
+    assert not [line for line in lines if "很快" in line]
+    assert has(lines, "回复常常要隔一阵（中位约 17 分钟）", "可以到 50 分钟以上")
+    minutes = lines_for(reply_latency_s=dist({120: 30, 180: 40, 400: 30}))
+    assert not [line for line in minutes if "很快" in line]
+    assert has(minutes, "回复不算快，通常隔几分钟（中位约 3 分钟）")
+    hours = lines_for(reply_latency_s=dist({4000: 50, 9000: 50}))
+    assert has(hours, "中位约 1.8 小时", "可以到 2.5 小时以上")  # the median lies between
+    edge = lines_for(reply_latency_s=dist({60: 100}))
+    assert has(edge, "回复通常很快（中位约 60 秒）")  # one minute is still quick
+
+
 def test_facts_without_data_make_their_rules_silent() -> None:
     quiet = ProfileMetrics(
         assemble_metrics(

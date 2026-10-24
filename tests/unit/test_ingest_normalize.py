@@ -125,10 +125,15 @@ def test_times_accept_seconds_milliseconds_and_the_local_text() -> None:
     assert info.value.reason == "no_time"
 
 
-def test_a_text_that_disagrees_with_the_epoch_is_flagged() -> None:
-    assert not norm(createTimeText="2025-01-01 06:00:00").time_mismatch
-    assert norm(createTimeText="2025-01-01 12:00:00").time_mismatch  # six hours off
-    assert not norm(createTimeText="not a time").time_mismatch
+def test_a_text_that_disagrees_with_her_zone_is_not_judged_per_message() -> None:
+    """R18-C7 (D-900, rewritten): the text is the exporting device's clock, not hers.  A text six
+    hours off her zone is no "mismatch" of the message: the moment stays createTime, and whether
+    the texts agree is decided once for the whole export (``twin.ingest.textzone``)."""
+    for text in ("2025-01-01 06:00:00", "2025-01-01 12:00:00", "not a time"):
+        item = norm(createTimeText=text)
+        assert item.create_time == datetime(2025, 1, 1, 12, 0, tzinfo=UTC)
+        assert item.time_from_text is None
+    assert not hasattr(item, "time_mismatch")
 
 
 def test_source_time_ranges_override_the_default_zone() -> None:

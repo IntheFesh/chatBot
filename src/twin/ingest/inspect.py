@@ -15,6 +15,11 @@ value of a text field, an id or a name.  Two rules make sure of that:
 The point of the report is to let the person who owns the export check the importer's idea
 of the format (the synthetic generator in the tests, SPEC R-IMP-002, the ``_integrity``
 reader) against the real files without sharing any of the content.
+
+It also names the zone the sampled ``createTimeText`` values are written in, inferred from their
+difference to ``createTime`` (round 18 item C7, :mod:`twin.ingest.textzone`, D-900); when no zone
+fits every sampled message, the offsets and their counts are listed for the owner to confirm.
+Zone names, offsets and counts are derived numbers, not values of the export.
 """
 
 from __future__ import annotations
@@ -42,6 +47,8 @@ from twin.ingest.layout import (
     ExportLayoutError,
 )
 from twin.ingest.paths import long_path, mask_dir_name, nfc
+from twin.ingest.textzone import TextZoneTally, infer_text_zone
+from twin.ingest.times import epoch_to_utc
 
 SAFE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,47}$")
 SAFE_VALUE = re.compile(r"^[A-Za-z0-9_.\- ]{1,32}$")
@@ -155,6 +162,7 @@ class InspectResult:
     sampled: int = 0
     sample_limit: int = DEFAULT_SAMPLE
     notes: list[str] = field(default_factory=list)
+    text_zone: TextZoneTally = field(default_factory=TextZoneTally)
 
 
 def _read_json(path: Path) -> Any:
@@ -203,6 +211,9 @@ def _inspect_messages(path: Path, result: InspectResult) -> None:
             for message in islice(stream, limit):
                 result.messages.observe("$.messages[]", message)
                 result.sampled += 1
+                if isinstance(message, dict):
+                    moment = epoch_to_utc(message.get("createTime"))
+                    result.text_zone.observe(moment, message.get("createTimeText"))
     except (ijson.JSONError, OSError, UnicodeDecodeError):
         result.notes.append("a messages.json could not be read to the end")
 
@@ -342,6 +353,33 @@ def _structure_lines(title: str, structure: Structure) -> list[str]:
     return lines
 
 
+def _text_zone_lines(result: InspectResult) -> list[str]:
+    inference = infer_text_zone(result.text_zone)
+    lines = ["## 导出文字时区（由抽样消息的 createTime 与 createTimeText 推断）", ""]
+    if inference.pairs == 0:
+        return [
+            *lines,
+            "抽样的消息里没有同时带 createTime 与可读 createTimeText 的，推断不出。",
+            "",
+        ]
+    if inference.zone is not None:
+        also = f"；另有 {inference.equivalents} 个时区与它完全等价" if inference.equivalents else ""
+        lines.append(
+            f"推断的导出文字时区：**{inference.zone}**（抽样的 {inference.pairs} 条消息全部吻合"
+            f"{also}）。它只是导出设备的时钟，与 time.source_timezone（她在哪）无关；"
+            "导入时按全部消息再推断一次，结果写进导入报告。"
+        )
+    else:
+        lines.append(
+            f"推断不出：没有一个时区能让抽样的全部 {inference.pairs} 条消息吻合。"
+            "下面是时差分布，请确认导出是否合并自不同时区的设备、或文字时间有误："
+        )
+    lines += ["", "| 时差（createTimeText − UTC） | 条数 |", "| --- | --- |"]
+    lines += [f"| {label} | {count} |" for label, count in inference.offset_rows()]
+    lines.append("")
+    return lines
+
+
 def render_inspect(result: InspectResult, now: datetime) -> str:
     """Markdown for ``data/reports/inspect-<UTC>.md`` (no values, see the module docstring)."""
     lines = [
@@ -360,6 +398,7 @@ def render_inspect(result: InspectResult, now: datetime) -> str:
         *_structure_lines("meta.json（所有会话合并）", result.meta),
         *_structure_lines("messages.json 顶层（messages 数组之前的部分）", result.header),
         *_structure_lines("messages.json 的消息体（抽样）", result.messages),
+        *_text_zone_lines(result),
         "## _integrity/",
         "",
     ]

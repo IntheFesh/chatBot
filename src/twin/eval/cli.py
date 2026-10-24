@@ -575,7 +575,7 @@ def eval_gate(
         bool, typer.Option("--check", help="Only read the last stored verdict")
     ] = False,
 ) -> None:
-    """Judge a milestone; exit code 0 passed, 1 not passed, 2 not reached yet (R-EVAL-010)."""
+    """Judge a milestone: exit 0 passed, 1 not passed or insufficient, 2 no judge (R-EVAL-010)."""
     services = _services()
     console = _interaction.console()
     try:

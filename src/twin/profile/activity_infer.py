@@ -27,6 +27,15 @@ smoothed circularly (so 23:45 and 00:00 are neighbours) with a Gaussian kernel o
 5. A deep-sleep core (``edge_minutes`` after falling asleep to ``edge_minutes`` before waking)
    that lies mostly in 10:00-18:00 triggers the warning that ``time.source_timezone`` may be
    wrong.
+6. The same check month by month (round 18 item C7, D-902): a trip that is a small part of the
+   record - and no range says so, or the range is on the wrong dates or zone - leaves the
+   overall sleep at night, so every calendar month of her local dates, cut again where the
+   configured zone changes, with at least :data:`PERIOD_MIN_MESSAGES` messages of hers on
+   :data:`PERIOD_MIN_DAYS` days, gets its own curve and valley (steps 1 and 5).  The months whose
+   core lies in the daytime are named in a warning that asks to check
+   ``time.source_timezone_ranges`` - unless every month is off and the overall warning already
+   says so.  The export's ``createTimeText`` is no evidence of where she was (D-900): this check is
+   how a wrong zone is found.
 
 **Busy.**  On workdays, awake slots whose smoothed rate is below ``activity.busy_rate_ratio``
 times the awake average *and* whose hour has a median reply latency at least
@@ -49,6 +58,7 @@ from twin.profile.activity_collect import ALL, WORKDAY, ActivityRaw
 from twin.profile.activity_model import (
     CURVE_KEYS,
     DAY_TYPE_LABELS,
+    DAYTIME_SLEEP_MARK,
     LOCAL_DAY_TYPES,
     ActivityModel,
     BusyWindow,
@@ -58,7 +68,7 @@ from twin.profile.activity_model import (
 )
 from twin.profile.circular import DAY_MINUTES, CircularStats, wrap
 from twin.profile.distribution import BucketedDistribution, EmpiricalDistribution
-from twin.profile.localtime import SLOT_MINUTES, SLOTS_PER_DAY, format_minute
+from twin.profile.localtime import SLOT_MINUTES, SLOTS_PER_DAY, format_minute, slot_of_minute
 from twin.schedule.daytype import DayTypeCalendar
 
 MIN_MESSAGES = 50
@@ -72,6 +82,9 @@ BUSY_MIN_SLOTS = 4
 BUSY_MAX_GAP = 2
 BUSY_MIN_STABILITY = 0.5
 LATENCY_MIN_SAMPLES = 20
+PERIOD_MIN_MESSAGES = 100  # her messages in a month before it is judged on its own (D-902)
+PERIOD_MIN_DAYS = 7  # and days with a message of hers in that month
+PERIOD_LISTED = 3  # months whose core a warning spells out
 
 
 # ------------------------------------------------------------------- curves
@@ -251,16 +264,104 @@ def infer_sleep(
             f"可用于推断的夜晚只有 {len(observations)} 个（少于 {config.min_valid_days}）：低置信，"
             "睡眠时段取整体活跃曲线中最长的低谷"
         )
+    whole_daytime = False
     for key, window in windows.items():
         if sleep_core_in_daytime(window, config.edge_minutes):
+            whole_daytime = True
             start, end = window.core(config.edge_minutes)
             label = DAY_TYPE_LABELS[key]
             warnings.append(
                 f"推断的睡眠核心（{label}）{format_minute(start)}–{format_minute(end)} 落在当地"
-                f"白天 10:00–18:00，可能是 time.source_timezone 设置不对（当前学习用 {zone}）"
+                f"白天 10:00–18:00，{DAYTIME_SLEEP_MARK}（当前学习用 {zone}）"
             )
+    warnings += month_warnings(month_verdicts(raw, config), whole_daytime)
     profile = SleepProfile(windows, confidence, len(observations), tuple(warnings))
     return profile, valley
+
+
+# ------------------------------------------------------------ month by month
+
+
+@dataclass(frozen=True)
+class MonthVerdict:
+    """The low stretch of one calendar month of her local dates in one configured zone."""
+
+    year: int
+    month: int
+    zone: str
+    core: tuple[float, float]
+    daytime: bool
+
+    @property
+    def label(self) -> str:
+        return f"{self.year:04d}-{self.month:02d}"
+
+    def follows(self, other: MonthVerdict) -> bool:
+        """True if this is the month right after ``other``, in the same zone."""
+        months = (self.year * 12 + self.month) - (other.year * 12 + other.month)
+        return months == 1 and self.zone == other.zone
+
+
+def month_verdicts(raw: ActivityRaw, config: ActivityConfig) -> list[MonthVerdict]:
+    """Each month (cut where the configured zone changes) with enough data, judged on its own."""
+    periods: dict[tuple[int, int, int], tuple[list[int], set[int]]] = {}
+    for wall, zone_id in zip(raw.her_wall, raw.her_zone, strict=True):
+        number = int(wall // DAY_MINUTES)
+        day = date.fromordinal(number)
+        counts, days = periods.setdefault(
+            (day.year, day.month, zone_id), ([0] * SLOTS_PER_DAY, set())
+        )
+        counts[slot_of_minute(wall - number * DAY_MINUTES)] += 1
+        days.add(number)
+    min_slots = max(1, math.ceil(config.sleep_min_hours * 60 / SLOT_MINUTES))
+    verdicts: list[MonthVerdict] = []
+    for (year, month, zone_id), (counts, days) in sorted(periods.items()):
+        if sum(counts) < PERIOD_MIN_MESSAGES or len(days) < PERIOD_MIN_DAYS:
+            continue
+        curve = gaussian_smooth([c / len(days) for c in counts], config.smoothing_sigma_slots)
+        valley = find_valley(curve, min_slots, config.sleep_rate_ratio)
+        if valley.ratio <= 0:
+            continue  # no stretch is clearly lower than the rest: nothing to judge
+        window = SleepWindow(
+            CircularStats.fixed(valley.start_min), CircularStats.fixed(valley.end_min), 0, "curve"
+        )
+        verdicts.append(
+            MonthVerdict(
+                year,
+                month,
+                raw.zone_names[zone_id],
+                window.core(config.edge_minutes),
+                sleep_core_in_daytime(window, config.edge_minutes),
+            )
+        )
+    return verdicts
+
+
+def month_warnings(verdicts: Sequence[MonthVerdict], whole_daytime: bool) -> list[str]:
+    """One warning per run of consecutive months (one zone) whose core lies in the daytime."""
+    off = [verdict for verdict in verdicts if verdict.daytime]
+    if not off or (whole_daytime and len(off) == len(verdicts)):
+        return []
+    runs: list[list[MonthVerdict]] = []
+    for verdict in off:
+        if runs and verdict.follows(runs[-1][-1]):
+            runs[-1].append(verdict)
+        else:
+            runs.append([verdict])
+    warnings: list[str] = []
+    for run in runs:
+        zone = run[0].zone
+        months = run[0].label if len(run) == 1 else f"{run[0].label} 至 {run[-1].label}"
+        cores = "、".join(
+            f"{v.label} {format_minute(v.core[0])}–{format_minute(v.core[1])}"
+            for v in run[:PERIOD_LISTED]
+        )
+        more = "等" if len(run) > PERIOD_LISTED else ""
+        warnings.append(
+            f"{months} 按 {zone} 读，她的睡眠低谷核心（{cores}{more}）落在当地白天 10:00–18:00："
+            f"那段时间她可能不在 {zone}，请核对 time.source_timezone_ranges（R-ACT-001）"
+        )
+    return warnings
 
 
 # --------------------------------------------------------------------- busy

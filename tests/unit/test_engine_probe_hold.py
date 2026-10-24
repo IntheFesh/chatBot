@@ -204,7 +204,9 @@ async def test_a_command_during_the_probe_is_stored_but_neither_run_nor_answered
 ) -> None:
     harness, commands = rig
     await harness.message("/状态")
-    await asyncio.sleep(0.05)
+    # R18-F13: not a fixed 50 ms - the command is decided inside handle_message; drain waits until
+    # nothing is in flight or pending, so nothing can still be on its way to the channel
+    await harness.settle()
     assert commands.calls == [] and harness.channel.out == []
     assert harness.engine.snapshot().pending == ()  # it is not chat either
     probe.on = False

@@ -30,7 +30,6 @@ import re
 import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -538,8 +537,3 @@ async def handle_training_plan(ctx: JobContext) -> None:
     runtime = build_llm_runtime(services)
     written, refused = await write_plans(services, runtime, ids, tag)
     log.info("training_plans_written", written=written, refused=refused, samples=len(ids))
-
-
-def plan_moment(moment: datetime) -> str:
-    """The moment as the plan prompt writes it (ISO, minutes; the zone is already local)."""
-    return f"{moment:%Y-%m-%d %H:%M}"

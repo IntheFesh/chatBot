@@ -31,7 +31,7 @@ jobs:
       - name: Install Python and dependencies
         run: |
           uv python install 3.12
-          uv sync --frozen
+          uv sync --locked
 
       - name: Run the listed tests
         run: |

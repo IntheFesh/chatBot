@@ -9,6 +9,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
+from twin.ingest.textzone import TextZoneTally
+
 MAX_NOTES = 20
 
 
@@ -21,7 +23,10 @@ class RunStats:
     unknown_fields: Counter[str] = field(default_factory=Counter)
     invalid_reasons: Counter[str] = field(default_factory=Counter)
     schema_errors: Counter[str] = field(default_factory=Counter)
-    time_mismatches: int = 0
+    # createTime / createTimeText pairs, for the zone of the exporting device (D-900)
+    text_zone: TextZoneTally = field(default_factory=TextZoneTally)
+    # messages without createTime -> the zone their text was read in ("" = her clock, D-901)
+    time_from_text: Counter[str] = field(default_factory=Counter)
     user_avatar_path: str | None = None
     target_label: str | None = None
     integrity: dict[str, Any] = field(default_factory=dict)
@@ -41,7 +46,8 @@ class RunStats:
             "unknown_fields": dict(self.unknown_fields),
             "invalid_reasons": dict(self.invalid_reasons),
             "schema_errors": dict(self.schema_errors),
-            "time_mismatches": self.time_mismatches,
+            "text_zone": self.text_zone.to_json(),
+            "time_from_text": dict(self.time_from_text),
             "user_avatar_path": self.user_avatar_path,
             "target_label": self.target_label,
             "integrity": self.integrity,
@@ -61,7 +67,8 @@ class RunStats:
             unknown_fields=Counter(data.get("unknown_fields", {})),
             invalid_reasons=Counter(data.get("invalid_reasons", {})),
             schema_errors=Counter(data.get("schema_errors", {})),
-            time_mismatches=int(data.get("time_mismatches", 0)),
+            text_zone=TextZoneTally.from_json(data.get("text_zone")),
+            time_from_text=Counter(data.get("time_from_text", {})),
             user_avatar_path=data.get("user_avatar_path"),
             target_label=data.get("target_label"),
             integrity=dict(data.get("integrity", {})),

@@ -75,11 +75,6 @@ SANDBOX_WRITES = WriteScope()
 _scope: ContextVar[WriteScope | None] = ContextVar("twin_eval_write_scope", default=None)
 
 
-def active_scope() -> WriteScope | None:
-    """The write scope of the running task, or ``None`` when writes are unrestricted."""
-    return _scope.get()
-
-
 @contextmanager
 def isolated_writes(scope: WriteScope = SANDBOX_WRITES) -> Iterator[WriteScope]:
     """Restrict the database writes of the running task to ``scope`` for the block."""

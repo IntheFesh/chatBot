@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from twin.ops.backup.layout import (
-    ARCHIVE_SUFFIX,
     PRE_RESTORE_PREFIX,
     SIDECAR_SUFFIX,
     is_archive,
@@ -109,14 +108,3 @@ def sync_mirror(
             entry.unlink(missing_ok=True)
             removed += 1
     return MirrorReport(copied, removed)
-
-
-def archive_names(directory: Path) -> set[str]:
-    """The archive names a folder holds (tests and ``backup list`` use it)."""
-    if not directory.is_dir():
-        return set()
-    return {
-        entry.name
-        for entry in directory.iterdir()
-        if entry.is_file() and entry.name.endswith(ARCHIVE_SUFFIX)
-    }

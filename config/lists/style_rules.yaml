@@ -77,6 +77,14 @@ rules:
   - id: ellipsis
     when: "ellipsis_rate >= 0.03"
     text: "有时用省略号（约 {ellipsis_pct:.0f}% 的消息）"
-  - id: latency
-    when: "latency_median_s > 0"
-    text: "回复通常很快（中位约 {latency_median_s:.0f} 秒），慢的时候可以到 {latency_p90_s:.0f} 秒以上"
+  # how fast she answers: within a minute is quick, within ten minutes is "a few minutes"
+  # (round 18 item F11, D-904: a median of 1020 seconds is not "很快")
+  - id: latency_fast
+    when: "latency_median_s > 0 and latency_median_s <= 60"
+    text: "回复通常很快（中位约 {latency_median_text}），慢的时候可以到 {latency_p90_text}以上"
+  - id: latency_minutes
+    when: "latency_median_s > 60 and latency_median_s <= 600"
+    text: "回复不算快，通常隔几分钟（中位约 {latency_median_text}），慢的时候可以到 {latency_p90_text}以上"
+  - id: latency_slow
+    when: "latency_median_s > 600"
+    text: "回复常常要隔一阵（中位约 {latency_median_text}），慢的时候可以到 {latency_p90_text}以上"

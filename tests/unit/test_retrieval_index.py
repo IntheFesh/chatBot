@@ -506,10 +506,8 @@ def test_progress_shows_speed_and_time_left(
 
     monkeypatch.setattr(embedder, "encode", encode)
     result = run_index(lib)
-    assert (
-        result.per_thousand_s == pytest.approx(2.0 / 4 * 1000.0 * (6 * 4 / 22) * (22 / 24), rel=0.3)
-        or True
-    )
+    # R18-F13: an ``assert (...) or True`` stood here (always true); the exact speed is asserted
+    # at the end of the test
     second_chunk = seen[0]  # the progress written after the first chunk
     assert second_chunk.state == "running" and second_chunk.done == 4 and second_chunk.total == 22
     assert second_chunk.rate_per_s == pytest.approx(2.0)  # 4 windows in 2 seconds

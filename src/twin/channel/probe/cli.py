@@ -292,6 +292,10 @@ def _offer_suggestions(
     if mode is not None and mode != services.settings.stickers.gif_send_mode:
         values.setdefault("stickers", {})["gif_send_mode"] = mode
         shown["stickers.gif_send_mode"] = (services.settings.stickers.gif_send_mode, mode)
+    codes = summary.session_codes_seen  # offered only where it would change something
+    if codes and sorted(codes) != sorted(config.session_expired_codes):
+        values.setdefault("channel", {})["session_expired_codes"] = list(codes)
+        shown["channel.session_expired_codes"] = (list(config.session_expired_codes), list(codes))
     if not values or apply is False:
         return
     typer.echo("suggested configuration (measured value with 10% in reserve):")
