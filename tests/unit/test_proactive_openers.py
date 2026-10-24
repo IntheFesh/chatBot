@@ -97,15 +97,23 @@ async def test_a_before_keeps_the_examples_to_what_happened_earlier(lib: Service
     assert ranked and all(record.reply_at_utc < cutoff for record, _ in ranked)
 
 
-async def test_the_held_out_period_is_never_used(lib: Services) -> None:
+async def test_the_held_out_period_is_used_only_after_it(lib: Services) -> None:
+    """Rewritten in round 18 (user decision, D-880; was ``..._is_never_used``): her openings of
+    the held-out period are in the library for the running bot; a view of a moment at the cut-off
+    (``before``) does not reach them."""
     holdout = get_holdout(lib)
     assert holdout is not None
     future = holdout.cutoff + timedelta(days=200)
     ranked = opener(lib).rank(
         local_minute=7 * 60 + 30, day_type=WORKDAY, k=40, now=future, before=future
     )
-    assert ranked and all(record.reply_at_utc < holdout.cutoff for record, _ in ranked)
-    assert all(not record.holdout for record, _ in ranked)
+    assert any(record.holdout for record, _ in ranked)
+    live = opener(lib).rank(local_minute=7 * 60 + 30, day_type=WORKDAY, k=40, now=future)
+    assert any(record.reply_at_utc >= holdout.cutoff for record, _ in live)
+    past = opener(lib).rank(
+        local_minute=7 * 60 + 30, day_type=WORKDAY, k=40, now=future, before=holdout.cutoff
+    )
+    assert past and all(record.reply_at_utc < holdout.cutoff for record, _ in past)
 
 
 async def test_nothing_is_asked_for_nothing(lib: Services) -> None:

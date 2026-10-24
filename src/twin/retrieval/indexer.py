@@ -3,13 +3,15 @@
 One run (:func:`run_index`) does, in order:
 
 1. :func:`~twin.retrieval.windows.sync_windows` - the windows follow the stored messages;
-   windows that vanished or entered the hold-out leave the index;
+   windows that vanished leave the index.  The held-out period is in the index like everything
+   else (round 18, user decision, D-880): what the evaluation may not see is kept from it by the
+   ``before`` of its query, not by leaving it out;
 2. the identity check - the index remembers which encoding (model, size, weights hash, text
    scheme) made its vectors.  A different encoding is **refused** for an update (it would mix two
    vector spaces) and answered with "run ``twin retrieval rebuild``"; a rebuild starts from an
    empty index;
-3. the encoding of every window that has no vector yet (``embed_version`` NULL, not held out, with
-   a context), in chunks of :data:`WRITE_CHUNK`.  A chunk is written to the index first and
+3. the encoding of every window that has no vector yet (``embed_version`` NULL, with a context),
+   in chunks of :data:`WRITE_CHUNK`.  A chunk is written to the index first and
    marked in ``example_windows`` second, so an interrupted run loses at most one chunk and the
    next run picks up exactly where this one stopped (the pending set is always derived from the
    database, never from memory).  Progress, speed and the estimated time left are kept in the
@@ -136,8 +138,8 @@ def _put_progress(services: Services, progress: IndexProgress) -> None:
 
 
 def indexable() -> list[ColumnElement[bool]]:
-    """Windows that belong in the index: not held out, with a context to encode."""
-    return [ExampleWindow.holdout.is_(False), ExampleWindow.context_turns > 0]
+    """Windows that belong in the index: every one with a context to encode (D-880)."""
+    return [ExampleWindow.context_turns > 0]
 
 
 def vector_holders() -> list[ColumnElement[bool]]:
@@ -319,8 +321,7 @@ def _run_locked(
     except HoldoutError as exc:
         return IndexResult(note=f"nothing indexed: {exc}")
 
-    table.delete_ids(list(report.removed_ids) + list(report.newly_held_ids))
-    table.delete_from(int(to_epoch(report.cutoff)) + 1)
+    table.delete_ids(list(report.removed_ids))
 
     meta = table.read_meta()
     waiting = count_windows(services, *awaiting(None))

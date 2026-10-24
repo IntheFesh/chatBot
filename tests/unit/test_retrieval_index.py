@@ -59,7 +59,8 @@ def configure(services: Services, backend: HashingBackend) -> None:
 
 @pytest.fixture
 def lib(services: Services, embedder: HashingBackend) -> Services:
-    """A library of 24 two-line conversations on two topics; the last two are held out."""
+    """A library of 24 two-line conversations on two topics; the last two are held out (and,
+    since round 18, in the index all the same: D-880)."""
     configure(services, embedder)
     episodes = []
     for n in range(24):
@@ -220,26 +221,27 @@ def test_each_kind_of_data_has_a_table_of_its_own(tmp_path: Path) -> None:
 # ------------------------------------------------------------------- a full run
 
 
-def test_a_run_encodes_every_window_with_a_context_except_the_holdout(
+def test_a_run_encodes_every_window_with_a_context_the_holdout_included(
     lib: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (user decision, D-880): the held-out windows are encoded as well;
+    the evaluation is kept from them by ``before``, not by leaving them out."""
     result = run_index(lib)
     holdout = get_holdout(lib)
     assert holdout is not None
     found = records(lib)
     held = [w for w in found if w.holdout]
-    kept = [w for w in found if not w.holdout and w.context_turns > 0]
+    kept = [w for w in found if w.context_turns > 0]
     assert len(held) == holdout.held_out_blocks == 2
-    assert result.encoded == len(kept) == 22 and result.pending == 22
+    assert result.encoded == len(kept) == 24 and result.pending == 24
 
     table = window_table(lib)
-    assert table.count() == 22
+    assert table.count() == 24
     stored = {row["window_id"] for row in table.rows()}
     assert stored == {w.id for w in kept}
-    assert stored.isdisjoint(w.id for w in held)
+    assert {w.id for w in held} <= stored
     version = encoding_id(embedder.info)
     assert {w.embed_version for w in kept} == {version}
-    assert {w.embed_version for w in held} == {None}
     meta = table.read_meta()
     assert (
         meta is not None and meta.encoding == version and meta.dimension == embedder.info.dimension
@@ -276,21 +278,25 @@ def test_a_second_run_changes_nothing_and_does_not_even_load_the_model(
     monkeypatch.setattr(indexer, "embedding_service", refuse)
     again = run_index(lib)
     assert again.note == "the index is up to date" and again.encoded == 0
-    assert embedder.runs == runs and window_table(lib).count() == 22
+    assert embedder.runs == runs and window_table(lib).count() == 24
 
 
-def test_newer_messages_fall_into_the_holdout_and_stay_out_of_the_index(
+def test_newer_messages_fall_into_the_holdout_and_are_indexed_all_the_same(
     lib: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (user decision, D-880; was ``..._and_stay_out_of_the_index``): an
+    import does not move the cut-off, so the newest window is held out - and it is in the library,
+    where the running bot finds it; a view of a past moment cannot reach it (``before``)."""
     run_index(lib)
     seen = len(embedder.seen)
     write_dialogue(lib, [(day(40), [U("新问题"), H("新回答")])], append=True)
     result = run_index(lib)
-    assert result.encoded == 0 and len(embedder.seen) == seen
+    assert result.encoded == 1 and len(embedder.seen) == seen + 1
     assert result.sync is not None and result.sync.added == 1
     newest = records(lib)[-1]
-    assert newest.holdout and newest.embed_version is None  # the cutoff does not move by itself
-    assert window_table(lib).count() == 22
+    assert newest.holdout  # the cutoff does not move by itself
+    assert newest.embed_version == encoding_id(embedder.info)
+    assert window_table(lib).count() == 25
 
 
 def test_older_messages_add_only_their_own_windows(lib: Services, embedder: HashingBackend) -> None:
@@ -306,7 +312,7 @@ def test_older_messages_add_only_their_own_windows(lib: Services, embedder: Hash
     )
     result = run_index(lib)
     assert result.encoded == 2 and len(embedder.seen) - seen == 2
-    assert window_table(lib).count() == 24
+    assert window_table(lib).count() == 26
     assert result.sync is not None and (result.sync.added, result.sync.changed) == (2, 0)
 
 
@@ -337,7 +343,7 @@ def test_vanished_messages_leave_the_index_too(lib: Services) -> None:
     result = run_index(lib)
     assert result.sync is not None and result.sync.removed == 1
     assert victim.id not in {row["window_id"] for row in window_table(lib).rows()}
-    assert window_table(lib).count() == 21
+    assert window_table(lib).count() == 23
 
 
 def test_windows_without_a_context_have_no_vector(
@@ -355,7 +361,7 @@ def test_windows_without_a_context_have_no_vector(
     found = records(services)
     assert any(w.context_turns == 0 for w in found)
     indexed = {row["window_id"] for row in window_table(services).rows()}
-    assert all((w.id in indexed) == (w.context_turns > 0 and not w.holdout) for w in found)
+    assert all((w.id in indexed) == (w.context_turns > 0) for w in found)  # held out too (D-880)
 
 
 def test_a_context_without_words_is_marked_and_not_tried_again(
@@ -367,7 +373,7 @@ def test_a_context_without_words_is_marked_and_not_tried_again(
         [(day(n), [U("   " if n == 0 else "有字"), H(f"答{n}")]) for n in range(12)],
     )
     first = run_index(services)
-    assert first.encoded == 10  # 12 windows, 1 held out, 1 with an empty context
+    assert first.encoded == 11  # 12 windows, 1 with an empty context (the held-out one: D-880)
     empty = [w for w in records(services) if w.embed_version == NO_VECTOR]
     assert len(empty) == 1
     seen = len(embedder.seen)
@@ -425,14 +431,12 @@ def test_a_rebuild_replaces_an_index_made_with_another_model(lib: Services) -> N
     lib.settings.retrieval.model = "test/another-model"
     other = other_service(dimension=32, model="test/another-model")
     result = run_index(lib, mode="rebuild", embedder=other)
-    assert result.reset and result.encoded == 22
+    assert result.reset and result.encoded == 24
     table = window_table(lib)
-    assert table.dimension() == 32 and table.count() == 22
+    assert table.dimension() == 32 and table.count() == 24
     meta = table.read_meta()
     assert meta is not None and meta.model == "test/another-model" and meta.dimension == 32
-    assert {w.embed_version for w in records(lib) if not w.holdout and w.context_turns} == {
-        encoding_id(other.info)
-    }
+    assert {w.embed_version for w in records(lib) if w.context_turns} == {encoding_id(other.info)}
 
 
 def test_a_full_rebuild_encodes_everything_again_but_a_plain_one_does_not(
@@ -443,7 +447,7 @@ def test_a_full_rebuild_encodes_everything_again_but_a_plain_one_does_not(
     assert run_index(lib, mode="rebuild").note == "the index is up to date"
     assert embedder.runs == runs
     full = run_index(lib, mode="rebuild", full=True)
-    assert full.reset and full.encoded == 22 and window_table(lib).count() == 22
+    assert full.reset and full.encoded == 24 and window_table(lib).count() == 24
 
 
 def test_an_index_that_lost_its_files_is_repaired(lib: Services, embedder: HashingBackend) -> None:
@@ -452,10 +456,10 @@ def test_an_index_that_lost_its_files_is_repaired(lib: Services, embedder: Hashi
     stats = collect_stats(lib)
     assert any("marked as indexed" in problem for problem in stats.problems)
     result = run_index(lib)
-    assert result.reset and result.encoded == 22 and window_table(lib).count() == 22
+    assert result.reset and result.encoded == 24 and window_table(lib).count() == 24
     window_table(lib).clear_meta()
     again = run_index(lib)
-    assert again.reset and again.encoded == 22
+    assert again.reset and again.encoded == 24
 
 
 # ---------------------------------------------------------- resuming and progress
@@ -477,16 +481,16 @@ def test_an_interrupted_run_continues_where_it_stopped(
 
     monkeypatch.setattr(embedder, "encode", encode)
     first = run_index(lib, stop=stop)
-    assert first.encoded == 10 and "stopped after 10 of 22" in first.note
+    assert first.encoded == 10 and "stopped after 10 of 24" in first.note
     assert window_table(lib).count() == 10
     progress = get_progress(lib)
     assert progress is not None and progress.state == "stopped" and progress.done == 10
 
     second = run_index(lib)
-    assert second.encoded == 12 and second.pending == 12  # only what was missing
-    assert window_table(lib).count() == 22
+    assert second.encoded == 14 and second.pending == 14  # only what was missing
+    assert window_table(lib).count() == 24
     final = get_progress(lib)
-    assert final is not None and final.state == "done" and final.done == final.total == 12
+    assert final is not None and final.state == "done" and final.done == final.total == 14
 
 
 def test_progress_shows_speed_and_time_left(
@@ -511,13 +515,13 @@ def test_progress_shows_speed_and_time_left(
         or True
     )
     second_chunk = seen[0]  # the progress written after the first chunk
-    assert second_chunk.state == "running" and second_chunk.done == 4 and second_chunk.total == 22
+    assert second_chunk.state == "running" and second_chunk.done == 4 and second_chunk.total == 24
     assert second_chunk.rate_per_s == pytest.approx(2.0)  # 4 windows in 2 seconds
-    assert second_chunk.eta_s == pytest.approx((22 - 4) / 2.0)
+    assert second_chunk.eta_s == pytest.approx((24 - 4) / 2.0)
     done = get_progress(lib)
     assert done is not None and done.state == "done" and done.eta_s is None
     assert result.seconds == pytest.approx(12.0)  # six chunks of two seconds
-    assert result.per_thousand_s == pytest.approx(12.0 / 22 * 1000)
+    assert result.per_thousand_s == pytest.approx(12.0 / 24 * 1000)
 
 
 def test_two_runs_cannot_overlap(lib: Services) -> None:
@@ -528,7 +532,7 @@ def test_two_runs_cannot_overlap(lib: Services) -> None:
             run_index(lib)
     finally:
         lock.release()
-    assert run_index(lib).encoded == 22
+    assert run_index(lib).encoded == 24
 
 
 # ----------------------------------------------------------------- statistics
@@ -540,7 +544,7 @@ def test_the_statistics_describe_the_library_without_quoting_it(lib: Services) -
     run_index(lib)
     stats = collect_stats(lib)
     assert stats.windows == 24 and stats.with_context == 24 and stats.without_context == 0
-    assert (stats.held_out, stats.indexed, stats.awaiting, stats.vectors) == (2, 22, 0, 22)
+    assert (stats.held_out, stats.indexed, stats.awaiting, stats.vectors) == (2, 24, 0, 24)
     assert stats.event_only == 0 and stats.problems == ()
     assert stats.meta is not None and stats.cutoff is not None
     assert stats.first_reply is not None and stats.last_reply is not None

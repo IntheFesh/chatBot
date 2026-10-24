@@ -7,8 +7,9 @@ opened a conversation segment (the first message after a silence of ``profile.se
 see :mod:`twin.retrieval.windows`.  They have no vector (nothing to encode), so they are not
 found by the semantic query; :class:`OpenerExamples` reads them by **the time of day** instead:
 
-* only windows of the live library - not held out, earlier than the hold-out cut-off, with
-  something in the reply the bot could have written - and, if ``before`` is given, earlier than it;
+* every window of the library with something in the reply the bot could have written, the
+  held-out period included (round 18, user decision, D-880) - and, if ``before`` is given, only
+  the ones strictly earlier than it (``AsOfView(t)`` of the evaluation);
 * ranked by how close their local time of day is to now (the same bell curve as the semantic query,
   half as much for another kind of day) plus the recency bonus of the query;
 * a reply that is nearly the same as one already picked is left out, and the ``k`` examples are
@@ -33,7 +34,6 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 
 from twin.ops.logging import get_logger
-from twin.profile.holdout import get_holdout
 from twin.retrieval.examples import Example, ExampleBuilder, StickerLabeler
 from twin.retrieval.query import SECONDS_PER_DAY, recency_bonus, reply_signature, time_bonus
 from twin.retrieval.records import load_messages
@@ -81,18 +81,14 @@ class OpenerExamples:
         """The windows to show, with their scores (no messages are read yet)."""
         services = self._services
         config = services.settings.retrieval
-        holdout = get_holdout(services)
-        if k <= 0 or holdout is None:
+        if k <= 0:
             return []
-        bound = holdout.cutoff if before is None else min(holdout.cutoff, before)
+        conditions = [ExampleWindow.context_turns == 0, ExampleWindow.reply_reproducible > 0]
+        if before is not None:
+            conditions.append(ExampleWindow.reply_at_utc < before)
         stmt = (
             select(ExampleWindow)
-            .where(
-                ExampleWindow.context_turns == 0,
-                ExampleWindow.holdout.is_(False),
-                ExampleWindow.reply_reproducible > 0,
-                ExampleWindow.reply_at_utc < bound,
-            )
+            .where(*conditions)
             .order_by(ExampleWindow.reply_at_utc.desc())
             .limit(MAX_CANDIDATES)
         )

@@ -16,7 +16,6 @@ from tests.support.clock import ManualClock
 from tests.support.embedding import H, HashingBackend, U, day, write_dialogue
 from tests.support.ingest import make_export, run_import
 from twin.cli import app
-from twin.clock import to_epoch
 from twin.config.loader import load_settings, resolve_paths
 from twin.ingest.hooks import HookContext, load_hooks
 from twin.ops.instance_lock import LOCK_RUN, InstanceLock
@@ -141,7 +140,7 @@ async def test_a_queued_job_builds_the_library_through_the_worker(
     queue_retrieval_index(services, reason="import")
     summary = await worker(services).run_until_idle()
     assert summary.done == 1 and summary.failed == 0
-    assert window_table(services).count() == 27
+    assert window_table(services).count() == 30  # the held-out windows included (D-880)
     assert collect_stats(services).progress is not None
 
 
@@ -214,49 +213,82 @@ def test_the_resplit_listener_is_loaded_for_any_caller() -> None:
     assert "twin.retrieval.resplit" in LISTENER_MODULES
 
 
-def test_a_resplit_takes_new_holdout_windows_out_of_the_index_at_once(
+def test_a_resplit_moves_the_flags_and_keeps_every_window_in_the_index(
     services: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (user decision, D-880; was ``..._takes_new_holdout_windows_out_of
+    _the_index_at_once``): the windows that enter the hold-out stay in the library with their
+    vectors; nothing has to be encoded, so nothing is queued."""
     configure(services, embedder)
     fill(services)
     run_index(services)
-    assert window_table(services).count() == 27
+    assert window_table(services).count() == 30
     services.settings.retrieval.holdout_ratio = 0.3
     result = resplit_holdout(services)
     note = next(n for n in result.notes if n.startswith("retrieval:"))
     assert "6 window(s) are now held out" in note and "0 were released" in note
+    assert "every window stays in the library" in note
     assert get_holdout(services).held_out_blocks == 9  # type: ignore[union-attr]
-    assert window_table(services).count() == 21  # gone from the index immediately
+    assert window_table(services).count() == 30
     stats = collect_stats(services)
-    assert (stats.held_out, stats.indexed) == (9, 21)
-    assert len(pending(services)) == 1
+    assert (stats.held_out, stats.indexed, stats.awaiting) == (9, 30, 0)
+    assert not pending(services)
 
 
-async def test_a_smaller_holdout_releases_windows_that_are_then_encoded(
+async def test_a_smaller_holdout_releases_windows_without_encoding_them_again(
     services: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (D-880; was ``..._that_are_then_encoded``): released windows keep
+    the vector they always had."""
     configure(services, embedder)
     fill(services)
     run_index(services)
+    seen = len(embedder.seen)
     services.settings.retrieval.holdout_ratio = 0.2
     resplit_holdout(services)
-    assert window_table(services).count() == 24
+    assert window_table(services).count() == 30
     services.settings.retrieval.holdout_ratio = 0.05
     result = resplit_holdout(services)
     note = next(n for n in result.notes if n.startswith("retrieval:"))
     assert "0 window(s) are now held out" in note and "4 were released" in note
-    assert collect_stats(services).awaiting == 4
+    assert collect_stats(services).awaiting == 0 and not pending(services)
     await worker(services).run_until_idle()
-    assert window_table(services).count() == 28
+    assert window_table(services).count() == 30 and len(embedder.seen) == seen
     with services.db.session() as session:
         flags = [row.holdout for row in session.scalars(select(ExampleWindow))]
     assert sum(flags) == 2
 
 
-def test_the_cutoff_is_an_instant_and_the_index_is_cut_at_it(
+async def test_r18_c3_a_resplit_queues_the_windows_an_older_index_left_out(
+    services: Services, embedder: HashingBackend
+) -> None:
+    """R18-C3 ① (D-880): an index made before round 18 has no vectors for the held-out windows;
+    the next re-split (``twin retrieval resplit`` or the training export) queues their encoding."""
+    configure(services, embedder)
+    fill(services)
+    run_index(services)
+    with services.db.transaction(bump_state=False) as session:
+        held = list(session.scalars(select(ExampleWindow).where(ExampleWindow.holdout.is_(True))))
+        for row in held:
+            row.embed_version = None
+        ids = [row.id for row in held]
+    window_table(services).delete_ids(ids)  # what the index of round 17 looked like
+    assert window_table(services).count() == 27
+    result = resplit_holdout(services)
+    note = next(n for n in result.notes if n.startswith("retrieval:"))
+    assert "encoding the 3 window(s) without a vector is queued" in note
+    assert len(pending(services)) == 1
+    await worker(services).run_until_idle()
+    assert window_table(services).count() == 30
+
+
+def test_the_cutoff_is_an_instant_and_the_flags_follow_it(
     services: Services, embedder: HashingBackend, clock: ManualClock
 ) -> None:
-    """A cutoff is an instant, not a wall-clock time: 01:30 happens twice on 1 November."""
+    """A cutoff is an instant, not a wall-clock time: 01:30 happens twice on 1 November.
+
+    Rewritten in round 18 (D-880; was ``..._and_the_index_is_cut_at_it``): the flags follow the
+    instant, the index keeps every window."""
     configure(services, embedder)
     fill(services)
     run_index(services)
@@ -272,10 +304,7 @@ def test_the_cutoff_is_an_instant_and_the_index_is_cut_at_it(
         rows = [(row.reply_at_utc, row.holdout) for row in session.scalars(select(ExampleWindow))]
     assert {held for at, held in rows if at >= cutoff} == {True}
     assert {held for at, held in rows if at < cutoff} == {False}
-    assert window_table(services).count() == len(rows) - 6
-    table = window_table(services)
-    column = table.schema.time_column
-    assert all(row[column] < int(to_epoch(cutoff)) + 1 for row in table.rows())
+    assert window_table(services).count() == len(rows)
     again = retrieval_after_resplit(services, current, current)  # the same cutoff: nothing moves
     assert "0 window(s) are now held out" in again and "0 were released" in again
 
@@ -349,7 +378,7 @@ def test_rebuild_queues_then_builds_in_the_foreground_and_stats_describe_it(
 
     done = cli("retrieval", "rebuild", "--foreground")
     assert done.exit_code == 0, done.output
-    assert "windows (her reply blocks)" in done.output and "27" in done.output
+    assert "windows (her reply blocks)" in done.output and "30" in done.output
 
     stats = cli("retrieval", "stats")
     assert stats.exit_code == 0, stats.output
@@ -413,7 +442,7 @@ def test_resplit_asks_first_and_then_moves_the_cutoff(
     after = with_services(lambda s: get_holdout(s))
     assert after is not None and after.cutoff < before.cutoff and after.held_out_blocks == 6
     stats = with_services(collect_stats)
-    assert (stats.held_out, stats.indexed) == (6, 24)
+    assert (stats.held_out, stats.indexed) == (6, 30)
 
 
 def test_resplit_with_too_little_data_is_an_error(data_dir: Path) -> None:

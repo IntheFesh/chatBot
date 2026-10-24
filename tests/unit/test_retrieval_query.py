@@ -6,6 +6,8 @@ from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 from sqlalchemy import select
 
 from tests.support.embedding import H, HashingBackend, U, day, write_dialogue
@@ -364,31 +366,125 @@ async def test_a_before_without_a_time_zone_is_refused(
         await retriever(lib, embedder).query(ask("你吃饭了吗", before=naive))
 
 
-async def test_the_held_out_period_is_never_returned_whatever_before_says(
+async def test_the_held_out_period_is_returned_only_for_moments_after_it(
     lib: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (user decision, D-880): the held-out windows are in the library; a
+    moment after them sees them, a moment at the cut-off sees none of them."""
     lib.settings.retrieval.dedup_similarity = 1.0
     holdout = get_holdout(lib)
     assert holdout is not None
     got = retriever(lib, embedder)
     future = holdout.cutoff + timedelta(days=100)
     examples = await got.query(ask("你吃饭了吗", k=30, before=future))
-    assert examples and all(e.reply_at < holdout.cutoff for e in examples)
-    assert len(examples) == 27
+    assert len(examples) == 30 and sum(e.reply_at >= holdout.cutoff for e in examples) == 3
+    at_the_cutoff = await got.query(ask("你吃饭了吗", k=30, before=holdout.cutoff))
+    assert len(at_the_cutoff) == 27 and all(e.reply_at < holdout.cutoff for e in at_the_cutoff)
 
 
-async def test_a_stale_index_cannot_leak_windows_that_just_became_held_out(
+async def test_moving_the_holdout_flags_moves_no_vector(
     lib: Services, embedder: HashingBackend
 ) -> None:
+    """Rewritten in round 18 (D-880): the flags are information; moving them keeps every vector,
+    the running bot still finds every window and ``before`` alone decides for a past moment."""
     lib.settings.retrieval.dedup_similarity = 1.0
     found = stored(lib)
+    versions = {w.id: w.embed_version for w in found}
     new_cutoff = found[20].reply_at_utc
-    apply_holdout(lib, new_cutoff)  # the flags move; the vectors are still in the index
-    assert window_table(lib).count() == 27
-    # the stored cutoff moves with a re-split; here the flags alone must already protect
-    examples = await retriever(lib, embedder).query(ask("你吃饭了吗", k=30))
-    flags = {w.id: w.holdout for w in stored(lib)}
-    assert examples and not any(flags[e.window_id] for e in examples)
+    apply_holdout(lib, new_cutoff)
+    assert window_table(lib).count() == 30
+    after = stored(lib)
+    assert {w.id: w.embed_version for w in after} == versions
+    assert sum(w.holdout for w in after) == 10
+    live = await retriever(lib, embedder).query(ask("你吃饭了吗", k=30))
+    assert len(live) == 30
+    past = await retriever(lib, embedder).query(ask("你吃饭了吗", k=30, before=new_cutoff))
+    assert past and all(e.reply_at < new_cutoff for e in past)
+
+
+# ------------------------------------- the held-out period in the library (R18-C3, D-880)
+
+
+def question_of(episode: int) -> str:
+    """The user's question of episode ``episode`` of the ``lib`` fixture."""
+    return (FOOD if episode % 2 == 0 else STUDY)[(episode // 2) % 4][0]
+
+
+def held_out_windows(services: Services) -> list[tuple[int, WindowRecord]]:
+    """``(episode, window)`` of the windows at or after the stored cut-off (the last three)."""
+    return [(n, w) for n, w in enumerate(stored(services)) if w.holdout]
+
+
+async def test_r18_c3_the_held_out_windows_are_in_the_library_for_the_running_bot(
+    lib: Services, embedder: HashingBackend
+) -> None:
+    """R18-C3 ① (user decision, D-880): the library holds every window, the held-out period
+    included; the running bot (no ``before``) finds them like any other."""
+    lib.settings.retrieval.dedup_similarity = 1.0
+    held = held_out_windows(lib)
+    assert len(held) == 3
+    indexed = {row["window_id"] for row in window_table(lib).rows()}
+    assert {w.id for _, w in held} <= indexed
+    assert window_table(lib).count() == 30
+    for episode, window in held:
+        found = await retriever(lib, embedder).query(ask(question_of(episode), k=30))
+        assert window.id in {e.window_id for e in found}
+
+
+async def test_r18_c3_a_held_out_window_is_never_found_at_or_before_its_own_moment(
+    lib: Services, embedder: HashingBackend
+) -> None:
+    """R18-C3 ① injection test (D-880): a held-out window is in the library, but a view of its own
+    sample moment - the evaluation sandbox and the training export read ``AsOfView(t)``, whose
+    examples carry ``before=t`` - never returns it, nor a view of any earlier moment."""
+    from twin.memory.asof import AsOfSource
+
+    lib.settings.retrieval.dedup_similarity = 1.0
+    got = retriever(lib, embedder)
+    source = AsOfSource(lib, retriever=got)
+    for episode, window in held_out_windows(lib):
+        question = question_of(episode)  # the very context of the window: it would rank first
+        moment = window.reply_at_utc
+        for before in (
+            moment,
+            moment - timedelta(microseconds=1),
+            moment - timedelta(seconds=1),
+            moment - timedelta(hours=1),
+            moment - timedelta(days=3),
+        ):
+            found = await got.query(ask(question, k=30, before=before))
+            assert found and window.id not in {e.window_id for e in found}
+            assert all(e.reply_at < before for e in found)
+        examples = await source.at(moment).examples([QueryTurn(False, question)], k=30)
+        assert examples and window.id not in {e.window_id for e in examples}
+        assert all(e.reply_at < moment for e in examples)
+        later = await got.query(ask(question, k=30, before=moment + timedelta(seconds=1)))
+        assert window.id in {e.window_id for e in later}  # the window is there to be found
+    await got.aclose()
+
+
+@settings(
+    max_examples=40,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture, HealthCheck.too_slow],
+)
+@given(data=st.data())
+def test_r18_c3_no_moment_up_to_a_window_reaches_it(
+    lib: Services, embedder: HashingBackend, data: st.DataObject
+) -> None:
+    """R18-C3 ① hypothesis variant (D-880): for any window of the library - held out or not - and
+    any moment at or before its reply, a query with that ``before`` never returns it."""
+    lib.settings.retrieval.dedup_similarity = 1.0
+    windows = stored(lib)
+    episode = data.draw(st.integers(min_value=0, max_value=len(windows) - 1), label="episode")
+    window = windows[episode]
+    back = data.draw(
+        st.floats(min_value=0.0, max_value=40 * 86_400.0, allow_nan=False), label="seconds back"
+    )
+    before = window.reply_at_utc - timedelta(seconds=back)
+    ranked = retriever(lib, embedder).rank(ask(question_of(episode), k=30, before=before))
+    assert window.id not in {r.window.id for r in ranked}
+    assert all(r.window.reply_at_utc < before for r in ranked)
 
 
 async def test_windows_without_a_row_are_skipped(lib: Services, embedder: HashingBackend) -> None:

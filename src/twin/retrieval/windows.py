@@ -13,8 +13,15 @@ defined twice):
 Every one of her bursts is a window, also one that only holds a photo or a call (its
 ``reply_reproducible`` is 0; the query ranks such windows lower).  The hold-out set of
 :func:`~twin.profile.holdout.holdout_cutoff` counts only the bursts the bot could have written
-itself; a window is held out when its reply time is at or after that cutoff, so the held-out
+itself; a window is *held out* when its reply time is at or after that cutoff, so the held-out
 windows are exactly the windows of the evaluation and the test split of the training set.
+
+**The flag is information, not a filter** (round 18, user decision, D-880).  The library holds
+every window, the held-out period included: the running bot finds her newest replies too.  The
+evaluation and the training export cannot see the future through it because they read the
+library through ``AsOfView(t)``, whose query carries ``before=t`` (only windows whose reply is
+strictly earlier than ``t``, :mod:`twin.retrieval.query`); a held-out window is never returned
+for its own sample moment or any earlier one.  Moving the flag therefore never touches a vector.
 
 **Her real replies only (R-RET-004, R-STO-007).**  :func:`build_window` accepts rows of the
 ``messages`` table and nothing else: a row of any other type (the bot's own turns, round 09) is
@@ -315,7 +322,6 @@ class SyncReport:
     holdout: int
     cutoff: datetime
     removed_ids: tuple[str, ...] = ()
-    newly_held_ids: tuple[str, ...] = ()  # windows that just entered the hold-out
 
     @property
     def unchanged(self) -> int:
@@ -366,7 +372,8 @@ def sync_windows(services: Services, *, cutoff: datetime | None = None) -> SyncR
     One pass over the conversation.  New windows are added; a window whose messages (or local
     time) changed gets its vector invalidated (``embed_version`` NULL) so only it is encoded
     again; windows that no longer exist are removed; the ``holdout`` flag follows
-    :func:`~twin.profile.holdout.holdout_cutoff`.  Vectors are not touched here.
+    :func:`~twin.profile.holdout.holdout_cutoff` (information only: a window keeps its vector
+    when it enters or leaves the hold-out, D-880).  Vectors are not touched here.
     """
     settings = services.settings
     split = cutoff if cutoff is not None else holdout_cutoff(services)
@@ -388,7 +395,6 @@ def sync_windows(services: Services, *, cutoff: datetime | None = None) -> SyncR
     inserts: list[dict[str, object]] = []
     updates: list[dict[str, object]] = []
     added = changed = held = 0
-    newly_held: list[str] = []
 
     stream = assemble(
         _skeleton_rows(services),
@@ -405,14 +411,11 @@ def sync_windows(services: Services, *, cutoff: datetime | None = None) -> SyncR
         if old is None:
             inserts.append({"id": draft.id, "embed_version": None, "created_at": now, **values})
             added += 1
-        elif old.signature != values["signature"] or old.holdout != holdout:
-            if old.signature != values["signature"]:
-                changed += 1
-            if holdout and not old.holdout:
-                newly_held.append(draft.id)
-            # a changed or newly held-out window loses its vector; a window that left the
-            # hold-out has none and is encoded by the next run
-            updates.append({"id": draft.id, "embed_version": None, **values})
+        elif old.signature != values["signature"]:
+            changed += 1
+            updates.append({"id": draft.id, "embed_version": None, **values})  # encoded again
+        elif old.holdout != holdout:
+            updates.append({"id": draft.id, **values})  # the flag only: the vector stays
         if len(inserts) + len(updates) >= SYNC_CHUNK:
             _flush(services, inserts, updates)
             inserts, updates = [], []
@@ -432,7 +435,6 @@ def sync_windows(services: Services, *, cutoff: datetime | None = None) -> SyncR
         holdout=held,
         cutoff=split,
         removed_ids=tuple(gone),
-        newly_held_ids=tuple(newly_held),
     )
 
 
@@ -445,9 +447,8 @@ def _skeleton_rows(services: Services) -> Iterable[Message]:
 def apply_holdout(services: Services, cutoff: datetime) -> tuple[tuple[str, ...], int]:
     """Move the ``holdout`` flags to a new cutoff without reading any message.
 
-    Returns ``(ids of the windows that are now held out, number of windows released)``.  A
-    newly held-out window loses its vector marker (the caller removes it from the index); a
-    released window waits for encoding.
+    Returns ``(ids of the windows that are now held out, number of windows released)``.  The
+    flag is information only (D-880): every window stays in the index with its vector.
     """
     now = services.clock.now_utc()
     with services.db.transaction(bump_state=False) as session:
@@ -462,14 +463,14 @@ def apply_holdout(services: Services, cutoff: datetime) -> tuple[tuple[str, ...]
             session.execute(
                 update(ExampleWindow)
                 .where(ExampleWindow.id.in_(entering[start : start + SYNC_CHUNK]))
-                .values(holdout=True, embed_version=None, updated_at=now)
+                .values(holdout=True, updated_at=now)
             )
         released = cast(
             "CursorResult[Any]",
             session.execute(
                 update(ExampleWindow)
                 .where(ExampleWindow.holdout.is_(True), ExampleWindow.reply_at_utc < cutoff)
-                .values(holdout=False, embed_version=None, updated_at=now)
+                .values(holdout=False, updated_at=now)
             ),
         )
         return entering, int(released.rowcount)
