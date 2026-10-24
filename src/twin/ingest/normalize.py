@@ -7,6 +7,11 @@ the title of a link, ...), so event texts can be rendered later from the stored 
 alone.  The original message object is kept whole (``raw``).
 
 ``isSent`` decides who spoke: false is her, true is the user (R-SCOPE-002).
+
+The moment is ``createTime``.  Without it, ``createTimeText`` is read on the clock of the
+exporting device, whose zone the import infers from the other messages
+(:mod:`twin.ingest.textzone`, D-901); only when that zone is not known yet is the text read on
+her clock (``time.source_timezone``), and :attr:`NormalizedMessage.time_from_text` says which.
 """
 
 from __future__ import annotations
@@ -19,7 +24,8 @@ from typing import Any
 from twin.ingest.events import CallStatus, Kind
 from twin.ingest.layout import truthy
 from twin.ingest.schema import KNOWN_MESSAGE_KEYS, QUOTE_KEYS, ExportMessage
-from twin.ingest.times import SourceTime, epoch_to_utc
+from twin.ingest.textzone import FALLBACK_HER_ZONE, ZoneSource
+from twin.ingest.times import SourceTime, epoch_to_utc, read_wall_clock
 
 RENDER_TYPE_KINDS: dict[str, Kind] = {
     "text": Kind.TEXT,
@@ -96,7 +102,8 @@ class NormalizedMessage:
     has_transcript: bool = False
     media: list[MediaRequest] = field(default_factory=list)
     sender_avatar_path: str | None = None
-    time_mismatch: bool = False
+    # None: the moment is createTime; else the zone its text was read in ("" = her clock)
+    time_from_text: str | None = None
     render_type_known: bool = True
     unknown_fields: frozenset[str] = frozenset()
 
@@ -107,6 +114,7 @@ class NormalizeContext:
 
     conversation_username: str
     source_time: SourceTime
+    text_zone: ZoneSource | None = None  # the exporting device's zone, once inferred
 
 
 # --------------------------------------------------------------------- helpers
@@ -291,13 +299,9 @@ def normalize_message(
         message_id = f"{context.conversation_username}:{local_id}"
 
     created = epoch_to_utc(message.createTime)
-    mismatch = False
+    from_text: str | None = None
     if created is None:
-        created = context.source_time.parse_local_text(message.createTimeText)
-        if created is None:
-            raise InvalidMessage("no_time")
-    elif message.createTimeText:
-        mismatch = context.source_time.disagrees(created, message.createTimeText)
+        created, from_text = _time_from_text(message.createTimeText, context)
 
     if message.isSent is not None:
         is_sent = truthy(message.isSent)
@@ -321,7 +325,7 @@ def normalize_message(
         quote=_quote_of(message),
         media=_media_requests(message, kind),
         sender_avatar_path=as_text(message.senderAvatarPath),
-        time_mismatch=mismatch,
+        time_from_text=from_text,
         render_type_known=recognised,
         unknown_fields=frozenset(raw.keys() - KNOWN_MESSAGE_KEYS),
     )
@@ -334,6 +338,20 @@ def normalize_message(
     elif kind is Kind.CALL:
         result.call_status, result.call_duration_s = parse_call(message.content, message.voipType)
     return result
+
+
+def _time_from_text(text: str | None, context: NormalizeContext) -> tuple[datetime, str]:
+    """The moment of a message without ``createTime`` and the zone its text was read in."""
+    zone = context.text_zone() if context.text_zone is not None else None
+    if zone is not None:
+        found = read_wall_clock(text, zone)
+        source = zone.key
+    else:
+        found = context.source_time.parse_local_text(text)
+        source = FALLBACK_HER_ZONE
+    if found is None:
+        raise InvalidMessage("no_time")
+    return found, source
 
 
 def _md5_of(value: str | None) -> str | None:

@@ -3,6 +3,12 @@
 Counts and codes only: no message text, no ids, no names.  The target conversation is
 referred to by its masked folder label (sequence, nickname length, four hash characters).
 The report is written to ``data/reports/import-<UTC time>.md`` and shown in the terminal.
+
+The section on the zone of the export's texts (round 18 item C7, D-900, D-901) names the zone of
+the exporting device inferred from ``createTime`` and ``createTimeText`` (or lists the offsets when
+none fits) and how the messages without ``createTime`` were read.  It never suggests changing
+``time.source_timezone(_ranges)``: those say where she was, which the routine's plausibility check
+looks after (D-902).
 """
 
 from __future__ import annotations
@@ -17,6 +23,12 @@ from sqlalchemy import func, select
 from twin.ingest.events import KINDS
 from twin.ingest.runs import RunView
 from twin.ingest.stats import RunStats
+from twin.ingest.textzone import (
+    FALLBACK_HER_ZONE,
+    TextZoneInference,
+    configured_zones,
+    infer_text_zone,
+)
 from twin.ingest.times import SourceTime
 from twin.profile.holdout import drift_warning, holdout_share
 from twin.profile.report_section import style_change_lines
@@ -28,6 +40,7 @@ if TYPE_CHECKING:
 
 REPORT_PREFIX = "import-"
 STICKER_HEADING = "## 表情包"
+TEXT_ZONE_HEADING = "## 导出文字时区（createTimeText）"
 KIND_LABELS = {
     "text": "文字",
     "sticker": "表情包",
@@ -130,6 +143,10 @@ def build_report(
     else:
         lines.append("- 数据库中还没有这个会话的消息")
 
+    inference = infer_text_zone(run.stats.text_zone, configured_zones(services.settings.time))
+    lines += ["", TEXT_ZONE_HEADING, ""]
+    lines += inference.report_lines() + text_time_lines(run.stats, inference)
+
     counts: dict[tuple[str, bool], int] = {(kind, sent): n for kind, sent, n in by_kind}
     rows = []
     for kind in KINDS:
@@ -226,6 +243,26 @@ def report_sticker_section(services: Services, stats: RunStats) -> list[str]:
     return lines
 
 
+def text_time_lines(stats: RunStats, inference: TextZoneInference) -> list[str]:
+    """How the texts of the messages without ``createTime`` were read (D-901)."""
+    lines: list[str] = []
+    for zone, count in sorted(stats.time_from_text.items()):
+        if zone == FALLBACK_HER_ZONE:
+            lines.append(
+                f"- {_count(count)} 条消息没有 createTime，当时推断不出导出文字时区，"
+                "按 time.source_timezone（她所在的时区，沿用旧的读法）从 createTimeText 还原："
+                "导出设备不在那个时区时，这些时刻会差几个小时"
+            )
+            continue
+        final = inference.zone or "推断不出"
+        differs = "" if zone in inference.fitting else f"（最终推断为 {final}，这些时刻可能有偏差）"
+        lines.append(
+            f"- {_count(count)} 条消息没有 createTime，按导出文字时区 {zone} 从 createTimeText "
+            f"还原{differs}"
+        )
+    return lines
+
+
 def _holdout_notes(services: Services) -> list[str]:
     """The hold-out cut-off does not move with an import: say it when it has fallen behind
     (R18-C3, D-818)."""
@@ -246,11 +283,6 @@ def _quality_notes(run: RunView) -> list[str]:
     if stats.schema_errors:
         names = "，".join(f"{k} × {v}" for k, v in sorted(stats.schema_errors.items()))
         notes.append(f"这些字段的类型与预期不符，已当作缺失处理：{names}")
-    if stats.time_mismatches:
-        notes.append(
-            f"{stats.time_mismatches} 条消息的 createTime 与 createTimeText 相差超过一小时："
-            "请核对 time.source_timezone / time.source_timezone_ranges（SPEC R-CFG-004）"
-        )
     integrity = stats.integrity
     if integrity.get("state") == "read":
         notes.append(

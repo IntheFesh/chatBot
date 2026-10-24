@@ -45,7 +45,6 @@ CHARS = (
 SPECIAL_NICKNAME_PARTS = ("小满", "🌸", " (备份)", "&co", "#1", "'q'", "％", "·")
 DEFAULT_START = datetime(2025, 1, 1, 8, 0, tzinfo=UTC)
 DEFAULT_EXPORTED_AT = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
-SOURCE_ZONE = ZoneInfo("America/Chicago")
 
 # relative weights of the renderTypes in a generated conversation
 DEFAULT_MIX: dict[str, float] = {
@@ -123,6 +122,7 @@ class SynthOptions:
     keep_texts: bool = True
     keep_ids: bool = True
     shift_text_hours: int = 0  # createTimeText written this many hours off (zone mistakes)
+    text_zone: str = "America/Chicago"  # the zone of the exporting device (createTimeText)
     target_username: str | None = None
     target_display_name: str | None = None
 
@@ -274,7 +274,8 @@ class _Conversation:
         sent = rng.random() < 0.5
         local_id = 1000 + number
         server = 7_000_000_000_000_000_000 + number * 7919
-        text_time = when.astimezone(SOURCE_ZONE) + timedelta(hours=self.options.shift_text_hours)
+        text_zone = ZoneInfo(self.options.text_zone)
+        text_time = when.astimezone(text_zone) + timedelta(hours=self.options.shift_text_hours)
         base = message(
             id=f"{self.index:02d}-{number:09d}",
             localId=local_id,

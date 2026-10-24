@@ -47,6 +47,9 @@ FALLBACK_CHAIN: Mapping[str, tuple[str, ...]] = {
 }
 DAYTIME_FIRST = 10 * 60  # a sleep core inside 10:00-18:00 is implausible (R-ACT-003)
 DAYTIME_LAST = 18 * 60
+# the words of the warning about the inferred sleep itself; a manual sleep answers it (and only
+# it: the warning about a month read in the wrong zone stays, D-902)
+DAYTIME_SLEEP_MARK = "可能是 time.source_timezone 设置不对"
 
 
 # ---------------------------------------------------------------------- sleep
@@ -369,7 +372,7 @@ class ActivityModel:
                 for key in p.get("day_types") or CURVE_KEYS:
                     windows[key] = window
                 confidence = "high"
-                warnings = [w for w in warnings if "source_timezone" not in w]
+                warnings = [w for w in warnings if DAYTIME_SLEEP_MARK not in w]
                 applied.append(item.id)
             elif item.kind == "busy":
                 manual.append(

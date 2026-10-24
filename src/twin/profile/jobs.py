@@ -2,8 +2,10 @@
 
 The computation is synchronous work over the stored messages, so it runs in a worker thread.
 When the job was queued by an import, the style-change section of the newest import report is
-rewritten afterwards.  A sleep time that falls in the daytime raises an alert (the usual cause
-is a wrong ``time.source_timezone``); the alert carries clock times and a zone name only.
+rewritten afterwards.  A sleep time that falls in the daytime - overall, or in some months only
+(D-902) - raises an alert (the usual cause is a wrong ``time.source_timezone`` or a missing or
+misplaced entry of ``time.source_timezone_ranges``); the alert carries clock times, months and
+zone names only.
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ def raise_routine_alerts(services: Services, report: BuildReport) -> None:
         if suspicious:
             services.alerts.raise_alert(
                 TIMEZONE_ALERT,
-                "推断的睡眠时段落在当地白天，请核对 time.source_timezone",
+                "推断的睡眠时段落在当地白天，请核对 time.source_timezone / source_timezone_ranges",
                 detail={"scope": result.scope, "warnings": suspicious},
                 dedup_key=f"{TIMEZONE_ALERT}-{result.scope}",
             )

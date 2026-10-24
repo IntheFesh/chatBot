@@ -7,7 +7,10 @@ An import is a *run* (``import_runs``) that moves through phases::
 * **messages**: ``messages.json`` of the target conversation is streamed with ``ijson``
   (memory does not depend on the file size) in batches of ``ingest.batch_size`` messages;
   each batch is one transaction that also saves the run's progress, so a crash loses
-  nothing and a resumed run continues after the last committed batch;
+  nothing and a resumed run continues after the last committed batch.  The pairs of
+  ``createTime`` and ``createTimeText`` of a batch are counted before it is normalised, so the
+  zone of the exporting device inferred from everything read so far is the one a text without
+  ``createTime`` is read in (:mod:`twin.ingest.textzone`, D-901);
 * **media / stickers**: the files the messages refer to are imported (see
   :mod:`twin.ingest.media_import`);
 * **finalize / hooks**: conversation totals, the post-import hooks (R-IMP-011) and the
@@ -78,6 +81,7 @@ from twin.ingest.runs import (
 )
 from twin.ingest.schema import ExportMessage, MessagesHeader, UnsupportedSchema
 from twin.ingest.stats import RunStats
+from twin.ingest.textzone import TextZoneReader, configured_zones
 from twin.ingest.times import SourceTime, epoch_to_utc
 from twin.ops.logging import get_logger
 from twin.services import Services
@@ -255,6 +259,7 @@ class ImportRunner:
         self._batch_size = batch_size or self._settings.ingest.batch_size
         self._on_batch = on_batch
         self._source_time = SourceTime.from_config(self._settings.time)
+        self._preferred_zones = configured_zones(self._settings.time)
 
     # ------------------------------------------------------------------ entry
 
@@ -508,7 +513,8 @@ class ImportRunner:
         stop: threading.Event,
     ) -> bool:
         self._set_phase(view.id, "messages", stats)
-        context = NormalizeContext(entry.username, self._source_time)
+        reader = TextZoneReader(stats.text_zone, self._preferred_zones)
+        context = NormalizeContext(entry.username, self._source_time, reader.zone)
         started = self._clock.monotonic()
         start_count = view.processed
         processed = view.processed
@@ -520,6 +526,10 @@ class ImportRunner:
                 chunk = list(islice(remaining, self._batch_size))
                 if not chunk:
                     break
+                for raw in chunk:  # before normalising: the batch tells its own texts' zone
+                    if isinstance(raw, dict):
+                        moment = epoch_to_utc(raw.get("createTime"))
+                        stats.text_zone.observe(moment, raw.get("createTimeText"))
                 items, invalid = self._normalize(chunk, context, stats)
                 batch_context = BatchContext(
                     conversation_id=conversation_id,
@@ -586,8 +596,8 @@ class ImportRunner:
                 continue
             label = f"{item.kind}:{'user' if item.is_sent else 'her'}"
             stats.kinds[label] += 1
-            if item.time_mismatch:
-                stats.time_mismatches += 1
+            if item.time_from_text is not None:
+                stats.time_from_text[item.time_from_text] += 1
             if not item.render_type_known:
                 stats.unknown_render_types[item.render_type or "-"] += 1
             for name in item.unknown_fields:

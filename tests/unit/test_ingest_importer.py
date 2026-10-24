@@ -45,6 +45,7 @@ from twin.ingest.persist import (
     persist_messages,
 )
 from twin.ingest.runs import get_run, latest_run
+from twin.ingest.textzone import infer_text_zone
 from twin.services import Services
 from twin.stickers.library import sticker_file_allowed
 from twin.storage.chat_models import (
@@ -1005,12 +1006,21 @@ def test_an_unrecognised_integrity_folder_is_reported_but_does_not_block(
 # --------------------------------------------------------------------- data quality
 
 
-def test_a_time_zone_mistake_shows_up_in_the_report(services: Services, tmp_path: Path) -> None:
+def test_a_shifted_text_clock_shows_up_in_the_report_as_the_device_zone(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C7 (D-900, rewritten): texts five hours ahead of Chicago in January are a device set
+    to UTC-1.  The report names that zone and its offset; it no longer counts the messages as
+    disagreeing with ``time.source_timezone`` (where she was) or asks to change it."""
     export = make_export(tmp_path, target_messages=60, shift_text_hours=5)
     outcome = run_import(services, export)
-    assert outcome.run.stats.time_mismatches == 60
+    inference = infer_text_zone(outcome.run.stats.text_zone)
+    assert inference.zone is not None and inference.offsets == ((-60, 60),)
     text = Path(outcome.report_path or "").read_text(encoding="utf-8")
-    assert "createTimeText" in text and "time.source_timezone" in text
+    zone_part = text.split("## 导出文字时区", 1)[1].split("\n## ", 1)[0]
+    assert inference.zone in zone_part and "-01:00" in zone_part and "60" in zone_part
+    quality = text.split("## 数据质量提示", 1)[1].split("\n## ", 1)[0]
+    assert "createTimeText" not in quality and "source_timezone" not in quality
 
 
 def test_messages_that_cannot_be_stored_are_counted_with_a_reason(

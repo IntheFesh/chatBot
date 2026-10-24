@@ -1,15 +1,18 @@
-"""Time in an export: epoch seconds, local text and the zone the text was written in.
+"""Time in an export: epoch seconds, local text, and the days of the place she was in.
 
-Messages carry ``createTime`` (epoch) and ``createTimeText`` (local wall-clock text).  The
-epoch is what is stored (UTC, CLAUDE.md rule 5).  The text is interpreted in
-``time.source_timezone`` (with ``time.source_timezone_ranges`` for periods in which the
-exporting device was in another zone); it is used
+Messages carry ``createTime`` (epoch) and ``createTimeText`` (local wall-clock text).  The epoch is
+what is stored (UTC, CLAUDE.md rule 5).  The text is the same moment on the clock of the
+*exporting device*, in the device's zone - which has nothing to do with where she was.  That zone
+is inferred from the export itself (:mod:`twin.ingest.textzone`, round 18 item C7, D-900); the text
+is read in it only to recover a message whose epoch is missing, and the difference of the two is
+the consistency check of the import report and of ``twin import inspect``.
 
-* to recover a message whose epoch is missing, and
-* as a cross-check: a text that disagrees with the epoch by more than an hour usually means
-  the source time zone is configured wrongly, which the import report points out.
+``time.source_timezone`` (with ``time.source_timezone_ranges`` for the periods she was somewhere
+else, R-ACT-001) means *where she was* and nothing else.  :class:`SourceTime` holds it.  Its
+:meth:`SourceTime.parse_local_text` reads a text on her clock; that is only the last resort for a
+text whose device zone cannot be inferred (the reading of the earlier rounds, D-137).
 
-Report dates (R-IMP-010) are local dates in the same source zone.
+Report dates (R-IMP-010) are local dates in the zone she was in.
 
 **Her local days** (D-782).  A day runs from its own midnight, in the zone of its date
 (:meth:`SourceTime.zone_on`), to the midnight of the next date in the zone of *that* date, so the
@@ -33,7 +36,6 @@ from twin.schedule.wallclock import day_start_utc
 ONE_DAY = timedelta(days=1)
 
 MILLISECOND_THRESHOLD = 100_000_000_000  # epoch values above this are milliseconds
-MISMATCH_TOLERANCE_S = 3700.0  # one hour of daylight saving ambiguity plus slack
 
 
 def epoch_to_utc(value: int | float | str | None) -> datetime | None:
@@ -112,10 +114,12 @@ class SourceTime:
         return today - ONE_DAY
 
     def parse_local_text(self, text: str | None) -> datetime | None:
-        """``createTimeText`` as an aware UTC datetime; ``None`` if it cannot be read."""
-        if not text:
-            return None
-        fields = _wall_clock_fields(text.strip())
+        """``createTimeText`` read on *her* clock (the zone of its date), as aware UTC.
+
+        Only the last resort: the text is written in the exporting device's zone, which is read
+        with :func:`read_wall_clock` once :mod:`twin.ingest.textzone` has inferred it.
+        """
+        fields = _fields_of(text)
         if fields is None:
             return None
         year, month, day, hour, minute, second = fields
@@ -125,12 +129,36 @@ class SourceTime:
         except ValueError:
             return None
 
-    def disagrees(self, moment: datetime, text: str | None) -> bool:
-        """True if ``text`` is readable and differs from ``moment`` by more than an hour."""
-        other = self.parse_local_text(text)
-        if other is None:
-            return False
-        return abs((other - moment).total_seconds()) > MISMATCH_TOLERANCE_S
+
+def read_wall_clock(text: str | None, zone: ZoneInfo) -> datetime | None:
+    """A wall-clock text read in ``zone``, as aware UTC; ``None`` if it cannot be read.
+
+    The earlier of two readings of a repeated autumn hour is taken (``fold=0``).
+    """
+    fields = _fields_of(text)
+    if fields is None:
+        return None
+    try:
+        return datetime(*fields, tzinfo=zone).astimezone(UTC)
+    except ValueError:
+        return None
+
+
+def wall_clock_as_utc(text: str | None) -> datetime | None:
+    """The clock reading of a text labelled UTC: minus a moment, it is the writer's UTC offset."""
+    fields = _fields_of(text)
+    if fields is None:
+        return None
+    try:
+        return datetime(*fields, tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _fields_of(text: object) -> tuple[int, int, int, int, int, int] | None:
+    if not isinstance(text, str) or not text:
+        return None
+    return _wall_clock_fields(text.strip())
 
 
 def _wall_clock_fields(text: str) -> tuple[int, int, int, int, int, int] | None:
