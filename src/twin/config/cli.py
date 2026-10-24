@@ -9,7 +9,6 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
-from twin.clock import get_clock
 from twin.config.loader import ConfigError
 from twin.config.mask import mask_value, masked_settings
 from twin.config.runtime import (
@@ -256,7 +255,7 @@ def secrets_migrate() -> None:
         return
     target, info = system_backend()
     report = migrate_file_store(
-        source, target, info, db_path=context.paths().db_path, clock=get_clock()
+        source, target, info, db_path=context.paths().db_path, clock=context.clock
     )
     typer.echo(f"moved into {info.name}: {', '.join(report.moved) or 'nothing new'}")
     if report.already_there:

@@ -52,6 +52,16 @@ def test_without_a_database_the_entries_are_moved_and_compared(
     assert not source.exists() and report.removed
 
 
+def test_a_database_without_keys_yet_is_not_checked(
+    source: EncryptedFileKeyring, tmp_path: Path, clock: ManualClock
+) -> None:
+    """R18-A2: a database made by `twin db upgrade` before any key exists has nothing sealed."""
+    db_path = tmp_path / "data" / "twin.db"
+    migrate.upgrade(db_path)
+    report = migrate_file_store(source, CredentialManagerDouble(), USABLE, db_path=db_path)
+    assert not report.database_checked and not source.exists()
+
+
 def test_an_entry_already_there_with_the_same_value_is_not_written_again(
     source: EncryptedFileKeyring, tmp_path: Path, clock: ManualClock
 ) -> None:

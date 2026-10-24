@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from twin.clock import Clock
+from twin.clock import Clock, get_clock
 from twin.config.secrets import (
     BackendInfo,
     CredentialBackend,
@@ -92,9 +92,11 @@ def migrate_file_store(
     target_info: BackendInfo,
     *,
     db_path: Path,
-    clock: Clock,
+    clock: Clock | None = None,
 ) -> MigrationReport:
     """Move every entry of ``source`` into ``target``, check it, then remove ``source``.
+
+    ``clock`` is the one of the database that is opened for the check (default: the process's).
 
     Raises :class:`MigrationError` - with ``source`` untouched - when the target is not usable,
     holds a different value under one of the names, a write or a read-back fails, or the moved
@@ -131,7 +133,7 @@ def migrate_file_store(
     if differing:
         raise MigrationError(f"read back differently: {_names(differing)}; {KEPT}")
     report.database_checked, report.values_opened = _check_database(
-        db_path, SecretStore(target, target_info), clock
+        db_path, SecretStore(target, target_info), clock or get_clock()
     )
     report.removed = source.remove()
     log.info(
