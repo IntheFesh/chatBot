@@ -35,7 +35,7 @@ from twin.ingest.textzone import (
     infer_text_zone,
     observed_offset_minutes,
 )
-from twin.ingest.times import SourceTime
+from twin.ingest.times import SourceTime, read_wall_clock
 from twin.services import Services
 from twin.storage.chat_models import Message
 
@@ -439,3 +439,33 @@ def test_the_synthetic_export_can_write_in_any_zone(tmp_path: Path, zone: str) -
     for row in rows:
         tally.observe(datetime.fromtimestamp(row["createTime"], UTC), row["createTimeText"])
     assert zone in infer_text_zone(tally).fitting
+
+
+def test_a_preferred_name_that_is_no_zone_is_passed_over() -> None:
+    """R18-C7: a zone name the database does not know cannot fit (and does not break)."""
+    moments = every(7, datetime(2025, 3, 1, tzinfo=UTC), datetime(2025, 5, 1, tzinfo=UTC))
+    inference = infer_text_zone(tally_of(SHANGHAI, moments), preferred=("Not/AZone", "../x"))
+    assert inference.zone == "Asia/Shanghai" and "Not/AZone" not in inference.fitting
+
+
+def test_many_different_offsets_are_listed_with_the_rest_as_one_row() -> None:
+    """R18-C7: the report lists the twelve most frequent offsets and sums up the others."""
+    tally = TextZoneTally()
+    moment = datetime(2025, 1, 6, 12, tzinfo=UTC)
+    for hours in range(-10, 10):  # twenty different whole-hour offsets
+        for _ in range(abs(hours) + 1):
+            tally.observe(moment, (moment + timedelta(hours=hours)).strftime(TEXT_FORMAT))
+    inference = infer_text_zone(tally)
+    rows = inference.offset_rows()
+    assert inference.zone is None and len(rows) == 13 and rows[-1][0] == "其他"
+    assert sum(n for _, n in rows) == tally.pairs
+    assert rows[0] == ("-10:00", 11)
+
+
+def test_texts_that_are_no_real_moment_are_not_read() -> None:
+    """R18-C7: 30 February is no time; the reading in a zone and the offset both give up."""
+    assert read_wall_clock("2025-02-30 10:00:00", CHICAGO) is None
+    assert read_wall_clock("garbage", CHICAGO) is None
+    assert read_wall_clock("2025-03-09 02:30", CHICAGO) is not None  # the skipped spring hour
+    moment = datetime(2025, 3, 1, tzinfo=UTC)
+    assert observed_offset_minutes(moment, "2025-02-30 10:00:00") is None

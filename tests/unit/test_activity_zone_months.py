@@ -8,12 +8,15 @@ every calendar month (cut again where the configured zone changes) is checked on
 
 from __future__ import annotations
 
+from array import array
 from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import select
 
 from tests.support.synth_chat import ChatSpec, build_chat
-from twin.config.settings import TzRange
+from twin.config.settings import ActivityConfig, TzRange
+from twin.profile.activity_collect import ActivityRaw
+from twin.profile.activity_infer import MonthVerdict, month_verdicts, month_warnings
 from twin.profile.activity_model import ActivityModel
 from twin.profile.api import load_activity_model
 from twin.profile.builder import rebuild
@@ -127,3 +130,55 @@ def test_short_or_thin_months_are_not_judged(services: Services) -> None:
     trip = {date(2026, 8, 1) + timedelta(days=n): "Asia/Shanghai" for n in range(5)}
     model = learn(services, start=date(2026, 6, 1), days=66, zone_by_day=trip)  # Aug 1-5 only
     assert zone_warnings(model) == []
+
+
+# ------------------------------------------------------------------- the pieces
+
+
+def raw_of(walls: list[float], zones: list[int], names: list[str]) -> ActivityRaw:
+    """An :class:`ActivityRaw` that holds only the clock positions of her messages."""
+    return ActivityRaw(
+        zone_names=names,
+        day_types={},
+        counts={},
+        inits={},
+        latency={},
+        latency_workday={},
+        her_wall=array("d", walls),
+        her_zone=array("b", zones),
+        workday_day_counts={},
+        her_messages=len(walls),
+        initiations=0,
+        first_day=None,
+        last_day=None,
+    )
+
+
+def test_a_month_without_a_clear_low_stretch_is_not_judged() -> None:
+    """R18-C7: a month whose messages are spread evenly over the clock has no valley to judge."""
+    first = date(2026, 8, 1).toordinal()
+    walls = [(first + day) * 1440.0 + minute for day in range(20) for minute in range(0, 1440, 60)]
+    raw = raw_of(walls, [0] * len(walls), ["America/Chicago"])
+    assert month_verdicts(raw, ActivityConfig()) == []
+
+
+def verdict(month: int, daytime: bool, zone: str = "America/Chicago") -> MonthVerdict:
+    return MonthVerdict(2026, month, zone, (12 * 60.0, 19 * 60.0), daytime)
+
+
+def test_consecutive_months_in_one_zone_make_one_warning() -> None:
+    """R18-C7: months in a row are one warning; at most three cores are spelled out."""
+    months = [verdict(5, False), *(verdict(m, True) for m in (6, 7, 8, 9)), verdict(11, True)]
+    warnings = month_warnings(months, whole_daytime=False)
+    assert len(warnings) == 2
+    assert warnings[0].startswith("2026-06 至 2026-09 按 America/Chicago 读")
+    assert "2026-08 12:00–19:00）" not in warnings[0] and "等）" in warnings[0]
+    assert warnings[1].startswith("2026-11 按 America/Chicago 读")
+    # the same months in another zone start a warning of their own
+    split = month_warnings(
+        [verdict(6, True), verdict(7, True, "Asia/Shanghai"), verdict(8, False)], False
+    )
+    assert len(split) == 2 and "Asia/Shanghai" in split[1]
+    # every judged month off and the overall warning said so: nothing more
+    assert month_warnings([verdict(6, True), verdict(7, True)], whole_daytime=True) == []
+    assert month_warnings([verdict(6, False)], whole_daytime=False) == []
