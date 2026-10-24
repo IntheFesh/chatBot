@@ -12,7 +12,6 @@ from rich.table import Table
 from twin.config.loader import ConfigError
 from twin.config.mask import mask_value, masked_settings
 from twin.config.runtime import (
-    BOT_TIMEZONE,
     SettingSpec,
     SettingValueError,
     registered_settings,
@@ -30,6 +29,7 @@ from twin.config.secrets import (
 from twin.ops.process_model import CliError, CommandKind, ExitCode, command
 from twin.ops.secrets_migrate import migrate_file_store
 from twin.schedule.cli import switch_from_the_command_line
+from twin.schedule.service import is_bot_timezone
 from twin.services import get_cli_context
 from twin.storage.keystore import KeyStore
 from twin.storage.migrate import schema_status
@@ -104,7 +104,7 @@ def settings_set(
     """Change a runtime setting; a running application picks it up within 2 seconds."""
     spec = _find_spec(key)
     services = _services_for_runtime()
-    if spec is BOT_TIMEZONE:  # a switch, as `twin timezone set` makes it (history, plan; D-829)
+    if is_bot_timezone(spec):  # a switch, as `twin timezone set` makes it (history, plan; D-829)
         switch_from_the_command_line(services, value)
         return
     try:

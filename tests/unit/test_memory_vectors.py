@@ -241,7 +241,7 @@ def test_a_meta_file_held_open_for_a_moment_is_replaced_once_it_is_free(
     table = VectorStore(tmp_path).table(FACT_SCHEMA)
     meta = IndexMeta(
         table="facts",
-        encoding="m|512|0000000000000000|v1",
+        encoding="m|512|weights-abcdef|v1",
         model="m",
         dimension=512,
         revision="r",
