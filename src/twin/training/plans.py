@@ -404,12 +404,18 @@ def queued_plan_ids(queue: JobQueue) -> set[str]:
 
 
 def queue_plan_batches(
-    services: Services, runtime: LlmRuntime, sample_ids: Sequence[str]
+    services: Services,
+    runtime: LlmRuntime,
+    sample_ids: Sequence[str],
+    *,
+    reserve_usd: float = 0.0,
 ) -> PlanQueueResult:
     """Price the plan jobs of ``sample_ids`` and queue them as one-time batches (R-LLM-014).
 
     Every batch waits for ``twin jobs approve <batch>``; none is larger than
     ``budget.one_time_usd``.  Samples that already wait in a queued plan job are left alone.
+    ``reserve_usd`` is kept free in the first batch for a job that joins it (the new pre-holdout
+    description of the export, D-883).
     """
     queue = JobQueue(services.db, services.clock)
     waiting = queued_plan_ids(queue)
@@ -430,6 +436,8 @@ def queue_plan_batches(
         )
         prices[sample_id] = runtime.batches.estimate_item(item)[0]
     limit = runtime.batches.limit_usd
+    if reserve_usd > limit:
+        raise BatchTooLargeError("the job that joins the plans", reserve_usd, limit)
     chunks: list[list[str]] = [[]]
     chunk_usd = 0.0
     for sample_id in wanted:
@@ -443,7 +451,8 @@ def queue_plan_batches(
         chunk_usd += price
     estimates = [sum(prices[i] for i in chunk) for chunk in chunks]
     groups: list[list[int]] = [[]]
-    running = 0.0
+    # the first batch keeps room for the job that joins it, if its first plan job fits beside it
+    running = reserve_usd if estimates and reserve_usd + estimates[0] <= limit else 0.0
     for index, estimate in enumerate(estimates):
         if groups[-1] and running + estimate > limit:
             groups.append([])

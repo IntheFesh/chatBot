@@ -220,13 +220,26 @@ class OneTimeBatches:
         max_attempts: int = 3,
         offpeak_only: bool = True,
         deadline: datetime | None = None,
+        join: bool = False,
     ) -> list[str]:
-        """Queue the jobs of a batch, waiting for ``twin jobs approve``."""
+        """Queue the jobs of a batch, waiting for ``twin jobs approve``.
+
+        ``join=True`` adds the jobs to a batch that was queued before and is not approved yet
+        (the training export puts the new pre-holdout description beside its plans, D-883): the
+        estimate of the batch is the sum of both, and both are approved together.
+        """
         if len(payloads) != len(estimates_usd):
             raise ValueError("every payload needs an estimate")
         if not payloads:
             raise ValueError("a batch needs at least one job")
-        total = sum(estimates_usd)
+        earlier = 0.0
+        if join:
+            state = self._state(batch_id)
+            if state.get("approved_at"):
+                raise ValueError(f"batch {batch_id} is approved already; jobs cannot join it")
+            known = state.get("estimated_usd")
+            earlier = float(known) if isinstance(known, int | float) else 0.0
+        total = earlier + sum(estimates_usd)
         if total > self.limit_usd:
             raise BatchTooLargeError(batch_id, total, self.limit_usd)
         ids = [

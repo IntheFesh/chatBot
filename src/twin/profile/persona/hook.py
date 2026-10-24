@@ -8,8 +8,12 @@ one-time batch, off-peak, waiting for ``twin jobs approve <batch>`` (R-LLM-014).
 command is ``twin persona regenerate``.
 
 **After a re-split of the hold-out** (R-TRN-013) the pre-holdout card describes a period that is
-no longer the right one: its statistics are queued again and a new description of that scope is
-planned (also waiting for approval).
+no longer the right one: its statistics are queued again at once (free).  Who pays for the new
+description is the caller's choice (round 18, user decision, D-883): ``twin retrieval resplit``
+plans it as a batch of its own (:func:`plan_description_after_resplit`), ``twin train export``
+puts it into the batch of its plans so that one approval pays for both.  Until the new one is
+written, the old description is "stale" for the new cut-off (``twin.profile.pre_holdout``) and the
+export waits for it.
 """
 
 from __future__ import annotations
@@ -55,10 +59,18 @@ def queue_persona(context: HookContext) -> HookResult:
 @on_holdout_change("persona")
 def persona_after_resplit(services: Services, previous: Holdout | None, current: Holdout) -> str:
     queue_refresh(services, scope="pre_holdout", reason="resplit")
+    return (
+        "pre-holdout statistics refresh queued; the description of the old cut-off is stale "
+        "until a new one is written (planned by the command that re-split)"
+    )
+
+
+def plan_description_after_resplit(services: Services) -> str:
+    """Plan the new pre-holdout description as a batch of its own (``twin retrieval resplit``)."""
     plan = plan_generation(services, ["pre_holdout"], reason="resplit")
     if plan.batch_id is None:
-        return "pre-holdout statistics refresh queued; a description is already waiting"
+        return "persona: a new pre-holdout description is already waiting"
     return (
-        "pre-holdout statistics refresh queued; a new pre-holdout description is planned "
+        "persona: a new pre-holdout description is planned "
         f"(${plan.estimated_usd:.2f}) and waits for `twin jobs approve {plan.batch_id}`"
     )

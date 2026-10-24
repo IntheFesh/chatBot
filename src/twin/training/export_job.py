@@ -2,12 +2,22 @@
 
 The command only queues the job.  The job
 
+0. re-splits the hold-out when the data has moved past the stored cut-off - the test split is the
+   newest ``retrieval.holdout_ratio`` of the data *now* (round 18, user decision, D-881) - through
+   the same :func:`~twin.profile.holdout.resplit_holdout` as ``twin retrieval resplit``, whose
+   listeners queue the rebuild of the pre-holdout profile, routine and card statistics (free) and
+   the sticker context corrections (daily account).  While any of those jobs is still to run, the
+   job hands itself back (``JobDeferred``, state ``rebuilding``) and reads nothing: no prompt is
+   built from data derived under the old cut-off (iron rule 13, D-882).  A re-split voids no stored
+   evaluation (D-884);
 1. finds the pinned tokenizer (:mod:`twin.training.tokenizer`),
 2. makes the first pass over her reply blocks and learns which plans are still missing
    (:meth:`~twin.training.export.TrainingSetExporter.run`),
-3. when plans are missing, registers them, prices the batches and queues them waiting for
-   ``twin jobs approve <batch>`` (R-LLM-014), and ends - the same command run again after the
-   plans are written completes the export,
+3. when plans are missing, or the description of the pre-holdout card was generated for another
+   cut-off, registers the plans, prices the batches and queues them waiting for
+   ``twin jobs approve <batch>`` (R-LLM-014) - the new description joins the first of these
+   batches, so its estimate is part of the export's and one approval pays for both (D-883) - and
+   ends; the same command run again after the batch ran completes the export,
 4. otherwise writes the dataset directory and records the version in ``dataset_versions``.
 
 How it ended is kept in the setting ``training.export.state`` (counts, versions, batch ids; never
@@ -28,11 +38,14 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 from twin.llm.runtime import build_llm_runtime
-from twin.ops.jobs import JobContext, JobQueue, job_handler
+from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, JobQueue, job_handler
 from twin.ops.logging import get_logger
+from twin.profile.holdout import HoldoutError, ResplitResult, resplit_if_behind
+from twin.profile.persona.jobs import PersonaPlan, description_estimate, plan_generation
+from twin.profile.pre_holdout import PreHoldoutState, pre_holdout_state
 from twin.storage.settings_store import get_setting, put_setting
 from twin.training.dataset_dir import DatasetError
 from twin.training.dpo_export import DpoExportResult, export_dpo
@@ -53,6 +66,9 @@ STATE_KEY = "training.export.state"
 EXPORT_DPO_JOB = "training_export_dpo"
 EXPORT_DPO_PRIORITY = 80
 DPO_STATE_KEY = "training.export_dpo.state"
+RESPLIT_BY: Final = "train_export"
+REBUILD_WAIT_S: Final = 60.0
+"""How long the export waits before it looks again at a pre-holdout rebuild it waits for."""
 
 
 @dataclass(frozen=True)
@@ -206,13 +222,94 @@ def run_export(
     return result
 
 
-async def queue_missing_plans(services: Services, result: ExportResult) -> PlanQueueResult:
-    """Register the plans an export lacks and queue them as priced batches."""
+@dataclass(frozen=True)
+class SplitPreparation:
+    """What step 0 of the job found: the re-split it made (if any) and the pre-holdout data."""
+
+    resplit: ResplitResult | None
+    state: PreHoldoutState
+
+
+def prepare_split(services: Services) -> SplitPreparation:
+    """Re-split when the data has moved past the cut-off, then look at the pre-holdout data."""
+    try:
+        moved = resplit_if_behind(services, by=RESPLIT_BY)
+        return SplitPreparation(moved, pre_holdout_state(services))
+    except HoldoutError as exc:
+        raise ExportError(f"the hold-out cannot be determined yet: {exc}") from exc
+
+
+def rebuilding_state(prepared: SplitPreparation, earlier: dict[str, Any] | None) -> dict[str, Any]:
+    """The record of an export that waits for the pre-holdout rebuild (counts and moments)."""
+    state = prepared.state
+    previous: str | None = None
+    if prepared.resplit is not None and prepared.resplit.previous is not None:
+        previous = prepared.resplit.previous.cutoff.isoformat()
+    elif (
+        earlier
+        and earlier.get("state") == "rebuilding"
+        and earlier.get("cutoff") == state.cutoff.isoformat()
+    ):
+        previous = earlier.get("previous_cutoff")  # a later look at the same re-split
+    return {
+        "state": "rebuilding",
+        "cutoff": state.cutoff.isoformat(),
+        "previous_cutoff": previous,
+        "waiting_for": list(state.waiting),
+    }
+
+
+@dataclass
+class ExportBatches:
+    """What :func:`queue_export_batches` queued: the plans and the new description."""
+
+    plans: PlanQueueResult
+    persona: PersonaPlan | None = None
+    waiting_description: tuple[str, ...] = ()  # batches of a description planned earlier
+
+    @property
+    def batch_ids(self) -> list[str]:
+        found = list(self.plans.batch_ids)
+        extra = [self.persona.batch_id] if self.persona and self.persona.batch_id else []
+        for batch in [*extra, *self.waiting_description]:
+            if batch not in found:
+                found.append(batch)
+        return found
+
+    @property
+    def estimated_usd(self) -> float:
+        return self.plans.estimated_usd + (self.persona.estimated_usd if self.persona else 0.0)
+
+
+def _queue_batches(
+    services: Services, wanted: list[str], describe: bool, waiting: tuple[str, ...]
+) -> ExportBatches:
+    runtime = build_llm_runtime(services)
+    new_description = describe and not waiting
+    reserve = description_estimate(services, runtime) if new_description else 0.0
+    plans = queue_plan_batches(services, runtime, wanted, reserve_usd=reserve)
+    if not new_description:
+        return ExportBatches(plans, None, waiting if describe else ())
+    first = plans.batch_ids[0] if plans.batch_ids else None
+    try:
+        persona = plan_generation(
+            services, ["pre_holdout"], reason=RESPLIT_BY, runtime=runtime, batch_id=first
+        )
+    except BatchTooLargeError:  # the plans filled the first batch: a batch of its own
+        persona = plan_generation(services, ["pre_holdout"], reason=RESPLIT_BY, runtime=runtime)
+    return ExportBatches(plans, persona)
+
+
+async def queue_export_batches(
+    services: Services, result: ExportResult, state: PreHoldoutState
+) -> ExportBatches:
+    """Register the plans an export lacks and queue them, with the new description, as batches."""
     store = PlanStore(services.db)
     store.register(result.missing_plans)
     wanted = sorted({*result.missing_plans, *store.pending_ids()})
-    runtime = build_llm_runtime(services)
-    return await asyncio.to_thread(queue_plan_batches, services, runtime, wanted)
+    return await asyncio.to_thread(
+        _queue_batches, services, wanted, result.describe, state.describing
+    )
 
 
 def summary_of(result: ExportResult) -> dict[str, Any]:
@@ -278,29 +375,55 @@ async def handle_training_export(ctx: JobContext) -> None:
         raise RuntimeError("training_export needs the services container")
     request = ExportRequest.from_payload(ctx.job.payload)
     try:
+        prepared = await asyncio.to_thread(prepare_split, services)
+    except ExportError as exc:
+        save_state(services, {"state": "failed", "message": str(exc)})
+        log.warning("training_export_failed", error=type(exc).__name__)
+        raise
+    if prepared.resplit is not None:
+        log.info(
+            "training_export_resplit",
+            held_out=prepared.resplit.current.held_out_blocks,
+            blocks=prepared.resplit.current.blocks,
+        )
+    if prepared.state.waiting:  # nothing is read before the rebuild for the new cut-off is done
+        save_state(services, rebuilding_state(prepared, read_state(services)))
+        log.info("training_export_waits_for_rebuild", jobs=",".join(prepared.state.waiting))
+        raise JobDeferred(
+            "the pre-holdout data is being rebuilt for the hold-out cut-off",
+            retry_in_s=REBUILD_WAIT_S,
+        )
+    try:
         result = await asyncio.to_thread(run_export, services, request)
     except (ExportError, TokenizerError) as exc:
         save_state(services, {"state": "failed", "message": str(exc)})
         log.warning("training_export_failed", error=type(exc).__name__)
         raise
     if result.state == "waiting_for_plans":
-        queued = await queue_missing_plans(services, result)
-        save_state(
-            services,
-            {
-                "state": "waiting_for_plans",
-                "selected": result.plan_selected,
-                "missing": len(result.missing_plans),
-                "queued_samples": queued.samples,
-                "already_queued": queued.already_queued,
-                "batches": list(queued.batch_ids),
-                "estimated_usd": round(queued.estimated_usd, 4),
-            },
-        )
+        queued = await queue_export_batches(services, result, prepared.state)
+        record: dict[str, Any] = {
+            "state": "waiting_for_plans",
+            "selected": result.plan_selected,
+            "missing": len(result.missing_plans),
+            "queued_samples": queued.plans.samples,
+            "already_queued": queued.plans.already_queued,
+            "batches": queued.batch_ids,
+            "estimated_usd": round(queued.estimated_usd, 4),
+        }
+        if result.describe:
+            persona = queued.persona
+            record["persona"] = {
+                "cutoff": prepared.state.cutoff.isoformat(),
+                "batch_id": persona.batch_id if persona and persona.batch_id else None,
+                "estimated_usd": round(persona.estimated_usd, 4) if persona else 0.0,
+                "waiting": list(queued.waiting_description),
+            }
+        save_state(services, record)
         log.info(
             "training_export_waits_for_plans",
             missing=len(result.missing_plans),
             batches=len(queued.batch_ids),
+            description=result.describe,
         )
         return
     save_state(services, {"state": "done", **summary_of(result), "stats": result.stats})

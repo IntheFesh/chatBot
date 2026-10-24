@@ -118,6 +118,11 @@ def estimate_items(services: Services, runtime: LlmRuntime) -> list[BatchItem]:
     return items
 
 
+def description_estimate(services: Services, runtime: LlmRuntime) -> float:
+    """The estimate of the description of one scope (an upper bound, from the settings alone)."""
+    return runtime.batches.estimate(estimate_items(services, runtime)).total_usd
+
+
 def seed_for(batch_id: str, scope: str) -> int:
     digest = hashlib.sha256(f"{batch_id}/{scope}".encode()).digest()
     return int.from_bytes(digest[:4], "big")
@@ -129,8 +134,13 @@ def plan_generation(
     *,
     reason: str,
     runtime: LlmRuntime | None = None,
+    batch_id: str | None = None,
 ) -> PersonaPlan:
-    """Queue the generation of the description for ``scopes`` as one one-time batch."""
+    """Queue the generation of the description for ``scopes`` as one one-time batch.
+
+    ``batch_id`` names a batch queued a moment ago that the jobs join (the training export's,
+    D-883); without it the description is a batch of its own.
+    """
     if "pre_holdout" in scopes:
         holdout_cutoff(services)  # raises HoldoutError when there is too little data to split
     llm = runtime or build_llm_runtime(services)
@@ -142,22 +152,22 @@ def plan_generation(
         (plan.already_queued if scope in waiting else wanted).append(scope)
     if not wanted:
         return plan
-    items = estimate_items(services, llm)
-    per_scope = llm.batches.estimate(items).total_usd
-    batch_id = f"persona-{services.clock.now_utc():%Y%m%d%H%M%S}-{new_id()[-4:].lower()}"
+    per_scope = description_estimate(services, llm)
+    chosen = batch_id or f"persona-{services.clock.now_utc():%Y%m%d%H%M%S}-{new_id()[-4:].lower()}"
     payloads = [
-        {"scope": scope, "batch_id": batch_id, "seed": seed_for(batch_id, scope), "reason": reason}
+        {"scope": scope, "batch_id": chosen, "seed": seed_for(chosen, scope), "reason": reason}
         for scope in wanted
     ]
     ids = llm.batches.enqueue(
-        batch_id,
+        chosen,
         PERSONA_JOB,
         payloads,
         [per_scope] * len(payloads),
         priority=GENERATE_PRIORITY,
         offpeak_only=True,
+        join=batch_id is not None,
     )
-    plan.batch_id = batch_id
+    plan.batch_id = chosen
     plan.scopes = [PlannedScope(s, i, per_scope) for s, i in zip(wanted, ids, strict=True)]
     return plan
 

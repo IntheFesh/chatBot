@@ -439,6 +439,8 @@ def test_resplit_asks_first_and_then_moves_the_cutoff(
     assert done.exit_code == 0, done.output
     assert "cutoff:" in done.output and "not comparable" in done.output
     assert "retrieval:" in done.output and "held out" in done.output
+    assert "persona: a new pre-holdout description is planned" in done.output  # D-883
+    assert "twin jobs approve persona-" in done.output
     after = with_services(lambda s: get_holdout(s))
     assert after is not None and after.cutoff < before.cutoff and after.held_out_blocks == 6
     stats = with_services(collect_stats)

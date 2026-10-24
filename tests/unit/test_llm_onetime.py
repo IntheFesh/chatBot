@@ -174,6 +174,27 @@ def test_a_batch_above_the_one_time_limit_is_refused(db: Database, clock: Manual
         small.batches.enqueue("x", "replay", [], [])
 
 
+def test_r18_c3_jobs_of_another_type_can_join_a_waiting_batch(
+    db: Database, clock: ManualClock
+) -> None:
+    """R18-C3 ② (D-883): the export's new description joins the batch of its plans - one estimate,
+    one approval; an approved batch takes no new job and the limit counts both."""
+    small = Rig(db, clock, one_time_usd=5.0)
+    small.queue_batch("export-1", [1.0, 2.0])
+    small.batches.enqueue("export-1", "describe", [{"scope": "pre_holdout"}], [1.5], join=True)
+    assert small.batches.status("export-1").estimated_usd == pytest.approx(4.5)
+    with pytest.raises(BatchTooLargeError):
+        small.batches.enqueue("export-1", "describe", [{}], [0.6], join=True)
+    approval = small.batches.approve("export-1")
+    assert approval.job_count == 3 and approval.total_usd == pytest.approx(4.5)
+    assert {job.type for job in small.queue.list_jobs(batch_id="export-1")} == {
+        "replay",
+        "describe",
+    }
+    with pytest.raises(ValueError, match="approved already"):
+        small.batches.enqueue("export-1", "describe", [{}], [0.1], join=True)
+
+
 # ---------------------------------------------------------------------- approval
 
 

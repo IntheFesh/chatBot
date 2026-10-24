@@ -44,6 +44,16 @@ export range, since every prompt carries ``memory_view(t)``.  A gap stops the ex
 command that closes it; ``ExportOptions.allow_incomplete`` (``--allow-incomplete``) exports anyway,
 and the statistics of the dataset record what was missing (``derived_data``).
 
+*Built for this cut-off* (round 18, user decision, D-881/D-882; iron rule 13).  ``twin train
+export`` re-splits the hold-out first when the data has moved past it (the job,
+:mod:`twin.training.export_job`), and nothing derived from the pre-holdout data may be read under
+the old cut-off: the exporter refuses to start while the active pre-holdout profile, routine or
+card statistics were computed for another cut-off (:mod:`twin.profile.pre_holdout`).  A
+description generated for another cut-off ("stale") does not stop the first pass - the plans do
+not use the card - but the export waits for the new one, which the job plans inside the batch of
+the plans (one approval for both, D-883); ``--allow-incomplete`` writes the set with the stale one
+and records it.
+
 *Her state on waking.*  The prompt says she has just woken (``WOKE_UP_LINE``) when the user wrote
 while the routine had her deep asleep and she answers awake, and for a proactive sample in the
 greeting window after her sleep, as the engine and the greeting trigger do (D-644).  A plan
@@ -77,6 +87,7 @@ from twin.memory.replay import days_not_replayed
 from twin.profile.holdout import HoldoutError, holdout_cutoff
 from twin.profile.persona.refresh import has_description
 from twin.profile.persona.render import RenderedPersona
+from twin.profile.pre_holdout import PreHoldoutState, pre_holdout_state
 from twin.stickers.catalog import StickerCatalog
 from twin.stickers.incoming import user_sticker_lines
 from twin.training import lf_template
@@ -164,14 +175,24 @@ class DerivedGaps:
 
     days_not_replayed: tuple[date, ...]
     persona_description: bool
+    persona_description_current: bool = True  # generated for this cut-off (D-882)
 
     @property
     def complete(self) -> bool:
-        return not self.days_not_replayed and self.persona_description
+        return (
+            not self.days_not_replayed
+            and self.persona_description
+            and self.persona_description_current
+        )
 
     def problems(self) -> list[str]:
         found = []
         days = self.days_not_replayed
+        if not self.persona_description_current:
+            found.append(
+                "the [自动-描述] of the pre-holdout persona card was generated for an earlier "
+                f"hold-out cut-off; approve the batch the export planned or run {PERSONA_COMMAND}"
+            )
         if days:
             found.append(
                 f"{len(days)} days with messages in the export range ({days[0]} to {days[-1]}) "
@@ -189,13 +210,25 @@ class DerivedGaps:
             "complete": self.complete,
             "memory_days_not_replayed": len(self.days_not_replayed),
             "persona_description": self.persona_description,
+            "persona_description_current": self.persona_description_current,
         }
 
 
-def derived_gaps(services: Services, since: datetime | None, until: datetime | None) -> DerivedGaps:
-    """The local days with messages in ``[since, until)`` that the replay has not done, and
-    whether the pre-holdout card has its description (dates and a yes or no; no text)."""
-    return DerivedGaps(days_not_replayed(services, since, until), has_description(services, SCOPE))
+def derived_gaps(
+    services: Services,
+    since: datetime | None,
+    until: datetime | None,
+    state: PreHoldoutState | None = None,
+) -> DerivedGaps:
+    """The local days with messages in ``[since, until)`` that the replay has not done, whether
+    the pre-holdout card has its description and whether that one was generated for the cut-off
+    in force (dates and yes or no; no text)."""
+    found = state or pre_holdout_state(services)
+    return DerivedGaps(
+        days_not_replayed(services, since, until),
+        has_description(services, SCOPE),
+        found.description != "stale",
+    )
 
 
 @dataclass
@@ -207,6 +240,7 @@ class ExportResult:
     stats: dict[str, Any] = field(default_factory=dict)
     missing_plans: dict[str, PlanInput] = field(default_factory=dict)
     plan_selected: int = 0
+    describe: bool = False  # the pre-holdout description must be generated for this cut-off
 
 
 class ExportPromptBuilder(StylePromptBuilder):
@@ -296,15 +330,33 @@ class TrainingSetExporter:
             raise ExportError(
                 "there is no pre-holdout profile or routine; run `twin profile rebuild` first"
             )
+        state = pre_holdout_state(self._services)
+        if not state.profile_current or not state.card_current:  # never read the old cut-off's
+            waiting = (
+                f" (still queued: {', '.join(state.waiting)}; the export waits for them)"
+                if state.waiting
+                else ""
+            )
+            problems = state.stale() or [
+                "the pre-holdout data is being rebuilt for the cut-off "
+                f"{state.cutoff:%Y-%m-%d %H:%M} UTC"
+            ]
+            raise ExportError("; ".join(problems) + waiting)
         options = self._options
-        self._gaps = derived_gaps(self._services, options.since, options.until)
-        if not self._gaps.complete and not options.allow_incomplete:
+        self._gaps = derived_gaps(self._services, options.since, options.until, state)
+        blocking = replace(self._gaps, persona_description_current=True)  # waited for, not refused
+        if not blocking.complete and not options.allow_incomplete:
             raise ExportError(
                 "the derived data of the export is incomplete: "
-                + "; ".join(self._gaps.problems())
+                + "; ".join(blocking.problems())
                 + f". To export anyway, add {ALLOW_INCOMPLETE_OPTION} "
                 "(the statistics of the dataset record what was missing)"
             )
+
+    @property
+    def description_pending(self) -> bool:
+        """The description of the pre-holdout card was generated for another cut-off (D-882)."""
+        return not self._gaps.persona_description_current and not self._options.allow_incomplete
 
     def _persona_card(self) -> RenderedPersona:
         card = self._source.compact
@@ -445,12 +497,20 @@ class TrainingSetExporter:
         plan even when no other sample does (D-643).
         """
         missing, selected = self.scan()
-        if missing:
-            return ExportResult("waiting_for_plans", missing_plans=missing, plan_selected=selected)
+        describe = self.description_pending
+        if missing or describe:
+            return ExportResult(
+                "waiting_for_plans",
+                missing_plans=missing,
+                plan_selected=selected,
+                describe=describe,
+            )
         return self.build()
 
     def build(self) -> ExportResult:
         """The second pass: compose, desensitise, split, scan and write the dataset directory."""
+        if self.description_pending:
+            raise ExportError("; ".join(self._gaps.problems()))
         services = self._services
         now = services.clock.now_utc()
         version = f"ds-{now:%Y%m%d-%H%M%S}"
