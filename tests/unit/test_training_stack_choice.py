@@ -634,3 +634,4 @@ def test_a_missing_or_odd_validation_loss_is_not_a_number_to_show(services: Serv
 def test_preference_checks_say_what_they_are() -> None:
     check = PreferenceCheck(STAT_IMPLICIT, 0, None, None, "sft")
     assert not check.passed and check.to_json()["interval"] is None
+    assert check.line() == "  preference: no held-out preference pairs were scored"

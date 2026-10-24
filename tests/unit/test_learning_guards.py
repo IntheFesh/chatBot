@@ -45,11 +45,9 @@ READERS_OF_PAIRS = {
     "learning/sample.py",
     "learning/corrections.py",
     "commands/learn_commands.py",
-    "commands/status_extras.py",
     "commands/router.py",
     "engine/component.py",
     "training/dpo_export.py",
-    "training/cli.py",
     "storage/migrations/env.py",
 }
 PAIR_NAMES = {"PreferencePair", "PreferencePairStore", "PairRecord"}
@@ -117,7 +115,9 @@ def test_the_sft_export_modules_never_import_the_learning() -> None:
 
 def test_the_dpo_export_is_the_one_training_module_that_reads_the_pairs() -> None:
     readers = {r for r in modules_naming_the_pairs() if r.startswith("training/")}
-    assert readers == {"training/dpo_export.py", "training/cli.py"}
+    # round 18 (D-860): the CLI counts the pairs through dpo_pair_counts, a helper of
+    # twin.learning.pairs, and no longer names the store itself
+    assert readers == {"training/dpo_export.py"}
     assert ("twin.learning.pairs", "PreferencePairStore") in imports_of(
         SRC / "training/dpo_export.py"
     )

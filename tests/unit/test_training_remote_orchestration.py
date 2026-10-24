@@ -307,11 +307,23 @@ async def test_a_train_job_that_fails_is_a_failed_step_and_reads_nothing(rig: Ri
 
 
 async def test_dpo_says_which_model_was_the_reference(rig: Rig) -> None:
-    reference = {"reference": "sft", "fallback": False, "reference_quantization_bit": 4}
+    reference = {
+        "reference": "sft",
+        "fallback": False,
+        "reference_quantization_bit": 4,
+        "pairs": 160,
+        "held_out_pairs": 40,
+        "after_cutoff_pairs": 3,
+    }
     rig.session.handle.texts[f"{ARTIFACTS}/{DPO_REFERENCE_FILE}"] = json.dumps(reference)
     assert (await rig.steps.dpo(RUN)).ok
     assert record(rig, "dpo")["reference"] == "sft"
+    assert record(rig, "dpo")["held_out_pairs"] == 40  # R18-E6 (D-861)
     assert any("explicit, 4-bit" in line for line in rig.echoed)
+    assert any(
+        "trained on 160 preference pairs; 40 held out for the stack choice; 3 made after" in line
+        for line in rig.echoed
+    )
 
 
 async def test_dpo_without_a_reference_record_was_skipped_and_says_nothing(rig: Rig) -> None:

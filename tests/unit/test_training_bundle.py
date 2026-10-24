@@ -346,6 +346,13 @@ def test_the_held_out_pairs_travel_in_the_bundle_but_are_no_dataset_of_the_train
 def test_held_out_pairs_without_pairs_to_train_on_are_refused(tmp_path: Path) -> None:
     with pytest.raises(DatasetError, match="need pairs to train on"):
         write_synthetic_dataset(tmp_path / "ds", pairs=0, held_out=1)
+    write_synthetic_dataset(tmp_path / "ok", pairs=1, held_out=1)
+    meta_path = tmp_path / "ok" / "dataset_meta.json"
+    meta = json.loads(meta_path.read_text("utf-8"))
+    meta["counts"]["dpo"] = 0  # a metadata file that says so is refused when it is read
+    meta_path.write_text(json.dumps(meta), "utf-8")
+    with pytest.raises(DatasetError, match="need pairs to train on"):
+        load_dataset_dir(tmp_path / "ok")
 
 
 def test_the_bundle_uses_the_work_directory_and_the_dpo_minimum_it_is_given(
