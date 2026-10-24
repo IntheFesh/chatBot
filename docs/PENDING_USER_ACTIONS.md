@@ -95,7 +95,7 @@
      6. 第 3 步（窗口，约 25 小时）：先发一条新消息，**此后约 25 小时内不要给机器人发任何消息**，否则这一步作废，终端会告诉你并要求你再发一条消息重做。你发出那条消息之后约 1、6、12、20、23、25 小时，手机上各会收到一条 `[测试] 窗口测试 …`（条数不够时只保留靠后的测量点，报告会写明省略了哪些）。窗口 A 和电脑要一直开着。最后一条之后用 `probe answer` 回答共收到几条。
      7. 全部做完后：`uv run twin channel probe report`。
    - 对账（很重要）：程序提问时给出的是"服务器接受了几条"，你回答的是**你的手机聊天窗口里实际看到几条**，以你的回答为准。接口返回成功不一定等于手机收到（社区报告过缺 token 时接口"成功"但消息不推送，打开聊天窗口才出现）；两个数字不一致时报告里标"**不一致**"，并按手机上的数算。拿不准就打开 ClawBot 聊天窗口往上翻着数，只数以 `[测试] 条数测试`（或 `[测试] 窗口测试`）开头的消息；不要数 `[测试] 通道探针` 开头的提示消息。
-   - 预期：`probe status` 最终显示 `completed`；`probe report` 写出 `docs/CHANNEL_REPORT.md`（只含测量结果与时间，文件头是 `channel-report: measured`），打印判定，并逐项显示"当前 → 建议"的 `channel.proactive_window_safe_h`（窗口下限 ×0.9）与 `channel.outbound_quota_safe`（N ×0.9），**问你是否写入 `config/config.yaml`**——回答 `n` 则不改任何配置，之后想改也可以重新运行 `probe report`。每次失败的 `ret`、`errcode`、`errmsg`（已脱敏）都在报告的失败表里，请原样保留。
+   - 预期：`probe status` 最终显示 `completed`；`probe report` 写出 `docs/CHANNEL_REPORT.md`（只含测量结果与时间，文件头是 `channel-report: measured`），打印判定，并逐项显示"当前 → 建议"的 `channel.proactive_window_safe_h`（窗口下限 ×0.9）与 `channel.outbound_quota_safe`（N ×0.9），以及计数/窗口两步里平台拒绝发送时回的 code 作为 `channel.session_expired_codes` 的建议值（默认 `[-2]` 只是社区说法，这是它“M0 实测后填写”的那一步；第 18 轮 D-905），**问你是否写入 `config/config.yaml`**——回答 `n` 则不改任何配置，之后想改也可以重新运行 `probe report`。每次失败的 `ret`、`errcode`、`errmsg`（已脱敏）都在报告的失败表里，请原样保留。
    - 如果报告写"**未达标**"（窗口 < 12 小时，或一次入站后手机上收到的连发条数 < 3）：`probe report` 以退出码 1 结束并打印 `STOP`，这是提示词要求的"停下来告诉我"——主动消息（第 10 轮）依赖这两个条件。把报告发给维护者，由你决定下一步；企业微信通道不在本规格范围，需要你确认后另开一轮。"无法判定"表示某项没测到或测的点不足以下结论（报告写明缺什么），不算通过，补测即可。
    - 中途想放弃：`uv run twin channel probe stop`（已测到的保留，`probe report` 照样能出一份"未做完"的报告）。窗口测试被打断或网络断了，探针自己会作废那次尝试并要求你再发一条消息重做（每步最多 10 次）。
    - 提交 `docs/CHANNEL_REPORT.md`（只含技术结果，不含任何对话内容）；第 09b 轮的 `twin eval gate M0` 读取数据库里的同一份结果（`settings` 键 `m0.channel_probe`，格式见 `docs/DECISIONS.md` D-158）。
@@ -110,7 +110,7 @@
 
 1. **先看结构：对真实导出运行 `twin import inspect`（本轮最重要的一步）**
    - 做什么：`uv run twin import inspect "<你的导出目录>"`（目录名含中文也没关系，给引号）。大导出可加 `--sample 20000` 多看一些消息；默认每个 `messages.json` 看前 5000 条。
-   - 预期：终端打印并保存 `data/reports/inspect-<UTC时间>.md`。**报告里只有结构，不含任何值**：文件树（会话文件夹显示成 `序号_昵称字数_哈希前4位`）、`report.json` / `meta.json` / `messages.json` 的键名与值类型和出现次数、`renderType` / `type` / `offlineMedia[].kind` 等枚举字段的取值计数、`_integrity/` 的文件清单和 JSON 键名。报告里不应出现任何消息文字、昵称、wxid、媒体文件名；如果你发现有，请不要贴出来，告诉我是哪一行。
+   - 预期：终端打印并保存 `data/reports/inspect-<UTC时间>.md`。**报告里只有结构，不含任何值**：文件树（会话文件夹显示成 `序号_昵称字数_哈希前4位`）、`report.json` / `meta.json` / `messages.json` 的键名与值类型和出现次数、`renderType` / `type` / `offlineMedia[].kind` 等枚举字段的取值计数、`_integrity/` 的文件清单和 JSON 键名；另有一节"导出文字时区"：由抽样消息的 `createTime` 与 `createTimeText` 推断出的导出设备时区，推断不出时列出时差分布请你确认（它与 `time.source_timezone`——她在哪——无关，D-900）。报告里不应出现任何消息文字、昵称、wxid、媒体文件名；如果你发现有，请不要贴出来，告诉我是哪一行。
    - 然后：把这份报告整个贴回给我。我据此核对四件事，有出入先告诉你再继续：
      1. SPEC R-IMP-002 的字段表和 `src/twin/ingest/schema.py`（是否有字段缺失、类型不同——例如 `createTime` 是秒还是毫秒，`isSent` 是布尔还是 0/1，`voiceLength` 的单位）；
      2. `offlineMedia[].kind` 的真实取值（`src/twin/ingest/normalize.py::classify_media` 目前按名字里含 image / emoji / avatar / thumb / cover / voice / video / file 归类，没见过的名字会被跳过并计数）；
@@ -123,14 +123,14 @@
    - 预期：格式被识别后，导入报告里会有"完整性校验（_integrity）：读到 N 条记录；messages.json ok；媒体通过 X，失败 0，未列入清单 Y"。校验失败的文件不会被导入（`messages.json` 失败则整次导入中止并报错）。
 
 3. **配置并首次导入**
-   - 做什么：在 `config/config.yaml` 里设置 `paths.export_dir`（全量导出目录，不要放进仓库），确认 `time.source_timezone` 是 `createTimeText` 所用的时区（芝加哥导出就保持默认；如果一段时间在国内导出，用 `time.source_timezone_ranges`，见 SPEC R-CFG-004）。然后：
+   - 做什么：在 `config/config.yaml` 里设置 `paths.export_dir`（全量导出目录，不要放进仓库），确认 `time.source_timezone` 是**她所在的时区**（默认芝加哥；她某段时间在国内时用 `time.source_timezone_ranges` 按日期区间指定，见 SPEC R-CFG-004）。导出里的 `createTimeText` 是导出设备的时钟，它的时区由导入从 `createTime` 与 `createTimeText` 的差值自动推断，与这两项配置无关，不用为它改配置（第 18 轮，D-900）。然后：
      ```
      uv run twin db upgrade
      uv run twin import "<导出目录>" --foreground
      ```
      （应用在运行时去掉 `--foreground`，命令会入队后立即返回，用 `uv run twin import status --watch` 看进度。）
    - 预期：首次导入会列出**所有一对一会话**（昵称、消息数、打码的 wxid），让你输入编号选目标会话，选择写入运行时设置 `target.username`（`twin settings list` 里显示为打码）。群聊不会被列出。随后看到进度条（阶段 messages → media → stickers → finalize → hooks），最后打印导入报告并保存到 `data/reports/import-<UTC时间>.md`。报告不含任何消息文字和 wxid。
-   - 请核对报告：①"按类型与发送方计数"里"她"和"用户"没有互换（`isSent=false` 是她）；②"日期范围"和你的记忆吻合；③"数据质量提示"里**没有**"createTime 与 createTimeText 相差超过一小时"（有的话说明 `time.source_timezone` 不对，改好后重新导入，幂等）；④"无法导入"为 0 或很小。把统计部分（不含正文）贴给我。
+   - 请核对报告：①"按类型与发送方计数"里"她"和"用户"没有互换（`isSent=false` 是她）；②"日期范围"和你的记忆吻合；③"导出文字时区"一节写着推断出的导出设备时区（例如 `America/Chicago`，全部消息吻合）；若写"推断不出"并列出时差分布，请确认导出是否合并自不同时区的设备，把那一节贴给我——存储的时间以 `createTime` 为准，不受影响，也**不要**因此去改 `time.source_timezone`（她在哪由第 04 轮的作息合理性检查核对，D-902）；④"无法导入"为 0 或很小。把统计部分（不含正文）贴给我。
 
 4. **续传与增量**
    - 做什么：在导入进行中按 Ctrl+C（或关掉窗口），再运行 `uv run twin import --resume --foreground`；以后有新导出时再次 `uv run twin import "<新导出目录>"` 即可（按消息 id 去重，新导出里改过的消息按 `exportedAt` 较新者为准）。
@@ -156,7 +156,7 @@
 沙箱里没有真实聊天记录，画像与作息只用 `tests/support/synth_chat.py` 生成的、带**已知规律**的合成数据（她 01:00–08:30 不发消息、工作日 13:00–17:00 回复慢、每天先开口 4 次、逗号率 3% 等）和 SPEC §0 的小时向量验证过。下面这些要在你自己的电脑上、用真实数据做一遍：
 
 1. **回填一次画像与作息（验收命令）**
-   - 做什么：确认真实数据已按第 03 轮导入，且 `time.source_timezone` 与导出里 `createTimeText` 所用的时区一致（第 03 轮导入报告里"createTime 与 createTimeText 相差超过一小时"一栏为空即可）。然后
+   - 做什么：确认真实数据已按第 03 轮导入，且 `time.source_timezone`（及 `time.source_timezone_ranges`）写的是她各段时间所在的时区（与导出文字的时区无关，D-900）。然后
      ```
      uv run twin profile rebuild --scope all --foreground
      ```
@@ -166,7 +166,7 @@
 
 2. **确认推断出的睡眠时段（本轮最重要的一步）**
    - 做什么：`uv run twin profile show`，看"作息概览（当地时间）"：睡眠（工作日/周末分别）、忙碌时段、每天先开口次数、置信度。
-   - 预期：睡眠时段是你熟悉的她的作息。**如果输出里有以 `!!!` 开头的红色警告**，说明推断出的睡眠核心落在当地白天 10:00–18:00，几乎一定是 `time.source_timezone`（或 `time.source_timezone_ranges`）与导出的时区不一致——先改配置再重新运行第 1 步，不要用 `routine add` 去掩盖。
+   - 预期：睡眠时段是你熟悉的她的作息。**如果输出里有以 `!!!` 开头的红色警告**，说明推断出的睡眠核心落在当地白天 10:00–18:00：整体（"推断的睡眠核心（全部日子）…"）落在白天，几乎一定是 `time.source_timezone` 不是她所在的时区；警告只点名某几个月（"2025-03 按 America/Chicago 读，她的睡眠低谷核心…落在当地白天…请核对 time.source_timezone_ranges"），说明那几个月她在别处，而 `time.source_timezone_ranges` 没写或写错了日期/时区（D-902）。先改配置再重新运行第 1 步，不要用 `routine add` 去掩盖（手动睡眠时段也不会让按月的警告消失）。
    - 不对但时区没问题：用手动修正（优先于推断，立即生效，不需要重算；与第 11 轮的微信指令共用同一个存储）：
      ```
      uv run twin routine add sleep 01:00 08:30                      # 所有日子
@@ -479,7 +479,7 @@
    - `uv run twin eval gate M1`：最近一次包含当前默认后端的盲测，有效判断 ≥ 50 且猜对率点估计 ≤ 70%。
    - `uv run twin eval gate M2`：最近一次完成复核的记忆测试，总分 ≥ 80% 且构成完整。
    - `M3`、`M4`、`M5` 现在打印“该门槛在第 NN 轮接入”并退出码 2（后续轮次接入判定）。
-   - 退出码：0 通过、1 未通过（含样本不足）、2 尚未接入或未判定；`--check` 只读最近一次存下的结论，不重新判定也不写入。每次判定（不含 `--check`）在 `eval_runs`（`kind=gate`）里留一条带证据的记录；后续轮次开工前都会先 `twin eval gate <上一个里程碑> --check`。
+   - 退出码：0 通过、1 未通过（含样本不足；`--check` 时还没有判定记录也是 1）、2 只在该里程碑的判定器尚未接入时出现（第 09b 轮时的 M3–M5；M0–M5 现已全部接入，第 18 轮 F11 订正）；`--check` 只读最近一次存下的结论，不重新判定也不写入。每次判定（不含 `--check`）在 `eval_runs`（`kind=gate`）里留一条带证据的记录；后续轮次开工前都会先 `twin eval gate <上一个里程碑> --check`。
    - 请把 M0、M1、M2 三条命令的输出发给我。
 
 7. **没有做、也不属于这一步的**
@@ -767,3 +767,31 @@
 4. **Windows 上跑场景测试与网络守卫**
    - `uv run pytest -q -m integration tests/integration/life`（14 个端到端场景，约 4 分钟）和 `uv run pytest -q tests/unit/test_network_guard.py tests/unit/test_time_coverage_scan.py`。预期全部通过。场景里"进程被杀"用的是取消全部任务，并不依赖 POSIX 信号；网络守卫在 Windows 上同时补了事件循环的 `sock_connect`（Proactor 不调用 `socket.connect`）。
    - 如果哪个失败，请把测试名和输出发给我。
+
+## 第 17 轮 —— 全面复核修复（汇总：需要你手动做的事）
+
+第 17 轮的改动分散写在上面各轮的小节里（标着“第 17 轮”）；这里只把**要你动手**的事汇总一遍，细节见括号里的 DECISIONS 条目（第 18 轮项 F11 补写本节）。
+
+1. **重新导出训练集**（D-640、D-642）：美国手机号紧跟句号时没有被脱敏、她先开口的块现在也是训练样本——第 17 轮之前导出的数据集要重新 `uv run twin train export`。第 18 轮（D-840）还要求再导一次，两件事合并成一次即可，见下一节第 3 条。
+2. **DPO 的参考模型**（D-650 至 D-657）：`5090-14b` 上 `dpo.sh` 先用最长的偏好对试跑 1 步；看日志是 `DPO trial step succeeded` 还是退回基座参考，把那几行发给我（第 13 轮 13a 节）。
+3. **表情包是否被认出**（D-690）：`twin channel listen` 时发两张你的表情包，看 `library=` 一栏（第 02 轮）。
+4. **两条命令变成重任务**（D-713）：`uv run twin memory reindex`、`uv run twin train export-dpo` 现在排进队列由运行中的应用执行；应用没在运行时加 `--foreground`。
+5. **时区切换前后的机器人摘要**（D-732）：第 17 轮之前做过时区切换的，对切换前一天、当天、后一天各运行一次 `uv run twin memory summarize <日期> --scope bot --force`（重任务，排队等非高峰），把日期标错的摘要重做。
+6. **按同一份日历重算**（D-733、D-734）：升级后运行 `uv run twin profile rebuild` 与 `uv run twin retrieval rebuild`，画像、作息与示例窗口才按含 `pricing.extra_peak_dates` / `extra_offpeak_dates` 与手动节假日的日历、按日类型分开的回复延迟重算（RUNBOOK 第 4 章）。
+7. **文件凭据库只给开发用**（D-744）：Windows 上不要设 `TWIN_KEYRING_BACKEND=file`；第 18 轮起除 `twin doctor` 外一律拒绝，见下一节第 2 条。
+
+## 第 18 轮 —— 全面审计修复（汇总：需要你手动做的事）
+
+同上，细节在各轮小节与括号里的 DECISIONS 条目中（第 18 轮项 F11 补写本节）。
+
+1. **她同意的日期**（D-825）：`consent.confirmed_at` 没有默认值。运行 `uv run twin setup`，确认她已知情同意后写入日期（2026-10-08）；缺失时除 `twin setup`、`twin doctor`（以及停止与删除）外的命令都以退出码 3 拒绝（第 00 轮第 5 条）。
+2. **文件凭据库迁走**（D-827、D-828）：如果你在 Windows 上设过 `TWIN_KEYRING_BACKEND=file`，先 `uv run twin service stop`，再 `uv run twin secrets migrate` 把全部条目（含已退役的数据库密钥）迁入 Windows 凭据管理器，然后去掉这个环境变量；`twin doctor` 发现问题时会提示。
+3. **重新导出、重训、重跑 M5**（D-840）：你发的表情包与引用在线上、训练集与评估沙盒里统一成一种写法。导出前 `uv run twin stickers tag-all`，然后 `twin train export` → `bundle` → `remote all`，再 `uv run twin eval gate M5`；第 18 轮之前的盲测结果是旧写法下测的（第 13 轮 13b 节）。
+4. **留出切分点**（D-818）：导入报告或 `twin profile show` 提示“留出切分点落后于数据”时，按提示处理（第 13 轮 13b 节）。
+5. **就绪之前机器人不开口**（D-870 至 D-873）：live 画像、作息模型和带描述的人设卡都存在之后才回复与主动；之前你发的消息先存下，会收到一条 ⚙️ 系统消息说明缺什么。按第 03–06 轮做完导入、画像、人设卡，用 `/状态` 或 `uv run twin health`（`readiness` 一行）确认“已就绪”。
+6. **应用没运行时的第一次使用**（D-826）：`uv run twin import "<目录>" --foreground` 之后 `uv run twin jobs run --until-idle`，它会等画像与人设卡统计跑完并列出等批准的批次。
+7. **Key 失效或余额用完之后**（D-795）：后台任务会交还队列等一小时再试；换好 Key（`twin secrets set deepseek_api_key`）或充值后，可以 `uv run twin jobs retry --failed` 立即重试已失败的任务。
+8. **区间交界日回放一次**（D-782）：配置了 `time.source_timezone_ranges` 的，下一次记忆回放扫描会把区间交界的几天当作“changed”再回放一次（一次性的 DeepSeek 费用），之后稳定；批准那个批次即可。
+9. **导出文字时区与她在哪**（D-900 至 D-903）：`time.source_timezone`（及 `source_timezone_ranges`）只写她各段时间在哪。`twin import inspect` 与导入报告的“导出文字时区”一节显示从导出本身推断出的导出设备时区；写“推断不出”时把那一节的时差分布发给我。`twin profile show` 若有点名月份的 `!!!` 警告（“2025-03 按 America/Chicago 读……请核对 time.source_timezone_ranges”），说明那几个月她在别处而区间没写或写错了（第 03、04 轮）。
+10. **会话过期码**（D-905）：做第 02 轮的 M0 通道探针后，`twin channel probe report` 会把计数/窗口两步里平台拒绝时回的 code 建议为 `channel.session_expired_codes`（默认 `[-2]` 只是社区说法）；确认后写入。
+11. **训练实例的数据盘**（D-811）：14B 档（`5090-14b`、`pro6000-14b`）扩到 115 GB（1 GB = 10^9 字节；第 13 轮 13a 节）。

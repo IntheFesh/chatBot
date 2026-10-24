@@ -169,6 +169,7 @@ uv run twin channel probe status         # 随时看进度和该做什么
 uv run twin channel probe answer         # 回答“手机上实际收到几条”“GIF 在动吗”“看到正在输入吗”
 uv run twin channel probe report         # 写 docs\CHANNEL_REPORT.md，并问你是否把建议值写入配置
                                          # 报告里有“GIF 与静态首帧”：GIF 在手机上不动而 PNG 能显示时会建议 stickers.gif_send_mode: first_frame（只发静态首帧；旧库先 uv run twin stickers first-frames）
+                                         # 平台在计数/窗口两步里拒绝发送时回的 code 会建议为 channel.session_expired_codes（默认 [-2] 只是社区说法，D-905）
 uv run twin channel probe stop           # 中途放弃（已测到的保留）
 ```
 
@@ -194,11 +195,11 @@ uv run twin import "D:\你的导出目录" --foreground
 uv run twin jobs run --until-idle
 ```
 
-1. `twin import inspect` 只输出**结构**（文件树、每个 JSON 的键名与类型、`renderType` 取值计数、`_integrity/` 清单），**不含任何值**，写 `data\reports\inspect-<UTC>.md`。大导出可加 `--sample 20000`。目录名含中文没关系，加引号。
+1. `twin import inspect` 只输出**结构**（文件树、每个 JSON 的键名与类型、`renderType` 取值计数、`_integrity/` 清单），**不含任何值**，写 `data\reports\inspect-<UTC>.md`；另有一节“导出文字时区”：由抽样消息的 `createTime` 与 `createTimeText` 推断出的导出设备时区，推断不出时列出时差分布请你确认（它与 `time.source_timezone`——她在哪——无关，D-900）。大导出可加 `--sample 20000`。目录名含中文没关系，加引号。
 2. `twin import <目录>`（等同 `twin import start <目录>`）默认入队后立即返回，由运行中的应用执行；应用没在运行时命令会这样提示，加 `--foreground` 在本窗口里跑（带进度条）。`--foreground` 只执行导入本身（D-144）：画像与作息、检索库、人设卡统计等导入后钩子排进队列的作业，用 `twin jobs run --until-idle` 跑完——它会等候“等另一个作业”的作业（人设卡统计要等画像重算完），最多几分钟，并在结束时列出等批准的批次和批准命令（D-826）。第一次会列出非群聊会话让你选目标（`--target 2` 或 `--yes` 在只有一个候选时直接选），选择记入 `target.username`。群聊一律跳过，其他会话不读取内容。
 3. `twin import status` 显示阶段、已处理条数、速度、预计剩余时间与各导入后钩子的进度。中断后 `twin import --resume` 从断点继续。结构化导入 100 万条目标 < 30 分钟（不含下载与 LLM 任务）。
 
-导入报告（不含任何消息正文）在终端和 `data\reports\import-<UTC>.md`：按类型与发送方计数、日期范围、新增/重复/冲突、缺失媒体、表情包下载统计、风格指标变化。
+导入报告（不含任何消息正文）在终端和 `data\reports\import-<UTC>.md`：按类型与发送方计数、日期范围、导出文字时区（按全部消息推断；缺 `createTime` 的消息按它还原，D-901）、新增/重复/冲突、缺失媒体、表情包下载统计、风格指标变化。
 
 ### 3.2 导入之后自动排队的事，和单独的回填命令
 
@@ -254,7 +255,7 @@ uv run twin profile phrases              # 她的高频整句、字组、称呼�
 uv run twin profile rollback <版本>       # 切回旧版本（连同当时的作息模型）
 ```
 
-`profile show` 会请你**确认推断出的睡眠时段**。推断的睡眠核心如果落在当地白天（10:00–18:00），会有醒目警告和一条告警：多半是 `time.source_timezone`（导出里 `createTimeText` 的时区）设错了；她某段时间在国内时用 `time.source_timezone_ranges` 按日期区间指定，改完 `twin profile rebuild`。
+`profile show` 会请你**确认推断出的睡眠时段**。推断的睡眠核心如果落在当地白天（10:00–18:00），会有醒目警告和一条告警：多半是 `time.source_timezone`（她所在的时区）设错了；警告只点名某几个月时，说明那几个月她在别处，用 `time.source_timezone_ranges` 按日期区间指定（D-902；导出里的 `createTimeText` 是导出设备的时钟，说明不了她在哪，D-900），改完 `twin profile rebuild`。
 
 回复延迟按日类型（工作日 / 周末 / 节假日）分开学，日类型与日程用的是同一份日历（含 `pricing.extra_peak_dates` / `extra_offpeak_dates` 和手动节假日区间）。升级后、或改了这些日期之后，运行 `uv run twin profile rebuild` 与 `uv run twin retrieval rebuild`，已存下的画像、作息模型和示例窗口才会按新日类型重算。
 
@@ -498,10 +499,12 @@ uv run twin ops drill network              # 打印断网演练的步骤（观�
 ### 7.6 里程碑门槛
 
 ```powershell
-uv run twin eval gate M1                   # 判定并把结果与证据写入 eval_runs；退出码 0 通过、1 未通过、2 尚未达到
+uv run twin eval gate M1                   # 判定并把结果与证据写入 eval_runs；退出码见下
 uv run twin eval gate M1 --check           # 只读最近一次存下的结论，不重新判定
 uv run twin eval runs --kind gate          # 评估与门槛记录
 ```
+
+退出码：0 通过；1 未通过——包括样本不足（insufficient，例如盲测有效判断不到 50、观察期未满）和 `--check` 时还没有判定记录；2 只在该里程碑的判定器还没接入时出现（M0–M5 现已全部接入，正常安装不会出现 2）。
 
 门槛的值来自 SPEC §26，**不得为了通过而降低或改统计口径**；没过就留在该阶段继续改进。M0–M5 的内容见第 13 章。
 
@@ -697,7 +700,7 @@ uv run twin purge --all
 
 ## 13. M0–M5 里程碑清单
 
-每个里程碑过关后再进下一个；`uv run twin eval gate M<n>` 读取最新评估结果判定（0 通过、1 未通过、2 尚未达到），`--check` 只读已存结论。**沙箱里没有真实数据、微信、Key 和 GPU，下面每一项都还没有在真实环境里执行过，状态都是“待用户执行”**——没有任何探针结果、盲测结果或门槛记录是伪造的。每一项的详细做法按轮次写在 [`PENDING_USER_ACTIONS.md`](PENDING_USER_ACTIONS.md)。
+每个里程碑过关后再进下一个；`uv run twin eval gate M<n>` 读取最新评估结果判定（0 通过；1 未通过，含样本不足；2 只在判定器尚未接入时出现，见 7.6 节），`--check` 只读已存结论。**沙箱里没有真实数据、微信、Key 和 GPU，下面每一项都还没有在真实环境里执行过，状态都是“待用户执行”**——没有任何探针结果、盲测结果或门槛记录是伪造的。每一项的详细做法按轮次写在 [`PENDING_USER_ACTIONS.md`](PENDING_USER_ACTIONS.md)。
 
 > ## 注意：R-CH-010 风险——ClawBot 能不能在窗口外主动推送，要等真实的 M0 探针才知道
 >
@@ -748,7 +751,7 @@ uv run twin purge --all
 | `twin eval blind` | 轻量修改 | Blind test: pick which of two replies is hers (R-EVAL-001). |
 | `twin eval consistency` | 轻量修改 | Consistency audit: DeepSeek lists contradictions, you decide which are real (R-EVAL-004). |
 | `twin eval cost` | 轻量修改 | Month cost of the daily account against the 15 dollar line; one-time batches are listed apart (R-EVAL-007). |
-| `twin eval gate` | 轻量修改 | Judge a milestone; exit code 0 passed, 1 not passed, 2 not reached yet (R-EVAL-010). |
+| `twin eval gate` | 轻量修改 | Judge a milestone: exit 0 passed, 1 not passed or insufficient, 2 no judge (R-EVAL-010). |
 | `twin eval memory` | 轻量修改 | Memory test: twenty questions from the fact store, judged and reviewed (R-EVAL-003). |
 | `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant. |
 | `twin eval report` | 轻量修改 | The summary report of the stored M0–M5 and measure results (R-EVAL-008). |
