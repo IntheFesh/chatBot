@@ -129,10 +129,6 @@ class Table:
 Leaf = Scalar | Rates | Dist | Hourly | Table
 
 
-def leaf_to_json(leaf: Leaf) -> dict[str, Any]:
-    return leaf.to_json()
-
-
 def leaf_from_json(data: Mapping[str, Any]) -> Leaf:
     tag = data["t"]
     if tag == "s":

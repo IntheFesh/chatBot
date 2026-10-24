@@ -84,10 +84,6 @@ class InvalidRequestError(ApiError):
     """400 or 422: the request itself is wrong.  Not retried."""
 
 
-class EmptyResponseError(ApiError):
-    """The API returned no content (it occasionally does in JSON mode)."""
-
-
 class CircuitOpenError(LlmError):
     """The circuit breaker is open: DeepSeek failed repeatedly, calls are refused for a while."""
 

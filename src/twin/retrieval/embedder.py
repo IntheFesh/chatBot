@@ -30,7 +30,7 @@ import os
 import re
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
@@ -451,7 +451,3 @@ def cpu_speed_warning(config: RetrievalConfig, device: str, texts: int | None) -
         f"{amount} may take hours.  Use the small model (retrieval.model), or run on a computer "
         "with an NVIDIA GPU (retrieval.device: cuda)"
     )
-
-
-def info_to_json(info: EmbedderInfo) -> dict[str, Any]:
-    return asdict(info)

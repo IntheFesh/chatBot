@@ -55,10 +55,6 @@ DROPPED_REPEAT = "repeat"
 DROPPED_OVER_LIMIT = "over_limit"
 
 
-class ConsistencyError(RuntimeError):
-    """The audit cannot be made or its result cannot be used."""
-
-
 # ------------------------------------------------------------------------- the evidence
 
 
