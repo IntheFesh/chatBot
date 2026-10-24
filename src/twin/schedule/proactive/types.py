@@ -74,6 +74,7 @@ class Reason(StrEnum):
     PROBE_RUNNING = (
         "probe_running"  # a channel probe is measuring: nothing else may be sent (D-684)
     )
+    NOT_READY = "not_ready"  # her profile, routine or persona card is missing yet (D-872)
     DISABLED = "disabled"
     WINDOW_CLOSED = "window_closed"  # the platform window is over (or never began)
     QUOTA_EXHAUSTED = "quota_exhausted"  # no message is left in the platform's count
@@ -114,7 +115,10 @@ OUTSIDE_REASONS = frozenset(
 """Reasons the schedule cannot help: a day short of its range is excused by them (R-EVAL-005).
 
 The platform window and count, the login, a pause or the switch, a running channel probe, the
-budget, and a user who does not answer (the chase limit stops her from writing again and again)."""
+budget, and a user who does not answer (the chase limit stops her from writing again and again).
+``not_ready`` is none of them (D-872): a day before the bot is ready is no day of the schedule at
+all - the scheduler opens it with ``enabled`` false, like a day with the switch off, so the audit
+does not count it as an observation day."""
 
 REASON_LABELS: Mapping[str, str] = {
     Reason.DEEP_SLEEP: "她在深睡",
@@ -127,6 +131,7 @@ REASON_LABELS: Mapping[str, str] = {
     Reason.CHASE_LIMIT: "已追发到上限",
     Reason.PAUSED: "暂停中",
     Reason.PROBE_RUNNING: "通道探针运行中",
+    Reason.NOT_READY: "未就绪（缺画像/作息模型/人设卡）",
     Reason.DISABLED: "主动消息已关闭",
     Reason.WINDOW_CLOSED: "被窗口抑制",
     Reason.QUOTA_EXHAUSTED: "平台条数用完",

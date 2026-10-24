@@ -59,6 +59,7 @@ from twin.engine.inbound import InboundRenderer
 from twin.engine.kit import EngineKit
 from twin.engine.machine import ConversationEngine, DraftWriter
 from twin.engine.pipeline import ReplyPipeline
+from twin.engine.readiness import ReadinessGate
 from twin.engine.rounds import RoundStore
 from twin.engine.safety.crisis import CrisisHandler
 from twin.engine.safety.notifier import EmergencyNotifier
@@ -215,6 +216,7 @@ def build_engine(
         clock=clock,
         settings=settings,
         rng=chance,
+        readiness=ReadinessGate(services),  # nothing of hers before profile, routine, card (D-871)
         commands=commands,
         backends=styled.selector,
         queue_extraction=queue,

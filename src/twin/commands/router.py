@@ -45,6 +45,7 @@ from twin.engine.backend_select import BackendSelector
 from twin.engine.command_port import CommandContext, CommandOutcome, CommandPort
 from twin.engine.dataview import LiveDataSource
 from twin.engine.feedback import FeedbackStore
+from twin.engine.readiness import status_lines
 from twin.engine.turns import BotTurnMessages, BotTurnStore
 from twin.learning.corrections import FactProposer, PendingStore
 from twin.learning.dislike import NotLikeRecorder
@@ -164,6 +165,7 @@ class CommandRouter:
             session_state=session_state,
             proactive=proactive,
             retrain=retrain,
+            readiness=lambda: status_lines(services),
             extra=(*extra_status, import_replay_line(services), dpo_line(services)),
         )
         manager = MemoryManager(known_memory)

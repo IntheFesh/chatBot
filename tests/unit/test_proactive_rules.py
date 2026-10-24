@@ -6,6 +6,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from twin.channel.base import AuthState, SessionState
 from twin.channel.window import SessionWindow
@@ -42,6 +44,7 @@ def situation(**changes: object) -> Situation:
         min_spacing=timedelta(minutes=60),
         max_chase=1,
         unanswered_after=timedelta(minutes=30),
+        ready=True,  # the bot is ready (D-872); the not-ready tests say ``ready=False``
     )
     return replace(base, **changes)  # type: ignore[arg-type]
 
@@ -120,6 +123,69 @@ def test_the_probe_reason_has_a_label_and_counts_as_a_reason_the_schedule_cannot
         Reason.PROBE_RUNNING in OUTSIDE_REASONS
     )  # a day short of its range is excused (R-EVAL-005)
     assert Reason.PROBE_RUNNING not in WINDOW_REASONS  # but it is not the platform window
+
+
+def test_r18_b8_before_the_bot_is_ready_every_kind_is_refused_not_ready() -> None:
+    """R18-B8 (D-872): no profile, routine or persona card yet - nothing of hers goes out.
+
+    It comes right after the user's own switches and the probe, before everything the day,
+    the budget and the platform decide (so a not-ready day is logged as such).
+    """
+    for kind in TriggerKind:
+        state = "sleep_edge" if kind is TriggerKind.EDGE else "free"
+        assert reason_of(kind, state=state, ready=False) is Reason.NOT_READY, kind
+    assert reason_of(TriggerKind.MEAL, ready=False, enabled=False) is Reason.DISABLED
+    assert reason_of(TriggerKind.MEAL, ready=False, paused=True) is Reason.PAUSED
+    assert reason_of(TriggerKind.MEAL, ready=False, probe_running=True) is Reason.PROBE_RUNNING
+    for before in (
+        {"state": None},
+        {"state": "deep_sleep"},
+        {"state": "sleep_edge"},
+        {"budget_allowed": lambda: False},
+        {"window": Reason.WINDOW_CLOSED},
+        {"last_sent_at": NOW},
+        {"sent_today": 6},
+        {"spent_since_plan": 4},
+    ):
+        assert reason_of(TriggerKind.MEAL, ready=False, **before) is Reason.NOT_READY, before
+    assert reason_of(TriggerKind.MEAL, ready=True) is None
+
+
+@given(
+    kind=st.sampled_from(list(TriggerKind)),
+    state=st.sampled_from([None, "deep_sleep", "sleep_edge", "busy", "free"]),
+    sent_today=st.integers(0, 10),
+    unanswered=st.integers(0, 4),
+    window=st.sampled_from([None, *WINDOW_REASONS, Reason.CHANNEL_UNAVAILABLE]),
+    budget=st.booleans(),
+)
+def test_r18_b8_not_ready_refuses_whatever_else_the_situation_says(
+    kind: TriggerKind,
+    state: str | None,
+    sent_today: int,
+    unanswered: int,
+    window: Reason | None,
+    budget: bool,
+) -> None:
+    """R18-B8 (D-872), any situation: unless switched off, paused or probed, ``not_ready``."""
+    found = reason_of(
+        kind,
+        ready=False,
+        state=state,
+        sent_today=sent_today,
+        unanswered=unanswered,
+        last_unanswered_at=NOW - timedelta(hours=1) if unanswered else None,
+        window=window,
+        budget_allowed=lambda: budget,
+    )
+    assert found is Reason.NOT_READY
+
+
+def test_r18_b8_not_ready_has_a_label_and_is_no_excuse_of_a_short_day() -> None:
+    """D-872: ``not_ready`` is not a reason "the schedule cannot help" - a day before the bot is
+    ready is opened as a day she may not write (``enabled`` false), so it is no observation day."""
+    assert REASON_LABELS[Reason.NOT_READY] == "未就绪（缺画像/作息模型/人设卡）"
+    assert Reason.NOT_READY not in OUTSIDE_REASONS and Reason.NOT_READY not in WINDOW_REASONS
 
 
 def test_the_budget_pauses_proactive_messages_and_is_asked_only_when_it_matters() -> None:

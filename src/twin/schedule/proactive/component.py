@@ -37,6 +37,7 @@ from twin.engine.component import EngineComponent
 from twin.engine.machine import STOP_GRACE_S
 from twin.engine.pacing import PacingModel
 from twin.engine.pipeline import ReplyPipeline
+from twin.engine.readiness import check_readiness
 from twin.engine.sender import BubbleSender
 from twin.memory.followups import FollowupStore
 from twin.memory.lifeline import LifelineStore
@@ -285,6 +286,7 @@ def build_scheduler(
         model_source=model_source or (lambda: load_activity_model(services, "live")),
         silence_source=silence_source or silence,
         budget_allowed=lambda: budget.limits().proactive_allowed,
+        ready=lambda: check_readiness(services).ready,  # the engine's own test (D-870, D-872)
         rng=rng,
         probe_active=ProbeStore(services.db, clock).active,  # a running probe holds her back
     )
