@@ -39,6 +39,7 @@ from twin.serving.evaluation import (
     install_servers,
     installed_servers,
     plan_model_evaluation,
+    plan_model_style_sample,
     preflight,
     tunnel_known_hosts,
 )
@@ -198,6 +199,28 @@ async def test_r18_c3_the_model_is_evaluated_only_after_its_training_cutoff(
     with pytest.raises(EvaluationError, match="hold-out cut-off"):
         await plan_model_evaluation(
             services, candidate.model_id, 3, seed=6, program=candidate.program()
+        )
+
+
+async def test_r18_c3_the_style_sample_of_the_model_starts_at_its_training_cutoff_too(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R18-C3 ③ (D-886): ``twin model evaluate --style`` (R9's sample) draws after the model's
+    cut-off as well, and refuses a model whose cut-off is unknown."""
+    services = candidate.services
+    usable = SampleDrawer(services).draw(10_000, seed=1).samples
+    trained = sorted(sample.at for sample in usable)[len(usable) // 2]
+    lock_cutoff(candidate, trained)
+    _, plan = await plan_model_style_sample(
+        services, candidate.model_id, seed=3, program=candidate.program()
+    )
+    items = EvalStore(services.db, services.clock).items(plan.run.id)
+    assert items and all(item.at >= trained for item in items)
+    assert plan.run.params["drawn_since"] == trained.isoformat()
+    lock_cutoff(candidate, None)
+    with pytest.raises(EvaluationError, match="hold-out cut-off"):
+        await plan_model_style_sample(
+            services, candidate.model_id, seed=4, program=candidate.program()
         )
 
 

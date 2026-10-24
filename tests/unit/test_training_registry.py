@@ -13,7 +13,8 @@ from typer.testing import CliRunner
 from tests.support.training_artifacts import QUANTS, build_artifact_dir
 from tests.support.training_data import write_synthetic_dataset
 from twin.cli import app
-from twin.services import Services
+from twin.config.loader import load_settings, resolve_paths
+from twin.services import Services, build_services
 from twin.storage.training_models import ModelRegistryEntry
 from twin.training.registry import (
     LockedVersions,
@@ -488,6 +489,10 @@ def test_r18_c3_the_local_dataset_record_gives_the_cutoff_a_manifest_does_not_na
     build_artifact_dir(other, run_id="r-3", versions={"holdout_cutoff": TRAINED_CUTOFF})
     with pytest.raises(RegistryError, match="dataset ds-test-01 was exported with"):
         register_artifacts(services.db, other)
+    garbled = tmp_path / "r4"
+    build_artifact_dir(garbled, run_id="r-4", versions={"holdout_cutoff": "soon"})
+    with pytest.raises(RegistryError, match="not a moment"):
+        register_artifacts(services.db, garbled)
 
 
 def test_r18_c3_model_show_names_the_locked_cutoff(data_dir: Path) -> None:
@@ -498,3 +503,14 @@ def test_r18_c3_model_show_names_the_locked_cutoff(data_dir: Path) -> None:
     shown = runner.invoke(app, ["model", "show", "r-test-1-Q5_K_M"])
     assert shown.exit_code == 0, shown.output
     assert "hold-out cut-off" in shown.output and "2026-08-14 02:46" in shown.output
+    settings = load_settings()
+    services = build_services(settings, root=resolve_paths(settings).root)
+    try:
+        with services.db.transaction() as session:
+            row = session.get(ModelRegistryEntry, "r-test-1-Q5_K_M")
+            assert row is not None
+            row.holdout_cutoff = None  # a row of an older registry
+    finally:
+        services.close()
+    older = runner.invoke(app, ["model", "show", "r-test-1-Q5_K_M"])
+    assert older.exit_code == 0 and "unknown" in older.output

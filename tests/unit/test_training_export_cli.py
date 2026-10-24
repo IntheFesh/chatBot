@@ -273,6 +273,30 @@ def test_r18_c3_the_foreground_export_resplits_rebuilds_and_plans_one_batch(
     assert stored is not None and stored.cutoff > old
 
 
+def test_r18_c3_a_foreground_export_that_still_waits_says_who_runs_it(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C3 ② (D-882): when the rebuild an export waits for cannot run here (a sticker job
+    waiting for the off-peak hours), the foreground says so and how it goes on."""
+
+    async def nothing(services: Services) -> None:
+        export_job.save_state(
+            services,
+            {
+                "state": "rebuilding",
+                "cutoff": "2026-08-20T00:00:00+00:00",
+                "previous_cutoff": None,
+                "waiting_for": ["sticker_tag"],
+            },
+        )
+
+    monkeypatch.setattr(training_cli, "_export_in_foreground", nothing)
+    result = invoke("train", "export", "--foreground")
+    assert result.exit_code == 0, result.output
+    assert "export: rebuilding" in result.output and "sticker_tag" in result.output
+    assert "the application is not running: `twin train export --foreground`" in result.output
+
+
 def test_a_run_that_fails_on_the_data_says_why_and_is_not_retried(
     world_in_cli_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -349,6 +349,29 @@ def test_apply_holdout_moves_flags_without_reading_messages(utc: Services) -> No
     assert entering == () and released == 3  # windows 6..8 are released again
 
 
+def test_r18_c3_a_window_that_enters_or_leaves_the_holdout_keeps_its_vector(
+    utc: Services,
+) -> None:
+    """R18-C3 ① (D-880): the flag is information - syncing at another cut-off moves the flags and
+    leaves every vector marker alone (before round 18 a held-out window lost its vector)."""
+    write_dialogue(utc, [(day(n), [U(f"问{n}"), H(f"答{n}")]) for n in range(10)])
+    sync_windows(utc)
+    with utc.db.transaction(bump_state=False) as session:
+        for row in session.scalars(select(ExampleWindow)):
+            row.embed_version = "encoded"
+    found = windows(utc)
+    later = found[5].reply_at_utc
+    report = sync_windows(utc, cutoff=later)
+    assert (report.added, report.changed, report.holdout) == (0, 0, 5)
+    after = windows(utc)
+    assert {w.embed_version for w in after} == {"encoded"}
+    assert [w.holdout for w in after] == [w.reply_at_utc >= later for w in found]
+    back = sync_windows(utc, cutoff=found[9].reply_at_utc)
+    assert back.holdout == 1 and {w.embed_version for w in windows(utc)} == {"encoded"}
+    apply_holdout(utc, found[2].reply_at_utc)
+    assert {w.embed_version for w in windows(utc)} == {"encoded"}
+
+
 # ----------------------------------------------------------------- R-RET-004
 
 

@@ -439,3 +439,96 @@ def test_r18_c3_the_status_lines_of_a_waiting_export() -> None:
     )
     assert "persona description is generated again for the cut-off 2026-08-20" in waiting
     assert "$0.07 of the estimate" in waiting and "twin jobs approve trainplan-1" in waiting
+
+
+def test_r18_c3_the_description_has_a_batch_of_its_own_when_it_cannot_join(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C3 ② (D-883): with no plan to join, or no room left in the first batch of the plans,
+    the new description is a batch of its own - still listed with the export's batches."""
+    from twin.profile.persona import jobs as persona_jobs
+    from twin.training.export import TrainingSetExporter
+    from twin.training.export_job import _queue_batches
+    from twin.training.plans import PlanStore
+
+    services = world.services
+    alone = _queue_batches(services, [], True, ())
+    assert alone.plans.batch_ids == [] and alone.persona is not None
+    assert alone.persona.batch_id is not None and alone.batch_ids == [alone.persona.batch_id]
+    JobQueue(services.db, services.clock).cancel(alone.persona.scopes[0].job_id)
+    missing, _ = TrainingSetExporter(services, tiny_qwen_tokenizer()).scan()
+    PlanStore(services.db).register(missing)
+    limit = services.settings.budget.one_time_usd
+    big = limit - 0.001  # the description fills a batch by itself: no plan fits beside it
+    monkeypatch.setattr(persona_jobs, "description_estimate", lambda s, r: big)
+    monkeypatch.setattr(export_job, "description_estimate", lambda s, r: big)
+    queued = _queue_batches(services, sorted(missing), True, ())
+    assert queued.plans.batch_ids and queued.persona is not None
+    assert queued.persona.batch_id not in queued.plans.batch_ids
+    assert queued.batch_ids == [*queued.plans.batch_ids, queued.persona.batch_id]
+    assert queued.estimated_usd == pytest.approx(queued.plans.estimated_usd + big)
+
+
+def test_r18_c3_a_later_look_at_the_same_resplit_keeps_the_cutoff_it_came_from(
+    world: World,
+) -> None:
+    """R18-C3 ② (D-882): the ``rebuilding`` record keeps the old cut-off across the looks of the
+    same re-split, and drops it for another one."""
+    from twin.training.export_job import SplitPreparation, rebuilding_state
+
+    state = pre_holdout_state(world.services)
+    prepared = SplitPreparation(None, state)
+    earlier = {"state": "rebuilding", "cutoff": state.cutoff.isoformat(), "previous_cutoff": "x"}
+    assert rebuilding_state(prepared, earlier)["previous_cutoff"] == "x"
+    other = {**earlier, "cutoff": "2020-01-01T00:00:00+00:00"}
+    assert rebuilding_state(prepared, other)["previous_cutoff"] is None
+    assert rebuilding_state(prepared, None)["previous_cutoff"] is None
+
+
+def test_r18_c3_an_export_without_enough_data_fails_on_the_split(services: Services) -> None:
+    """R18-C3 ② (D-881): with too little data the split cannot be made - an export error."""
+    from twin.training.export import ExportError
+    from twin.training.export_job import prepare_split
+
+    with pytest.raises(ExportError, match="hold-out cannot be determined"):
+        prepare_split(services)
+
+
+async def test_r18_c3_a_job_that_cannot_split_fails_with_the_reason(services: Services) -> None:
+    """R18-C3 ② (D-881): the export job on too little data ends as failed, not deferred."""
+    queue_export(services, ExportRequest())
+    summary = await worker(services, EXPORT_JOB).run_until_idle()
+    assert summary.failed == 1 and summary.deferred == 0
+    state = read_state(services)
+    assert state is not None and state["state"] == "failed"
+    assert "hold-out cannot be determined" in state["message"]
+
+
+def test_r18_c3_no_room_for_the_joining_job_is_refused_before_anything_is_queued(
+    world: World,
+) -> None:
+    """R18-C3 ② (D-883): a reserve above the one-time limit cannot be kept for anybody."""
+    from twin.llm.runtime import build_llm_runtime
+    from twin.ops.jobs import BatchTooLargeError
+    from twin.training.export import TrainingSetExporter
+    from twin.training.plans import PlanStore, queue_plan_batches
+
+    services = world.services
+    missing, _ = TrainingSetExporter(services, tiny_qwen_tokenizer()).scan()
+    PlanStore(services.db).register(missing)
+    runtime = build_llm_runtime(services)
+    limit = services.settings.budget.one_time_usd
+    with pytest.raises(BatchTooLargeError):
+        queue_plan_batches(services, runtime, sorted(missing), reserve_usd=limit + 1.0)
+    assert JobQueue(services.db, services.clock).list_jobs(job_type=PLAN_JOB) == []
+
+
+def test_r18_c3_a_record_without_a_readable_cutoff_names_none() -> None:
+    """R18-C3 ② (D-882): a version record without a cut-off, or with garbage, names none."""
+    from twin.profile.pre_holdout import cutoff_of
+
+    assert cutoff_of(None) is None and cutoff_of({}) is None
+    assert cutoff_of({"cutoff": "not a moment"}) is None
+    assert cutoff_of({"cutoff": "2026-08-14T02:46:19"}) is None  # a naive moment is not one
+    moment = cutoff_of({"cutoff": "2026-08-14T02:46:19+00:00"})
+    assert moment is not None and moment.isoformat() == "2026-08-14T02:46:19+00:00"
