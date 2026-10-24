@@ -16,7 +16,8 @@ build the context of a sample - *her reply block at time t, what would the bot h
 ``her_state()``         ``typical_state`` of the pre_holdout routine for the local clock time
                         and day type of ``t`` in the zone she was in (R-ACT-001);
 ``examples()``          her real replies from before ``t`` (the retrieval library with
-                        ``before=t``; the hold-out is never returned);
+                        ``before=t``: only windows whose reply is strictly earlier; the library
+                        holds the held-out period too, D-880, but never ``t``'s own window);
 ``sticker_view`` ...    the sticker library as of ``t`` (only stickers she had used before
                         ``t``; counts and recency as of ``t``), the emoji-code vocabulary and
                         the sticker share of the pre_holdout profile;

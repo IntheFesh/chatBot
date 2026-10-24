@@ -58,7 +58,11 @@ from twin.ops.process_model import (
     queued_hint,
 )
 from twin.profile.holdout import drift_warning, holdout_share
+from twin.profile.jobs import handle_profile_rebuild
+from twin.profile.persona.jobs import REFRESH_JOB, handle_persona_refresh
+from twin.profile.queue import PROFILE_JOB
 from twin.services import Services, get_cli_context
+from twin.stickers.tag_jobs import TAG_JOB, handle_sticker_tag
 from twin.training import bundle_crypto
 from twin.training.bundle import BundleError, build_bundle, verify_bundle
 from twin.training.dataset_dir import DatasetError, file_sha256, load_dataset_dir
@@ -261,17 +265,36 @@ def format_state(state: dict[str, Any]) -> list[str]:
     lines = [f"export: {kind} ({state.get('at', '?')})"]
     if kind == "failed":
         lines.append(f"  {state.get('message', '')}")
+    elif kind == "rebuilding":
+        previous = state.get("previous_cutoff")
+        moved = f" (moved from {previous})" if previous else ""
+        lines.append(
+            f"  the hold-out cut-off is {state.get('cutoff')}{moved}: the newest part of the data "
+            "is the test split now"
+        )
+        lines.append(
+            "  waiting for the pre-holdout rebuild for it: "
+            + ", ".join(state.get("waiting_for", []))
+            + " (the export goes on by itself when they are done)"
+        )
     elif kind == "waiting_for_plans":
         lines.append(
             f"  {state.get('missing', 0)} of {state.get('selected', 0)} planned samples have no "
             "plan yet"
         )
+        persona = state.get("persona")
+        if persona:
+            lines.append(
+                "  the pre-holdout persona description is generated again for the cut-off "
+                f"{persona.get('cutoff')} in the same batch "
+                f"(${float(persona.get('estimated_usd') or 0):.2f} of the estimate)"
+            )
         for batch in state.get("batches", []):
             lines.append(f"  approve with: twin jobs approve {batch}")
         if state.get("batches"):
             lines.append(f"  estimated ${state.get('estimated_usd', 0):.2f} (an upper bound)")
         lines.append(
-            "  after the plans are written (`twin jobs run --until-idle` if the application is "
+            "  after the batch ran (`twin jobs run --until-idle` if the application is "
             "stopped) run `twin train export` again"
         )
     elif kind == "done":
@@ -362,8 +385,12 @@ async def _export_dpo_in_foreground(services: Services) -> None:
 
 
 async def _export_in_foreground(services: Services) -> None:
+    """The export and the pre-holdout rebuild it may wait for after a re-split (D-882)."""
     registry = HandlerRegistry()
     registry.register(EXPORT_JOB, handle_training_export)
+    registry.register(PROFILE_JOB, handle_profile_rebuild)
+    registry.register(REFRESH_JOB, handle_persona_refresh)
+    registry.register(TAG_JOB, handle_sticker_tag)
     summary = await run_jobs_until_idle(services, registry)
     if summary.failed or summary.retried:
         typer.echo(f"the export did not finish: {'; '.join(summary.failures) or 'see the log'}")
@@ -372,13 +399,26 @@ async def _export_in_foreground(services: Services) -> None:
 def _warn_about_the_holdout(services: Services) -> None:
     """Say so when the stored hold-out cut-off has fallen behind the data (R18-C3, D-818).
 
-    The training set only takes the samples before the cut-off, which never moves by itself:
-    without a re-split, a new export (and a retraining) would not see what was imported since.
+    The training set only takes the samples before the cut-off, which an import never moves; the
+    next ``twin train export`` moves it first (D-881).
     """
     share = holdout_share(services)
     warning = drift_warning(share) if share is not None else None
     if warning is not None:
         typer.echo(f"warning: {warning}")
+
+
+def _note_the_resplit(services: Services) -> None:
+    """Tell what the export does first when the cut-off has fallen behind the data (D-881)."""
+    share = holdout_share(services)
+    if share is None or not share.drifted:
+        return
+    typer.echo(
+        f"note: {share.share:.0%} of her reply blocks are after the hold-out cut-off "
+        f"{share.cutoff:%Y-%m-%d %H:%M} UTC; the export first moves it to the newest "
+        f"{share.ratio:.0%} and waits for the pre-holdout profile, routine and card to be rebuilt "
+        "(stored evaluation results are kept)"
+    )
 
 
 @train_app.command("export")
@@ -414,7 +454,7 @@ def export_command(
     queued = queue_export(services, request)
     verb = "an export is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id})")
-    _warn_about_the_holdout(services)
+    _note_the_resplit(services)
     if not foreground:
         hint = queued_hint(services, foreground="twin train export --foreground")
         typer.echo(f"{hint}; see `twin train export-status`")
@@ -430,6 +470,8 @@ def export_command(
         typer.echo(line)
     if state.get("state") == "failed":
         raise CliError("the export failed", ExitCode.FAILURE)
+    if state.get("state") == "rebuilding":
+        typer.echo(queued_hint(services, foreground="twin train export --foreground"))
 
 
 @train_app.command("export-status")

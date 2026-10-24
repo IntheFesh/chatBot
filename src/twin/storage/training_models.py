@@ -15,7 +15,9 @@
 ``model_registry``
     one row per file of a trained model that can be used (a GGUF per quantisation, and the LoRA
     adapter for the remote server), with the sha256 and the versions the model was trained with.
-    Serving a model renders its prompts with exactly these versions (R-SRV-001).  ``enabled``,
+    Serving a model renders its prompts with exactly these versions (R-SRV-001).  It also locks
+    the hold-out cut-off of the training set (``holdout_cutoff``, migration 0020, D-885): the
+    evaluation of the model draws only contexts after it.  ``enabled``,
     ``active`` and ``gate_passed`` are set by round 14.
 
 Nothing here is encrypted: the rows hold names, numbers, hashes and versions - no chat content.
@@ -144,6 +146,9 @@ class ModelRegistryEntry(TimestampMixin, Base):
     persona_version: Mapped[str] = mapped_column(String(128), nullable=False)
     profile_version: Mapped[str] = mapped_column(String(128), nullable=False)
     dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    # the hold-out cut-off of that dataset: M5 draws only after it (round 18, D-885, D-886);
+    # empty only for a row of an older registry whose dataset is not recorded here
+    holdout_cutoff: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     eval: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

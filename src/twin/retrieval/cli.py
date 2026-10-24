@@ -27,6 +27,7 @@ from twin.ops.process_model import (
 )
 from twin.profile.holdout import HoldoutError, resplit_holdout
 from twin.profile.jobs import handle_profile_rebuild
+from twin.profile.persona.hook import plan_description_after_resplit
 from twin.profile.queue import PROFILE_JOB
 from twin.retrieval.embedder import MODEL_PROFILES, cpu_speed_warning
 from twin.retrieval.indexer import (
@@ -210,6 +211,7 @@ def retrieval_resplit(
     )
     for note in result.notes:
         typer.echo(f"  {note}")
+    typer.echo(f"  {plan_description_after_resplit(services)}")  # its own batch (D-883)
     if not foreground:
         typer.echo(queued_hint(services))  # a second re-split is not the way to run them
         return

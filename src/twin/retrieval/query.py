@@ -22,8 +22,11 @@ Ranking:
 
 ``before`` (R-TRN-013): only windows with ``reply_at_utc < before`` are considered, so the
 evaluation sandbox and the training export (``AsOfView(t)``) see the library as it was at ``t``.
-Whatever ``before`` is, windows at or after the hold-out cutoff are never returned, even if a
-stale index still holds their vectors.
+The index is searched with ``reply_at_utc <= floor(before)`` as a pre-filter (it stores whole
+seconds) and the rows are checked again exactly (``<``) in the database.  The library holds every
+window, the held-out period included (round 18, user decision, D-880): the running bot asks
+without ``before`` and finds her newest replies; a held-out window is never returned for its own
+sample moment or an earlier one, because its reply is not strictly before that moment.
 """
 
 from __future__ import annotations
@@ -43,7 +46,6 @@ from sqlalchemy import select
 from twin.clock import ensure_aware, to_epoch
 from twin.ops.logging import get_logger
 from twin.profile.circular import signed_diff
-from twin.profile.holdout import get_holdout
 from twin.retrieval.embedder import EmbeddingService, EncodeKind, embedding_service
 from twin.retrieval.examples import Example, ExampleBuilder, StickerLabeler
 from twin.retrieval.indexer import encoding_id, window_table
@@ -182,10 +184,9 @@ class ExampleRetriever:
         k = query.k if query.k is not None else services.settings.engine.examples_k
         turns = [TurnText(t.her, one_line(t.text)) for t in query.turns][-config.context_turns :]
         text = encoding_text(turns)
-        holdout = get_holdout(services)
         table = window_table(services)
         meta = table.read_meta()
-        if k <= 0 or not text or holdout is None or meta is None or table.count() == 0:
+        if k <= 0 or not text or meta is None or table.count() == 0:
             return []
 
         embedder = self._service()
@@ -198,12 +199,15 @@ class ExampleRetriever:
             )
 
         before = None if query.before is None else ensure_aware(query.before)
-        bound = holdout.cutoff if before is None else min(holdout.cutoff, before)
-        hits = table.search(vector, config.candidates, at_or_before=math.floor(to_epoch(bound)))
+        hits = table.search(
+            vector,
+            config.candidates,
+            at_or_before=None if before is None else math.floor(to_epoch(before)),
+        )
         if not hits:
             return []
         reference = before or services.clock.now_utc()
-        records, replies = self._load(hits, bound)
+        records, replies = self._load(hits, before)
         ranked: list[Ranked] = []
         for hit in hits:
             record = records.get(hit.id)
@@ -230,16 +234,16 @@ class ExampleRetriever:
         )
 
     def _load(
-        self, hits: Sequence[VectorHit], bound: datetime
+        self, hits: Sequence[VectorHit], before: datetime | None
     ) -> tuple[dict[str, WindowRecord], dict[str, str]]:
-        """Window rows of the hits (exactly before ``bound``, not held out) and reply texts."""
+        """Window rows of the hits (exactly before ``before`` when given) and reply texts."""
         ids = [hit.id for hit in hits]
         with self._services.db.session() as session:
             rows = session.scalars(select(ExampleWindow).where(ExampleWindow.id.in_(ids)))
             records = {
                 row.id: WindowRecord.from_row(row)
                 for row in rows
-                if not row.holdout and row.reply_at_utc < bound
+                if before is None or row.reply_at_utc < before
             }
             messages = load_messages(
                 session, [i for record in records.values() for i in record.reply_block_ids]

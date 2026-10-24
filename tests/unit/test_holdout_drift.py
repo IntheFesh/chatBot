@@ -1,11 +1,11 @@
-"""R18-C3/E7 (D-818): the hold-out cut-off never moves by itself - the program says where it stands.
+"""R18-C3/E7 (D-818): an import never moves the hold-out cut-off - the program says where it stands.
 
-``holdout_cutoff()`` is computed once and kept (R-RET-003), so every chat imported later lands in
-the hold-out: not in the example library, not in the training set.  Whether the cut-off should
-move by itself is the user's decision (not taken here); what is fixed is that the program no
-longer hides it: ``twin profile show`` counts the blocks now, and once the share after the cut-off
-is clearly above ``retrieval.holdout_ratio`` the retraining check, the export and the import
-report say so and name ``twin retrieval resplit``.
+``holdout_cutoff()`` is computed once and kept by imports (R-RET-003), so every chat imported later
+lands in the hold-out: not in the training set (the example library holds it since round 18,
+D-880).  The user decided (D-881) that ``twin train export`` moves the cut-off itself; until then
+``twin profile show`` counts the blocks now, and once the share after the cut-off is clearly above
+``retrieval.holdout_ratio`` the retraining check and the import report say so and name both the
+export and ``twin retrieval resplit``; the export says it moves the cut-off first.
 """
 
 from __future__ import annotations
@@ -144,6 +144,8 @@ def test_profile_show_counts_the_blocks_now(data_dir: Path) -> None:
 def test_retrain_check_and_export_name_the_resplit_only_when_the_holdout_drifted(
     data_dir: Path,
 ) -> None:
+    """Changed in round 18 (user decision, D-881): the export no longer tells the user to re-split
+    first - it re-splits itself, and says so; the retraining check names both ways."""
     with_services(lambda services: build_chat(services, ChatSpec(start=date(2026, 1, 5), days=30)))
     with_services(holdout_cutoff)
     quiet = cli("train", "retrain-check")
@@ -151,9 +153,12 @@ def test_retrain_check_and_export_name_the_resplit_only_when_the_holdout_drifted
     with_services(lambda s: later_chat(s, start=datetime(2026, 2, 10, 15, 0, tzinfo=UTC)))
     loud = cli("train", "retrain-check")
     assert loud.exit_code == 0 and RESPLIT in loud.output
+    assert "`twin train export` 会先自动" in loud.output
     queued = cli("train", "export")
     assert queued.exit_code == 0, queued.output
-    assert "queued (job " in queued.output and RESPLIT in queued.output
+    assert "queued (job " in queued.output
+    assert "the export first moves it to the newest 10%" in queued.output
+    assert RESPLIT not in queued.output
 
 
 def test_the_import_report_names_the_resplit_when_the_holdout_drifted(

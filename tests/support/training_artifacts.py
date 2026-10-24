@@ -34,6 +34,7 @@ def bundle_manifest(
         "persona_version": "v3",
         "profile_version": "01TESTPROFILEVERSION00000",
         "dataset_version": dataset_version,
+        "holdout_cutoff": "2026-09-01T00:00:00+00:00",  # what the real package names (D-885)
         "llamafactory_version": "0.9.5",
         "llama_cpp_tag": "b11177",
     }

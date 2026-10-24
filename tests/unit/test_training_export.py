@@ -387,6 +387,7 @@ def test_r18_f7_the_export_needs_the_memory_replay_and_the_persona_description(
         "complete": False,
         "memory_days_not_replayed": 0,
         "persona_description": False,
+        "persona_description_current": True,  # round 18 (D-882): none, so none of another cut-off
     }
     world.store.add_version("pre_holdout", past_card(), reason="generate")
     complete = run_export(services, tmp_path / "ds2")

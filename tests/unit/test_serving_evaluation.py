@@ -12,6 +12,7 @@ import contextlib
 import dataclasses
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from tests.support.waiting import wait_until
 from twin.config.runtime import TUNNEL_WANTED
 from twin.eval.blind import EVAL_GENERATE_JOB, generate_items
+from twin.eval.samples import SampleDrawer
 from twin.eval.store import EvalStore
 from twin.llm.runtime import build_llm_runtime
 from twin.llm.style_client import LlamaCppCompletionClient, VllmCompletionClient
@@ -37,6 +39,7 @@ from twin.serving.evaluation import (
     install_servers,
     installed_servers,
     plan_model_evaluation,
+    plan_model_style_sample,
     preflight,
     tunnel_known_hosts,
 )
@@ -45,6 +48,7 @@ from twin.serving.runtime import model_path
 from twin.serving.server import ServerTimings, same_model_file, served_model_path
 from twin.serving.tunnel import TunnelManager, TunnelState, TunnelTimings
 from twin.storage.models import Job
+from twin.storage.training_models import ModelRegistryEntry
 from twin.training.registry import get_model
 from twin.training.remote.connection import RemoteTarget, remember_host
 
@@ -163,6 +167,61 @@ async def test_the_plan_draws_new_contexts_for_the_three_backends_and_names_the_
     first = {i.sample_key for i in store.items(run.id)}
     again = {i.sample_key for i in store.items(second.run.id)}
     assert first.isdisjoint(again)
+
+
+def lock_cutoff(candidate: ServingWorld, moment: datetime | None) -> None:
+    """Set the hold-out cut-off the candidate is locked to (``None``: an older, unknown row)."""
+    with candidate.services.db.transaction(bump_state=False) as session:
+        row = session.get(ModelRegistryEntry, candidate.model_id)
+        assert row is not None
+        row.holdout_cutoff = moment
+
+
+async def test_r18_c3_the_model_is_evaluated_only_after_its_training_cutoff(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R18-C3 ③ (user decision, D-886): ``twin model evaluate`` draws only contexts after the
+    cut-off the model is locked to; a model whose cut-off is unknown is refused."""
+    services = candidate.services
+    usable = SampleDrawer(services).draw(10_000, seed=1).samples
+    times = sorted(sample.at for sample in usable)
+    trained = times[len(times) // 2]
+    lock_cutoff(candidate, trained)
+    _, plan = await plan_model_evaluation(
+        services, candidate.model_id, 200, seed=5, program=candidate.program()
+    )
+    store = EvalStore(services.db, services.clock)
+    items = store.items(plan.run.id)
+    assert items and all(item.at >= trained for item in items)
+    assert {item.sample_key for item in items} == {s.sample_key for s in usable if s.at >= trained}
+    assert plan.run.params["drawn_since"] == trained.isoformat()
+    lock_cutoff(candidate, None)
+    with pytest.raises(EvaluationError, match="hold-out cut-off"):
+        await plan_model_evaluation(
+            services, candidate.model_id, 3, seed=6, program=candidate.program()
+        )
+
+
+async def test_r18_c3_the_style_sample_of_the_model_starts_at_its_training_cutoff_too(
+    candidate: ServingWorld, api: respx.MockRouter
+) -> None:
+    """R18-C3 ③ (D-886): ``twin model evaluate --style`` (R9's sample) draws after the model's
+    cut-off as well, and refuses a model whose cut-off is unknown."""
+    services = candidate.services
+    usable = SampleDrawer(services).draw(10_000, seed=1).samples
+    trained = sorted(sample.at for sample in usable)[len(usable) // 2]
+    lock_cutoff(candidate, trained)
+    _, plan = await plan_model_style_sample(
+        services, candidate.model_id, seed=3, program=candidate.program()
+    )
+    items = EvalStore(services.db, services.clock).items(plan.run.id)
+    assert items and all(item.at >= trained for item in items)
+    assert plan.run.params["drawn_since"] == trained.isoformat()
+    lock_cutoff(candidate, None)
+    with pytest.raises(EvaluationError, match="hold-out cut-off"):
+        await plan_model_style_sample(
+            services, candidate.model_id, seed=4, program=candidate.program()
+        )
 
 
 async def test_the_plan_does_not_start_any_server(

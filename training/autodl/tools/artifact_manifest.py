@@ -7,7 +7,8 @@
 The manifest lists every file below the artifacts directory with its size and sha256 and names
 the files a model registry should register (``models``).  The versions the model was trained
 with - template, persona card, profile and dataset - are copied from the training package's
-manifest, so ``twin model register`` can lock the model to them (R-SRV-001).
+manifest, so ``twin model register`` can lock the model to them (R-SRV-001); so is the hold-out
+cut-off of the dataset, which the registry locks too (round 18, D-885).
 
 The adapter stack that was kept (``adapter_stack.json`` of ``adapter_stack.py``: ``sft``,
 ``sft+dpo`` or ``dpo``, every layer with its sha256, and the one adapter vLLM serves) goes into the
@@ -41,6 +42,7 @@ LOCKED_KEYS = (
     "persona_version",
     "profile_version",
     "dataset_version",
+    "holdout_cutoff",  # the cut-off of the training set: M5 draws after it (round 18, D-885)
     "llamafactory_version",
     "llama_cpp_tag",
 )

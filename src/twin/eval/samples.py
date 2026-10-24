@@ -5,7 +5,10 @@ conversation before it.  Where the samples come from is fixed by rules, so the t
 bot and not the choice of examples:
 
 * **only the hold-out window**: the blocks whose first message is at or after
-  :func:`~twin.profile.holdout.holdout_cutoff`; nothing the bot was built from;
+  :func:`~twin.profile.holdout.holdout_cutoff`; nothing the bot was built from.  A draw for a model
+  (``since``: the cut-off the model was trained with, locked in ``model_registry``, round 18,
+  D-886) starts at the later of the two - after a re-split the evaluation uses only contexts after
+  the new cut-off, and a model is never asked about a context it was trained on;
 * **never a context an earlier blind test used** (the keys the store hands in);
 * **only replies the bot could have written**: every message of the reply is text, a sticker or a
   quote (``is_reproducible``), no line of it is event text or a media marker (R-SAFE-006 4),
@@ -155,7 +158,8 @@ class DrawResult:
 
     samples: list[DrawnSample] = field(default_factory=list)
     available: int = 0  # blocks of the hold-out that passed the first checks
-    holdout_blocks: int = 0
+    holdout_blocks: int = 0  # blocks from the start of the draw on
+    start: datetime | None = None  # the first moment a context may have (D-886)
     excluded: Counter[str] = field(default_factory=Counter)
     strata: dict[str, int] = field(default_factory=dict)  # drawn per "period/length"
 
@@ -188,10 +192,15 @@ def _turn_payload(turn: Turn) -> dict[str, Any]:
 
 
 class SampleDrawer:
-    """Draws the contexts of a blind test (see the module description)."""
+    """Draws the contexts of a blind test (see the module description).
 
-    def __init__(self, services: Services) -> None:
+    ``since`` is the cut-off of the model under evaluation (M5): nothing before it is drawn, nor
+    anything before the cut-off in force.
+    """
+
+    def __init__(self, services: Services, *, since: datetime | None = None) -> None:
         self._services = services
+        self._since = since
         self._loader = MessageLoader(services)
         self._place = LocalPlace.create(services)
         catalog = StickerCatalog(services)
@@ -201,16 +210,21 @@ class SampleDrawer:
 
     # ------------------------------------------------------------------ strata
 
+    def start(self) -> datetime:
+        """The first moment a drawn context may have: the cut-off, or ``since`` when later."""
+        cutoff = holdout_cutoff(self._services)
+        return max(cutoff, self._since) if self._since is not None else cutoff
+
     def stratum_of(self, ref: BlockRef) -> Stratum:
         hour = int(self._place.stamp(ref.reply_at).minute // 60)
         return period_of(min(23, hour)), length_bin_of(len(ref.context_ids))
 
     def candidates(self, exclude: set[str]) -> tuple[dict[Stratum, list[BlockRef]], DrawResult]:
         """The blocks of the hold-out that pass the checks that need no text, by stratum."""
-        cutoff = holdout_cutoff(self._services)
-        result = DrawResult()
+        start = self.start()
+        result = DrawResult(start=start)
         groups: dict[Stratum, list[BlockRef]] = defaultdict(list)
-        for ref in iter_block_refs(self._services, since=cutoff):
+        for ref in iter_block_refs(self._services, since=start):
             result.holdout_blocks += 1
             if ref.reproducible != len(ref.reply_ids):
                 result.excluded[REASON_NOT_REPRODUCIBLE] += 1

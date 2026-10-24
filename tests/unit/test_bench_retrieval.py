@@ -28,7 +28,8 @@ def test_the_benchmark_builds_a_library_and_measures_encoding_and_queries(tmp_pa
         tmp_path, days=14, embedder=EmbeddingService(HashingBackend()), queries=4
     )
     assert result["windows"] > 100 and result["encoded"] > 50 and result["held_out"] > 0
-    assert result["encoded"] + result["held_out"] <= result["windows"]
+    # the held-out windows are encoded too since round 18 (user decision, D-880)
+    assert result["encoded"] <= result["windows"] and result["held_out"] < result["windows"]
     assert result["dimension"] == HashingBackend().info.dimension
     assert result["encode_seconds"] >= 0 and result["query_ms_mean"] > 0
     assert result["peak_rss_mb"] > 0 and result["messages"] > 500

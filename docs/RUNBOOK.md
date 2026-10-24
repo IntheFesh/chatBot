@@ -235,9 +235,9 @@ uv run twin jobs cancel <任务号>
 
 ### 3.4 增量导入（以后）
 
-以后想补充新记录：再导出一份，同样 `uv run twin import "D:\新的导出目录"`，或者在微信里发 `/导入 D:\新的导出目录`（先用 CLI 做过第一次导入，聊天里不能选目标会话）。按消息 id 幂等：重复的跳过，同 id 内容不同时以较新的导出为准并记录差异数。应用在运行时导入结束后她会用一条系统消息报一次条数。导入完成后画像、检索库、记忆回放等对新日期范围自动排队，并检查要不要提醒重训。但检索库只编码留出切分点**之前**的窗口：切分点不随导入移动，新日期范围在下面的重切之前都属于留出集，不进检索库、也不进训练集（第 18 轮，D-818）。
+以后想补充新记录：再导出一份，同样 `uv run twin import "D:\新的导出目录"`，或者在微信里发 `/导入 D:\新的导出目录`（先用 CLI 做过第一次导入，聊天里不能选目标会话）。按消息 id 幂等：重复的跳过，同 id 内容不同时以较新的导出为准并记录差异数。应用在运行时导入结束后她会用一条系统消息报一次条数。导入完成后画像、检索库、记忆回放等对新日期范围自动排队，并检查要不要提醒重训。检索库收录全部窗口，新导入的最近聊天也会被她的“类似情况下怎么回”找到（第 18 轮，你的决定，D-880；评估与训练只能看到样本时刻之前的窗口）。切分点不随导入移动：新日期范围在下次 `twin train export`（它会先自动重切，D-881）之前都属于留出集，不进训练集（D-818）。
 
-> 留出集切分点（评估和训练测试集用的最近 10%）由唯一函数 `holdout_cutoff()` 给出，**导入新数据不会自动移动它**。想把它移到今天数据的最新 10%：`uv run twin retrieval resplit`（评估结果前后不可比，会先问你）。`uv run twin profile show` 显示切分点之后现在有多少回复块、占多少；明显超过配置比例（超过两倍且多出 10 个百分点以上）时，它、导入报告的“数据质量提示”、`twin train retrain-check` 与 `twin train export` 都会提示先重切。
+> 留出集切分点（评估和训练测试集用的最近 10%）由唯一函数 `holdout_cutoff()` 给出，**导入新数据不会自动移动它**；`uv run twin train export` 每次先把它移到当时数据的最新 10%（`retrieval.holdout_ratio`），并等 pre_holdout 的画像、作息、人设卡统计与表情包上下文标签为新切分点重建完再读数据（第 18 轮，你的决定，D-881、D-882）。想不导出就移动：`uv run twin retrieval resplit`（会先问你）。重切不作废已存的评估与门槛结果；之后的评估只从新切分点之后取上下文，用过的仍不再用（D-884）。`uv run twin profile show` 显示切分点之后现在有多少回复块、占多少；明显超过配置比例（超过两倍且多出 10 个百分点以上）时，它、导入报告的“数据质量提示”与 `twin train retrain-check` 都会提示。
 
 ---
 
@@ -408,7 +408,7 @@ uv run twin jobs run --until-idle            # 应用没在运行时执行已批
 uv run twin train export --foreground        # 再运行一次，这次写出数据集
 ```
 
-每个样本以她的一个真实回复块为目标，输入是前面最多 8 个合并轮次，系统提示由与线上同一个 `StylePromptBuilder` 生成（精简人设卡 + 当时的时间与作息状态 + 当时已知的记忆），机器人自己的回复永远不进入。导出前脱敏；`--from 2026-01-01 --to 2026-06-30` 可限定日期范围；测试集是最近 10%（与留出集一致）。第一次导出会下载 Qwen3 的 `tokenizer.json`，两处都连不上时用 `--tokenizer <文件或目录>` 指定。
+每个样本以她的一个真实回复块为目标，输入是前面最多 8 个合并轮次，系统提示由与线上同一个 `StylePromptBuilder` 生成（精简人设卡 + 当时的时间与作息状态 + 当时已知的记忆），机器人自己的回复永远不进入。导出前脱敏；`--from 2026-01-01 --to 2026-06-30` 可限定日期范围；测试集是最近 10%（与留出集一致）。**导出先自动重切**（第 18 轮，你的决定，D-881..D-883）：数据比切分点新了，导出先把切分点移到当时的最新 10%，`export-status` 显示 `rebuilding`（在等 pre_holdout 画像重算、人设卡统计刷新、表情包上下文修正；应用会接着做，应用没运行时 `--foreground` 就地跑完）；之后第一次停在 `waiting_for_plans` 时，人设卡 `[自动-描述]` 为新切分点重新生成的费用已经算在同一个批次里（“persona description is generated again … in the same batch”），批准一次即可，批任务跑完再运行一次 `twin train export`。第一次导出会下载 Qwen3 的 `tokenizer.json`，两处都连不上时用 `--tokenizer <文件或目录>` 指定。
 
 ### 6.5 加密打包、上传与远程训练
 
@@ -442,7 +442,7 @@ uv run twin model list
 
 ### 6.7 继续训练与 DPO
 
-她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = （先 `uv run twin retrieval resplit`，见下）→ 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。训练集只取留出切分点之前的样本，切分点不随导入移动：不重切，上次之后导入的聊天全在留出集里，新导出的训练集与上次几乎一样（`retrain-check` 与 `export` 在切分点明显落后时会提示，第 18 轮 D-818）。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
+她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = 重新 `twin train export`（新版本号；它先自动把切分点移到最新的 10% 并重建 pre_holdout 数据，人设卡描述的重新生成并入同一批任务，第 18 轮 D-881..D-883）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。训练集只取切分点之前的样本；切分点不随导入移动，但每次导出都会移到当时的最新部分，所以上次之后导入的聊天会进入新的训练集。`retrain-check` 在切分点明显落后时照常提示（D-818）。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
 
 **第 18 轮之前导出的数据集要重新导出（D-840）**：你发的表情包与引用在训练集、评估沙盒和线上现在是同一种写法（表情包带描述与情绪标签，引用截到 30 字），旧数据集里是另一种。重新 `twin train export` → `bundle` → `remote all` 并重跑 `twin eval gate M5`；导出前用 `twin stickers tag-all` 让你发过的表情包都有描述。
 
@@ -567,7 +567,7 @@ uv run twin model tunnel stop             # 用完关闭，然后到 AutoDL 控�
 ### 8.3 评估、激活门槛与回退
 
 ```powershell
-uv run twin model evaluate <模型号> --n 80              # 从留出集抽 80 个新上下文，deepseek / style / hybrid 各生成一遍，估价
+uv run twin model evaluate <模型号> --n 80              # 从模型训练时的切分点之后抽 80 个新上下文，deepseek / style / hybrid 各生成一遍，估价
 uv run twin jobs approve <批次号>
 uv run twin model evaluate <模型号> --resume <运行号> --foreground   # 生成（这时才启动模型服务器）并让你判“哪条是她”
 uv run twin model evaluate <模型号> --style             # 风格样本：样本量自动定（约 700 条回复/方式），估价
@@ -579,6 +579,8 @@ uv run twin model disable <模型号>                       # 停用；运行中
 ```
 
 上线门槛（R-SRV-005）：盲测里风格模型（style 或 hybrid 其中一种）的猜对率低于 deepseek 后端（单侧两比例检验 p < 0.1，每个后端各有 ≥ 50 对有效判断），**且**留出集六项风格指标都在 ±30% 以内。
+
+**只在模型的切分点之后取样**（第 18 轮，你的决定，D-885、D-886）：`twin model register` 把模型训练时的留出切分点锁进登记（`twin model show` 的 “hold-out cut-off”），`twin model evaluate`（盲测与 `--style`）只从它与当前切分点中较晚的那个之后取上下文，模型不会被问到训练时见过的对话；以前用过的上下文照旧不再用。第 18 轮之前登记、本机又没有它的数据集记录的模型不知道切分点，评估会拒绝并提示重新 `twin model register`。
 
 **风格指标看“风格样本”，不看盲测那几十对**（第 18 轮，你的决定，D-852）：她的逗号率只有 3% 左右，65 个上下文里同分布的模型三项稀有比例同时落在 ±30% 内的概率只有约四分之一。所以比例类指标要有 **≥ 50 次期望事件**（她的比率 × 机器人回复里的分母）才判定，不够就是“样本不足”（不是不通过）；`twin model evaluate <模型号> --style` 按最稀有的比例指标达到 50 次期望事件（再加 10% 余量，抵消分母的波动和生成失败的对子）自动定样本量——按她的比率约 700 条回复/方式，上限是留出集的可用上下文，不够时每个上下文用不同的随机种子多生成几份（种子记在每一条里）。它是一次性批任务，先估价：style 方式不调用 DeepSeek，hybrid 方式每条要一次 DeepSeek 规划。这些回复不用你判断；盲测仍按自己的 `--n`。生成完以后若还有指标“样本不足”（例如模型的回复比她短、文字气泡少），再运行一次 `--style` 会按模型实际的分母补足；够了会说“nothing more to generate”。盲测已经输给 deepseek 的方式直接判不通过，不必再做风格样本。通道做不到的指标（引用率）不计入，报告另附一个参考数：模型写了 `[引用:…]` 的回复占比。分词核对没过的模型任何情况下都不能激活。`--force` 能在门槛没过时强制启用，但会记审计、`/状态` 一直写“未通过门槛”、预算降级的最后一级不会切到它：
 

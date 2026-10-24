@@ -17,15 +17,18 @@ setting; later calls return the stored value, so importing new records never mov
 would silently change which part of the data the evaluation has seen).  :func:`resplit_holdout`
 recomputes it on purpose, records the change, and tells every registered listener — the profile
 rebuild of the pre-holdout scope is queued automatically; later rounds register theirs with
-:func:`on_holdout_change`.
+:func:`on_holdout_change`.  Two callers re-split (round 18, user decision, D-881):
+``twin retrieval resplit`` when the user asks, and ``twin train export`` by itself through
+:func:`resplit_if_behind` - the test split of a new training set is the newest
+``retrieval.holdout_ratio`` of the data *then*.  A re-split voids no stored evaluation or gate
+verdict (D-884); the evaluations after it draw their contexts after the new cut-off.
 
-Drift (R18-C3, D-818).  Because the cut-off stays, everything imported later is held out: kept
-from the example library and from the training split.  :func:`holdout_share` counts, without
-storing anything, the share of her reply blocks at or after the stored cut-off *now*;
-:func:`drift_warning` turns a share clearly above ``retrieval.holdout_ratio`` (more than twice the
-ratio and more than ten points above it) into the one sentence that ``twin profile show``, the
-retraining check, the export and the import report print: run ``twin retrieval resplit``.
-Moving the cut-off by itself is not done here (the user decides).
+Drift (R18-C3, D-818).  Between two exports the cut-off stays, so everything imported later is held
+out: kept from the training split (the example library holds it anyway since round 18, D-880).
+:func:`holdout_share` counts, without storing anything, the share of her reply blocks at or after
+the stored cut-off *now*; :func:`drift_warning` turns a share clearly above
+``retrieval.holdout_ratio`` (more than twice the ratio and more than ten points above it) into the
+one sentence that ``twin profile show``, the retraining check and the import report print.
 """
 
 from __future__ import annotations
@@ -226,23 +229,45 @@ def drift_warning(share: HoldoutShare) -> str | None:
     return (
         f"留出集已占她回复块的 {share.share:.0%}（{share.held_out_blocks:,} / {share.blocks:,}；"
         f"配置的留出比例 {share.ratio:.0%}，"
-        f"切分点 {share.cutoff:%Y-%m-%d %H:%M} UTC 不会自动移动）："
-        "切分点之后导入的聊天都在留出集里，既不进检索库也不进训练集，重训也学不到它们。"
-        "先运行 `twin retrieval resplit` 把切分点移到现在数据的最新部分"
-        "（之前的评估结果与之后不可比）"
+        f"切分点 {share.cutoff:%Y-%m-%d %H:%M} UTC 导入时不会移动）："
+        "切分点之后导入的聊天都在留出集里，检索库照常收录，但不进训练集。"
+        "下次 `twin train export` 会先自动把切分点移到当时数据的最新部分并重建 pre_holdout 数据；"
+        "想现在就移动，运行 `twin retrieval resplit`"
+        "（已存的评估结果保留，之后的评估只用新切分点之后的上下文）"
     )
 
 
-def resplit_holdout(services: Services, *, by: str = "user") -> ResplitResult:
+def resplit_if_behind(services: Services, *, by: str) -> ResplitResult | None:
+    """Re-split when the data has moved past the stored cut-off (``twin train export``, D-881).
+
+    The cut-off a re-split would choose now is computed; when it is the stored one nothing
+    happens (``None``) - the export of the same data twice keeps its split.  Before any cut-off
+    was stored the computed one is stored as the first, like :func:`holdout_cutoff` does.
+    """
+    current = compute_holdout(services)
+    stored = get_holdout(services)
+    if stored is None:
+        _store(services, current, by=by)
+        return None
+    if stored.cutoff == current.cutoff:
+        return None
+    return resplit_holdout(services, by=by, current=current)
+
+
+def resplit_holdout(
+    services: Services, *, by: str = "user", current: Holdout | None = None
+) -> ResplitResult:
     """Recompute the split point from the data now and tell the dependants.
 
-    Everything derived from the pre-holdout part of the data is out of date afterwards, and
-    evaluation results from before the re-split are not comparable with later ones.
+    ``current`` is the split :func:`compute_holdout` gave a moment ago (the caller computed it
+    already).  Everything derived from the pre-holdout part of the data is out of date afterwards;
+    evaluation results from before the re-split stay stored and are not comparable with later
+    ones (D-884).
     """
     for module in LISTENER_MODULES:
         importlib.import_module(module)
     previous = get_holdout(services)
-    current = compute_holdout(services)
+    current = current if current is not None else compute_holdout(services)
     _store(services, current, by=by)
     notes = [
         "evaluation results from before this re-split are not comparable with later ones",

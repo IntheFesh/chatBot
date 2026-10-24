@@ -204,5 +204,7 @@ selects the adapter with its `model` field; `/v1/completions` and `/tokenize` ex
   real tokenizer files in an environment of its own (see its docstring).
 * **Artifact manifest** (`artifacts/manifest.json`, schema 1): `run_id`, `profile`, `base_model`,
   `template`, `template_version`, `persona_version`, `profile_version`, `dataset_version`,
-  `llamafactory_version`, `llama_cpp_tag`, `models[]` (`quant`, `kind`, `path`), `files[]` (`path`,
-  `sha256`, `size`), `metrics`.  `twin model register` locks the four versions from it.
+  `holdout_cutoff`, `llamafactory_version`, `llama_cpp_tag`, `models[]` (`quant`, `kind`, `path`),
+  `files[]` (`path`, `sha256`, `size`), `metrics`.  `twin model register` locks the four versions
+  from it, and the hold-out cut-off of the training set (round 18, D-885): the evaluation of the
+  model draws only contexts after it (D-886).

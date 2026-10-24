@@ -23,7 +23,11 @@ from twin.ops.jobs import HandlerRegistry, JobQueue, Worker
 from twin.ops.process_model import iter_commands
 from twin.profile.builder import rebuild
 from twin.profile.holdout import LISTENER_MODULES, holdout_cutoff, resplit_holdout
-from twin.profile.persona.hook import persona_after_resplit, queue_persona
+from twin.profile.persona.hook import (
+    persona_after_resplit,
+    plan_description_after_resplit,
+    queue_persona,
+)
 from twin.profile.persona.jobs import (
     PERSONA_JOB,
     REFRESH_JOB,
@@ -296,6 +300,9 @@ def test_a_small_growth_only_refreshes_the_statistics(library: Services) -> None
 
 
 def test_after_a_resplit_the_past_card_is_refreshed_and_described_again(library: Services) -> None:
+    """Rewritten in round 18 (user decision, D-883): the listener queues the free statistics
+    refresh; the paid description is planned by the command that re-split - ``twin retrieval
+    resplit`` as a batch of its own (here), ``twin train export`` inside the batch of its plans."""
     holdout_cutoff(library)
     append_texts(
         library,
@@ -304,12 +311,15 @@ def test_after_a_resplit_the_past_card_is_refreshed_and_described_again(library:
     assert "twin.profile.persona.hook" in LISTENER_MODULES
     outcome = resplit_holdout(library)
     notes = " | ".join(outcome.notes)
-    assert "persona: pre-holdout statistics refresh queued" in notes
-    assert "twin jobs approve persona-" in notes
-    assert [j.payload["scope"] for j in jobs_of(library, PERSONA_JOB)] == ["pre_holdout"]
+    assert "persona: pre-holdout statistics refresh queued" in notes and "stale" in notes
+    assert jobs_of(library, PERSONA_JOB) == []  # who pays is the caller's choice
     assert jobs_of(library, REFRESH_JOB)[0].payload["scope"] == "pre_holdout"
-    again = persona_after_resplit(library, None, outcome.current)
-    assert "already waiting" in again
+    planned = plan_description_after_resplit(library)
+    assert "twin jobs approve persona-" in planned
+    assert [j.payload["scope"] for j in jobs_of(library, PERSONA_JOB)] == ["pre_holdout"]
+    persona_after_resplit(library, None, outcome.current)  # the listener again: nothing paid
+    assert "already waiting" in plan_description_after_resplit(library)
+    assert len(jobs_of(library, PERSONA_JOB)) == 1
 
 
 async def test_a_real_import_queues_the_persona_work(services: Services, tmp_path: Path) -> None:

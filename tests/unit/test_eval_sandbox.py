@@ -511,7 +511,10 @@ def test_the_sample_clock_reads_the_moment_of_the_sample(world: World) -> None:
 async def test_the_data_view_of_the_sandbox_is_the_pre_holdout_one_with_earlier_examples_only(
     world: World, kit: SandboxKit
 ) -> None:
-    """R-TRN-013: persona and profile are pre-holdout; every example is from before ``t``."""
+    """R-TRN-013: persona and profile are pre-holdout; every example is from before ``t``.
+
+    Changed in round 18 (user decision, D-880): the library holds the held-out period too, so an
+    example may come from it - but only from before ``t``, and never the sample's own window."""
     samples = sample_of(world, 6)
     for sample in samples:
         view = kit.sandbox.view(sample.at)
@@ -524,7 +527,7 @@ async def test_the_data_view_of_the_sandbox_is_the_pre_holdout_one_with_earlier_
         turns = [QueryTurn(her=False, text=line) for line in sample.shown[-1]["lines"]]
         found = await view.examples(turns, k=8)
         assert found and all(example.reply_at < sample.at for example in found)
-        assert all(example.reply_at < world.cutoff for example in found)  # the hold-out never
+        assert sample.sample_key not in {example.window_id for example in found}  # never itself
         assert sample.real.lines[0].text not in {
             line.text for example in found for line in example.reply
         }

@@ -304,9 +304,11 @@ async def test_examples_come_from_before_the_moment_only(chat: Services) -> None
     with chat.db.session() as session:
         replied = dict(session.execute(select(ExampleWindow.id, ExampleWindow.reply_at_utc)).all())
     assert all(replied[e.window_id] < early for e in found)
-    after_cut = source.at(cutoff + timedelta(days=1))
-    later = await after_cut.examples([QueryTurn(False, "哈哈")], k=40)
-    assert later and all(example.reply_at < cutoff for example in later)  # the hold-out stays out
+    moment = cutoff + timedelta(days=1)
+    later = await source.at(moment).examples([QueryTurn(False, "哈哈")], k=40)
+    # round 18 (user decision, D-880): the held-out period is in the library; ``before=t`` alone
+    # keeps a past moment from what came after it
+    assert later and all(example.reply_at < moment for example in later)
 
 
 def test_stickers_and_emoji_codes_are_those_of_the_moment(chat: Services) -> None:

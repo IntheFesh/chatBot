@@ -230,6 +230,73 @@ def test_missing_plans_are_queued_as_a_priced_batch_and_the_second_export_comple
     assert state["stats"]["plans"]["planned"] > 0
 
 
+def test_r18_c3_the_foreground_export_resplits_rebuilds_and_plans_one_batch(
+    data_dir: Path, embedder: HashingBackend, tokenizer: None, tmp_path: Path
+) -> None:
+    """R18-C3 ② (D-881..D-883): after two weeks of new chat, ``twin train export --foreground``
+    moves the cut-off, runs the pre-holdout rebuild it waits for, and plans the plans and the new
+    description as one priced batch."""
+    from tests.support.memory import mark_days_replayed
+    from tests.support.synth_chat import append_texts
+    from twin.profile.holdout import get_holdout
+    from twin.profile.persona.refresh import count_her_messages, write_description
+
+    def prepare(services: Services) -> datetime:
+        built = build_world(services, embedder, days=8)
+        write_description(
+            services,
+            "pre_holdout",
+            "### 风格\n- 句子短\n\n",
+            provenance={"cutoff": built.cutoff.isoformat()},
+            template_version="t@1",
+            her_messages=count_her_messages(services, "pre_holdout"),
+            at=services.clock.now_utc(),
+        )
+        moment = datetime(2026, 8, 16, 9, 0, tzinfo=UTC)
+        rows = []
+        for _ in range(70):
+            rows.append((moment, False, "在干嘛呢"))
+            rows.append((moment + timedelta(seconds=40), True, "刚下班在路上"))
+            moment += timedelta(hours=4, minutes=48)
+        append_texts(services, rows)
+        mark_days_replayed(services)
+        return built.cutoff
+
+    old = with_services(prepare)
+    result = invoke("train", "export", "--out", str(tmp_path / "ds"), "--foreground")
+    assert result.exit_code == 0, result.output
+    assert "the export first moves it to the newest 10%" in result.output
+    assert "export: waiting_for_plans" in result.output
+    assert "persona description is generated again for the cut-off" in result.output
+    assert "twin jobs approve " in result.output and not (tmp_path / "ds").exists()
+    stored = with_services(get_holdout)
+    assert stored is not None and stored.cutoff > old
+
+
+def test_r18_c3_a_foreground_export_that_still_waits_says_who_runs_it(
+    data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C3 ② (D-882): when the rebuild an export waits for cannot run here (a sticker job
+    waiting for the off-peak hours), the foreground says so and how it goes on."""
+
+    async def nothing(services: Services) -> None:
+        export_job.save_state(
+            services,
+            {
+                "state": "rebuilding",
+                "cutoff": "2026-08-20T00:00:00+00:00",
+                "previous_cutoff": None,
+                "waiting_for": ["sticker_tag"],
+            },
+        )
+
+    monkeypatch.setattr(training_cli, "_export_in_foreground", nothing)
+    result = invoke("train", "export", "--foreground")
+    assert result.exit_code == 0, result.output
+    assert "export: rebuilding" in result.output and "sticker_tag" in result.output
+    assert "the application is not running: `twin train export --foreground`" in result.output
+
+
 def test_a_run_that_fails_on_the_data_says_why_and_is_not_retried(
     world_in_cli_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

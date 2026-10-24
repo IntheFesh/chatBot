@@ -271,12 +271,14 @@ async def plan_blind(
     kit: SandboxKit | None = None,
     models: StyleModels | None = None,
     extra_params: Mapping[str, Any] | None = None,
+    since: datetime | None = None,
 ) -> BlindPlan:
     """Draw the contexts, store the pairs and queue the generation as one-time batches.
 
     ``twin model evaluate`` compares the backends for one model: ``models`` pins that model for
     the readiness check and ``extra_params`` (its ``model_id``) go into the run, so that the
-    generation and the release gate know which model the pairs belong to (R-SRV-005).
+    generation and the release gate know which model the pairs belong to (R-SRV-005); ``since``
+    is the cut-off the model was trained with - no context before it is drawn (D-886).
     """
     check_backends(services, backends, models)
     problems = readiness_problems(services, backends)
@@ -286,7 +288,7 @@ async def plan_blind(
     store = EvalStore(services.db, services.clock)
     exclude = store.used_sample_keys("blind")
     drawn: DrawResult = await asyncio.to_thread(
-        lambda: SampleDrawer(services).draw(n, seed=chosen_seed, exclude=exclude)
+        lambda: SampleDrawer(services, since=since).draw(n, seed=chosen_seed, exclude=exclude)
     )
     if not drawn.samples:
         raise EvalError(
@@ -369,6 +371,7 @@ def _store_plan(
             "seed": seed,
             "thinking_mode": thinking,
             "holdout_cutoff": cutoff.isoformat(),
+            "drawn_since": drawn.start.isoformat() if drawn.start else cutoff.isoformat(),
             "context_turns": 8,
             "available": drawn.available,
             "holdout_blocks": drawn.holdout_blocks,
