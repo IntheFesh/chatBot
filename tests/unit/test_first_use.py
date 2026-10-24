@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -312,3 +313,17 @@ async def test_a_job_handed_back_because_deepseek_cannot_do_it_is_not_waited_for
     JobQueue(db, clock).enqueue("caption", {})
     summary = await worker(db, clock, registry).run_until_idle(wait_s=FOREGROUND_WAIT_S)
     assert summary.deferred == 1 and clock.sleeps == []
+
+
+def test_bringing_a_job_forward_touches_only_a_pending_job(
+    db: Database, clock: ManualClock
+) -> None:
+    """R18-F1: a job cancelled (or finished) meanwhile is left alone."""
+    queue = JobQueue(db, clock)
+    later = queue.enqueue("later", {}, run_after=clock.now_utc() + timedelta(hours=1))
+    assert queue.bring_forward(later)
+    job = queue.get(later)
+    assert job is not None and job.run_after == clock.now_utc()
+    assert queue.cancel(later)
+    assert not queue.bring_forward(later)
+    assert not queue.bring_forward("no-such-job")

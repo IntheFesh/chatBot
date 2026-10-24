@@ -231,6 +231,11 @@ def test_a_failed_write_keeps_the_file(
     assert result.exit_code == int(ExitCode.SECRETS), result.output
     assert "the file store was kept" in result.output
     assert _file_entries() == filled_file_store
+    double.fail_on_write = None  # the credential manager works again: the second run finishes
+    again = runner.invoke(app, ["secrets", "migrate"])
+    assert again.exit_code == 0, again.output
+    assert "already there with the same value" in again.output
+    assert _migrated(double) == filled_file_store
 
 
 def test_an_entry_that_differs_in_the_credential_manager_stops_the_move(

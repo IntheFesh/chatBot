@@ -28,7 +28,9 @@
    - 预期：之后每次 `git commit` 会先跑 `scripts/privacy_scan.py`、`ruff check`、`ruff format --check`。
 
 5. **（可选）创建本地配置**
-   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 没有默认值（示例文件里是 `null`）：运行 `uv run twin setup`，向导问她是否知情并同意，你确认后输入 `2026-10-08` 写入；缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除的命令外一律拒绝运行（退出码 3，D-825）。
+   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 没有默认值（示例文件里是 `null`）：运行 `uv run twin setup`，向导问她是否知情并同意，你确认后输入 `2026-10-08` 写入；缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除的命令外一律拒绝运行（退出码 3，D-825）。**已经装好的电脑升级到第 18 轮之后**：如果 `config\config.yaml` 里没有这一行（以前靠默认值），命令会以退出码 3 拒绝，运行一次 `uv run twin setup` 补上即可。
+   - **（需要你确认，D-825）** 你的决定原文是“缺失时除 setup/doctor 外拒绝”。实现另外保留了四条不需要同意的命令：`twin purge`（她撤回同意时要能删除她的数据）、`twin service stop` 与 `twin service uninstall`（要能停下并移除正在运行的机器人）、`twin secrets migrate`（与凭据守卫互锁，见 D-827/D-828）。如果你要严格只留 setup/doctor，告诉我，去掉这四处的 `consent=False` 即可。
+   - **（第 18 轮，D-827/D-828）** 如果你在 Windows 上设过 `TWIN_KEYRING_BACKEND=file`：现在除 `twin doctor` 外所有要读写秘密的命令都会以退出码 6 拒绝。先 `uv run twin service stop`，再 `uv run twin secrets migrate`（把全部条目，含已退役的数据库密钥，迁入 Windows 凭据管理器，读回比对、解密数据抽样后才删除文件），最后从环境变量里删掉 `TWIN_KEYRING_BACKEND` 和 `TWIN_ALLOW_FILE_KEYRING`。
 
 6. **（已确认）Windows CI 修复：第 00 轮首次 `windows-latest` 运行有 13 个失败，按根因修复后，提交 `eac181e`、`e3fac3e` 的 `windows-latest` 与 `ubuntu-latest` 任务均为绿色。以下仅作记录，无需再做。**
    - 做什么：看下一次推送后 GitHub Actions 里 `quality (windows-latest)` 任务，或本机 `uv run pytest -q`。
