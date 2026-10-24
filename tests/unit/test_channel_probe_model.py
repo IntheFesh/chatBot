@@ -23,9 +23,11 @@ from twin.channel.probe.images import (
 from twin.channel.probe.model import (
     Action,
     ActionKind,
+    ActionStatus,
     Attempt,
     AttemptPhase,
     ProbeOptions,
+    SendRecord,
     StepId,
     StepStatus,
     new_plan,
@@ -428,3 +430,62 @@ def test_a_summary_stored_before_the_comparison_existed_is_still_read(
         stored = load_channel_probe_summary(session)
     assert stored is not None and stored.png_displayed is None
     assert stored.gif_send_mode_suggestion is None and stored.gif_animated is True
+
+
+# ------------------------------------------ the codes that end a session (R18-F11, D-905)
+
+
+def failed_send(code: int | None, outcome: str = "window_rejected") -> SendRecord:
+    return SendRecord(ok=False, outcome=outcome, reason="refused", code=code, ret=code)
+
+
+def attempt_with(*records: SendRecord | None) -> Attempt:
+    actions = [
+        Action(
+            id=f"send:{index}",
+            kind=ActionKind.SEND_TEXT,
+            label=f"#{index}",
+            status=ActionStatus.DONE if record is None else ActionStatus.FAILED,
+            send=SendRecord(ok=True, outcome="sent") if record is None else record,
+        )
+        for index, record in enumerate(records, start=1)
+    ]
+    return Attempt(
+        n=1,
+        phase=AttemptPhase.FINISHED,
+        armed_at=NOW,
+        baseline_inbound_at=None,
+        inbound_at=NOW,
+        actions=actions,
+    )
+
+
+def test_the_codes_that_ended_a_count_or_window_attempt_are_suggested() -> None:
+    """R18-F11 (D-905): ``channel.session_expired_codes`` was "to be filled in after M0" but the
+    probe never said which codes it saw.  The platform's answer to the send that ended a count
+    or window attempt (the quota or the window ran out) is now collected and suggested."""
+    plan = measured_plan()
+    plan.step(StepId.COUNT).attempts.append(attempt_with(None, None, failed_send(-2)))
+    plan.step(StepId.WINDOW).attempts.append(attempt_with(None, failed_send(-7, "rejected")))
+    # not the end of a session: a media refusal, a failure of this machine, the login code
+    plan.step(StepId.MEDIA).attempts.append(attempt_with(failed_send(-5, "rejected")))
+    plan.step(StepId.WINDOW).attempts.append(attempt_with(failed_send(None, "network")))
+    plan.step(StepId.COUNT).attempts.append(attempt_with(failed_send(-14, "auth_expired")))
+    summary = summarize(plan)
+    assert summary.session_codes_seen == [-7, -2]
+    nothing = summarize(measured_plan())
+    assert nothing.session_codes_seen == []
+
+
+def test_a_summary_stored_before_the_codes_were_collected_is_still_read(
+    db: Database, clock: ManualClock
+) -> None:
+    from twin.storage.settings_store import put_setting
+
+    payload = summarize(measured_plan()).to_json()
+    del payload["session_codes_seen"]
+    with db.transaction() as session:
+        put_setting(session, "m0.channel_probe", payload, clock=clock)
+    with db.session() as session:
+        stored = load_channel_probe_summary(session)
+    assert stored is not None and stored.session_codes_seen == []

@@ -21,6 +21,7 @@ from twin.channel.probe.model import (
     ProbePlan,
     Question,
     QuestionKind,
+    SendRecord,
     StepId,
     StepStatus,
 )
@@ -710,3 +711,78 @@ def test_a_gif_that_stays_still_with_the_first_frame_already_chosen_is_not_asked
         input="n\n",
     )
     assert result.exit_code == 0 and "gif_send_mode" not in result.output
+
+
+def session_ends_with(store: ProbeStore, *codes: int) -> None:
+    """The count step's attempts ended with the platform refusing with ``codes``."""
+
+    def change(plan: ProbePlan) -> None:
+        count = plan.step(StepId.COUNT)
+        for number, code in enumerate(codes, start=1):
+            count.attempts.append(
+                Attempt(
+                    n=number,
+                    phase=AttemptPhase.FINISHED,
+                    armed_at=plan.created_at,
+                    baseline_inbound_at=None,
+                    actions=[
+                        Action(
+                            id="send:1",
+                            kind=ActionKind.SEND_TEXT,
+                            label="#1",
+                            status=ActionStatus.FAILED,
+                            send=SendRecord(
+                                ok=False, outcome="window_rejected", code=code, ret=code
+                            ),
+                        )
+                    ],
+                )
+            )
+
+    store.update(change)
+
+
+def test_report_offers_the_codes_that_ended_a_session(svc: Services, tmp_path: Path) -> None:
+    """R18-F11 (D-905): the codes the platform answered when the quota ran out are offered for
+    ``channel.session_expired_codes`` and written only after a yes."""
+    store = probe_store(svc)
+    store.create()
+    measured(store)
+    session_ends_with(store, -3, -2)
+    store.finish(PlanStatus.COMPLETED, None)
+    config = tmp_path / "c.yaml"
+    config.write_text("channel: { kind: ilink }\n", encoding="utf-8")
+    base = [
+        "--config",
+        str(config),
+        "channel",
+        "probe",
+        "report",
+        "--output",
+        str(tmp_path / "r.md"),
+    ]
+    refused = runner.invoke(app, base, input="n\n")
+    assert refused.exit_code == 0, refused.output
+    assert "channel.session_expired_codes: [-2] -> [-3, -2]" in refused.output
+    assert load_settings(config).channel.session_expired_codes == [-2]
+    written = runner.invoke(app, base, input="y\n")
+    assert written.exit_code == 0, written.output
+    assert load_settings(config).channel.session_expired_codes == [-3, -2]
+
+
+def test_codes_that_are_already_configured_are_not_offered_again(
+    svc: Services, tmp_path: Path
+) -> None:
+    store = probe_store(svc)
+    store.create()
+    measured(store)
+    session_ends_with(store, -2)
+    store.finish(PlanStatus.COMPLETED, None)
+    config = tmp_path / "c.yaml"
+    config.write_text("channel: { kind: ilink }\n", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["--config", str(config), "channel", "probe", "report", "--output", str(tmp_path / "r.md")],
+        input="n\n",
+    )
+    assert result.exit_code == 0 and "session_expired_codes" not in result.output

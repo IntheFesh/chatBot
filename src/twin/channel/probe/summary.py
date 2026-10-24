@@ -4,7 +4,9 @@
 :class:`ChannelProbeSummary`: the numbers the milestone check (round 09b) needs, the verdict
 on R-CH-010 and the suggested values for ``channel.proactive_window_safe_h`` and
 ``channel.outbound_quota_safe`` - and, beside them, the comparison of the moving GIF with the
-static PNG and the suggestion for ``stickers.gif_send_mode`` (R-STK-007, R17-38).  It is stored
+static PNG and the suggestion for ``stickers.gif_send_mode`` (R-STK-007, R17-38), and the codes
+the platform answered when a count or window attempt ran out, the observed values for
+``channel.session_expired_codes`` (R-CH-008, round 18 item F11, D-905).  It is stored
 in the ``settings`` table under :data:`SUMMARY_KEY` (format: ``docs/DECISIONS.md`` D-152) and read
 back with :func:`load_channel_probe_summary`.
 
@@ -46,6 +48,9 @@ HISTORY_LIMIT = 10
 MIN_WINDOW_H = 12.0  # R-CH-010: a shorter window cannot carry the proactive messages
 MIN_MESSAGES = 3  # R-CH-010: fewer messages after one inbound cannot carry chasing
 MARGIN = 0.9  # the suggested safe values keep 10 % in reserve
+# the steps whose attempts end when the platform stops taking messages (quota or window over)
+SESSION_STEPS = frozenset({StepId.COUNT, StepId.WINDOW})
+NOT_SESSION_CODES = frozenset({0, -14})  # success; the login code (a new login, D-683)
 
 VERDICT_MET = "met"
 VERDICT_NOT_MET = "not_met"
@@ -81,6 +86,9 @@ class ChannelProbeSummary:
     # has neither, which reads as unknown)
     png_displayed: bool | None = None
     gif_send_mode_suggestion: str | None = None
+    # R-CH-008 (R18-F11): the platform's codes for "no more until the user writes again"; a
+    # result stored before round 18 has none, which reads as "nothing seen"
+    session_codes_seen: list[int] = field(default_factory=list)
     schema_version: int = SUMMARY_SCHEMA_VERSION
 
     @property
@@ -228,6 +236,34 @@ def _typing_visible(media: dict[str, Any]) -> bool | None:
     return {"yes": True, "no": False}.get(answer) if isinstance(answer, str) else None
 
 
+def session_codes_seen(plan: ProbePlan) -> list[int]:
+    """The codes of the refusals that ended a count or window attempt (sorted, no repeats).
+
+    Such an attempt sends until the platform says no: the first refusal with a code is the
+    platform telling that the quota or the window is over - what ``channel.session_expired_codes``
+    lists (D-905).  Refusals of this machine (no code), of other steps, success and the login
+    code are not counted.
+    """
+    codes: set[int] = set()
+    for step in plan.steps:
+        if step.id not in SESSION_STEPS:
+            continue
+        for attempt in step.attempts:
+            for action in attempt.actions:
+                record = action.send
+                if record is None or record.ok:
+                    continue
+                code = record.code
+                if (
+                    record.is_platform_answer()
+                    and code is not None
+                    and code not in NOT_SESSION_CODES
+                ):
+                    codes.add(code)
+                break  # the first refusal ends the attempt
+    return sorted(codes)
+
+
 def summarize(plan: ProbePlan) -> ChannelProbeSummary:
     """Condense ``plan`` (finished or not) into the stored result."""
     count = plan.step(StepId.COUNT)
@@ -288,6 +324,7 @@ def summarize(plan: ProbePlan) -> ChannelProbeSummary:
         notes=notes,
         png_displayed=png_shown,
         gif_send_mode_suggestion=suggest_gif_mode(gif_moves, png_shown),
+        session_codes_seen=session_codes_seen(plan),
     )
 
 

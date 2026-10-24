@@ -49,6 +49,8 @@ uv run twin channel probe report     # 生成本文件
 实测值留 10% 余量（`twin channel probe report` 会先问你，确认后才写入 `config/config.yaml`）。
 还会把会动的 GIF 与静态 PNG 的手机显示并排列出，建议 `stickers.gif_send_mode`
 （`as_is` 原样发送 GIF，`first_frame` 只发静态首帧）；同样只是建议，由你决定。
+计数与窗口两步里，平台拒绝发送时回的 code（额度或窗口用完）列为 `channel.session_expired_codes`
+的建议值（默认 `[-2]` 只是社区说法）；同样确认后才写入。
 在拿到实测数据之前，`config/config.example.yaml` 里的默认值只是保守猜测，不是协议事实。
 
 ## 已知线索（来自协议源码，非实测）

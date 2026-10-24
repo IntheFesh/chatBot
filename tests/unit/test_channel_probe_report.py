@@ -337,3 +337,17 @@ def test_the_suggestion_table_lists_the_gif_mode_with_its_basis() -> None:
 
 def test_the_pending_report_names_the_gif_mode_among_the_values_it_will_suggest() -> None:
     assert "`stickers.gif_send_mode`" in render_pending_report()
+
+
+# ------------------------------------- R18-F11: the codes that ended a session (D-905)
+
+
+def test_the_suggestion_table_lists_the_codes_that_ended_a_session() -> None:
+    """R18-F11: the report suggests ``channel.session_expired_codes`` from what was seen."""
+    text = render_report(sample(session_codes_seen=[-7, -2]))
+    assert "| `channel.session_expired_codes` | [-7, -2] |" in text
+    assert "| `channel.session_expired_codes` | — |" in render_report(sample())
+
+
+def test_the_pending_report_names_the_session_codes_among_the_values_it_will_suggest() -> None:
+    assert "`channel.session_expired_codes`" in render_pending_report()

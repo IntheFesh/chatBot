@@ -71,6 +71,8 @@ FACT_DOC: Mapping[str, str] = {
     "final_particle_count": "how many particles final_particle_top lists",
     "latency_median_s": "median seconds until she answers",
     "latency_p90_s": "90th percentile of seconds until she answers",
+    "latency_median_text": "latency_median_s as words: '18 秒', '17 分钟', '1.5 小时'",
+    "latency_p90_text": "latency_p90_s as words, like latency_median_text",
 }
 FACT_NAMES = frozenset(FACT_DOC)
 
@@ -189,7 +191,22 @@ def rule_facts(metrics: ProfileMetrics, party: str = "her") -> dict[str, Fact]:
     latency_median, latency_p90 = quantiles("reply_latency_s", 0.5, 0.9)
     facts["latency_median_s"] = latency_median
     facts["latency_p90_s"] = latency_p90
+    facts["latency_median_text"] = duration_text(latency_median)
+    facts["latency_p90_text"] = duration_text(latency_p90)
     return facts
+
+
+def duration_text(seconds: float | None) -> str | None:
+    """Seconds as the words a person uses: under 90 s in seconds, under 90 min in minutes, else
+    hours with one decimal (round 18 item F11, D-904: "1020 秒" reads as "17 分钟")."""
+    if seconds is None:
+        return None
+    if seconds < 90:
+        return f"{round(seconds)} 秒"
+    if seconds < 90 * 60:
+        return f"{round(seconds / 60)} 分钟"
+    hours = round(seconds / 3600, 1)
+    return f"{hours:g} 小时"
 
 
 def _top(values: Mapping[str, float], count: int) -> list[tuple[str, float]]:
