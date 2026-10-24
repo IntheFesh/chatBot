@@ -530,6 +530,14 @@ def test_pairs_that_are_all_after_the_cutoff_are_an_error_that_says_they_wait(
     assert [p.name for p in datasets_dir(services).iterdir()] == ["ds-test-01"]
 
 
+def test_a_base_dataset_whose_cutoff_cannot_be_read_is_refused(services: Services) -> None:
+    """R18-DPO13 (D-860): without the cut-off nothing tells which pairs DPO may train on."""
+    base_dataset(services, cutoff="no date at all")
+    pair_at(services, CUTOFF - timedelta(days=1), "说法")
+    with pytest.raises(ExportError, match="cut-off of dataset ds-test-01 cannot be read"):
+        export(services)
+
+
 def held_out_ids(pairs: list[PairRecord], count: int) -> set[str]:
     """The ``count`` pairs of the smallest key: sha256 of a fixed prefix and the id (D-861)."""
     return {pair.id for pair in sorted(pairs, key=lambda pair: holdout_key(pair.id))[:count]}
