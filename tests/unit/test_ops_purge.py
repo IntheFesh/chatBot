@@ -303,14 +303,16 @@ def test_a_file_another_program_holds_open_is_reported_and_the_rest_still_goes(
 
 
 def test_the_command_says_what_could_not_be_deleted_and_ends_with_an_error(
-    cli: Installation, monkeypatch: pytest.MonkeyPatch
+    cli: Installation,
 ) -> None:
-    hold_files_open(monkeypatch, "twin.db")
-    code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)
+    # a patch of its own: undoing it must not undo what the fixtures set up (on Windows the
+    # file store of the suite is allowed by TWIN_ALLOW_FILE_KEYRING, set by them, D-827)
+    with pytest.MonkeyPatch.context() as held:
+        hold_files_open(held, "twin.db")
+        code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)
     assert code == 1 and "没能删除：1 项（twin.db）" in out and "再运行一次" in out
     assert "已删除（只列数量）" in out and "备份和任何残留的副本" not in out  # no all-clear
     assert cli.paths.db_path.exists() and not cli.services.keystore.exists()
-    monkeypatch.undo()
     cli.services.secrets.set(DEEPSEEK_KEY, "synthetic-key-keep-me")
     code, out = run_purge(cli, "--all", phrase=CONFIRM_ALL)  # the second run finishes the job
     assert code == 0 and not cli.paths.db_path.exists()

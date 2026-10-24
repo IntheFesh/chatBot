@@ -175,7 +175,7 @@ def test_the_restore_is_an_exclusive_command_and_backup_now_only_writes() -> Non
 
 
 def test_r18_a5_a_restore_that_cannot_delete_the_old_files_says_so_and_succeeds(
-    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+    world: BackupWorld,
 ) -> None:
     """R18-A5 (D-769): the old database a restore moved aside cannot be deleted (held open on
     Windows): the command used to end with a traceback-like failure after a complete restore."""
@@ -187,9 +187,9 @@ def test_r18_a5_a_restore_that_cannot_delete_the_old_files_says_so_and_succeeds(
             raise PermissionError(13, "The process cannot access the file: it is in use")
         real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(os, "unlink", held_open)
-    code, out = twin(world, "restore", name, "--yes")
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as held:  # its own patch: the fixtures' stay in place
+        held.setattr(os, "unlink", held_open)
+        code, out = twin(world, "restore", name, "--yes")
     assert code == 0, out
     [left] = world.services.paths.data_dir.glob("twin.db.replaced-*")
     assert f"could not be deleted: {left.name}" in out and "delete it by hand" in out

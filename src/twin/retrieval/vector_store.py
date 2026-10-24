@@ -18,8 +18,10 @@ LanceDB itself is imported on first use, so building the application stays fast.
 from __future__ import annotations
 
 import json
+import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import threading
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -36,6 +38,11 @@ DELETE_CHUNK = 500
 # LanceDB (a long-running soak measured the resident memory growing with them), so after this
 # many a write compacts the table before it returns (R-NFR-002).
 SMALL_FILES_BEFORE_COMPACTION = 16
+# The meta file is replaced as a whole (a reader sees the old meta or the new one).  Windows
+# refuses to replace or open a file while another thread holds it open, for a moment: both sides
+# try again, briefly (D-781 follow-up: a sync and a search run side by side in replay jobs).
+META_ATTEMPTS = 40
+META_PAUSE_S = 0.025
 _SAFE_ID = re.compile(r"^[0-9A-Za-z_-]{1,64}$")
 
 
@@ -270,20 +277,39 @@ class VectorTable:
     # ---------------------------------------------------------------- metadata
 
     def read_meta(self) -> IndexMeta | None:
+        """The meta of the table; ``None`` if there is none (or it cannot be read)."""
         try:
-            loaded = json.loads(self.meta_path.read_text(encoding="utf-8"))
-            return IndexMeta.from_json(loaded)
+            text = _patiently(lambda: self.meta_path.read_text(encoding="utf-8"))
+            return IndexMeta.from_json(json.loads(text))
         except (OSError, ValueError, KeyError, TypeError):
             return None
 
     def write_meta(self, meta: IndexMeta) -> None:
+        """Replace the meta as a whole: a reader at the same moment sees the old or the new one."""
         self._directory.mkdir(parents=True, exist_ok=True)
-        self.meta_path.write_text(
+        part = self.meta_path.with_name(
+            f"{self.meta_path.name}.{os.getpid()}-{threading.get_ident()}.part"
+        )
+        part.write_text(
             json.dumps(meta.to_json(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
+        try:
+            _patiently(lambda: os.replace(part, self.meta_path))
+        finally:
+            part.unlink(missing_ok=True)
 
     def clear_meta(self) -> None:
         self.meta_path.unlink(missing_ok=True)
+
+
+def _patiently[T](action: Callable[[], T]) -> T:
+    """Run ``action``; while Windows says the file is in use by another thread, try again."""
+    for _ in range(META_ATTEMPTS - 1):
+        try:
+            return action()
+        except PermissionError:
+            threading.Event().wait(META_PAUSE_S)  # a thread-event wait, as ops.service does
+    return action()
 
 
 class VectorStore:

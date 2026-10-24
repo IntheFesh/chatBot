@@ -254,7 +254,7 @@ def test_a_file_that_another_program_holds_open_ends_the_restore_with_the_data_b
 
 
 def test_r18_a5_old_data_that_cannot_be_deleted_afterwards_does_not_fail_the_restore(
-    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+    world: BackupWorld,
 ) -> None:
     """R18-A5 (D-769): the restore is complete once the restored data is in place and checked;
     deleting the moved-aside old database is clean-up.  On Windows a file another program holds
@@ -275,9 +275,9 @@ def test_r18_a5_old_data_that_cannot_be_deleted_afterwards_does_not_fail_the_res
             raise PermissionError(13, "The process cannot access the file: it is in use")
         real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(os, "unlink", held_open)
-    report = do_restore(world, archive)
-    monkeypatch.undo()
+    with pytest.MonkeyPatch.context() as held:  # its own patch: the fixtures' stay in place
+        held.setattr(os, "unlink", held_open)
+        report = do_restore(world, archive)
 
     assert refused and table_counts(services.paths.db_path) == counts  # restored all the same
     left = sorted(p.name for p in services.paths.data_dir.glob("*.replaced-*"))

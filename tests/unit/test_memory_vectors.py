@@ -7,7 +7,10 @@ ids, the vectors and the moment each record became known - never a word of text 
 
 from __future__ import annotations
 
+import os
+import threading
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -18,8 +21,9 @@ from twin.clock import to_epoch
 from twin.memory.vectors import MemoryVectors, StaleVectorsError, VectorSync, encoding_of
 from twin.retrieval import embedder as embedder_module
 from twin.retrieval.embedder import EmbedderError, embedding_service, reset_embedding_services
+from twin.retrieval.vector_store import IndexMeta, VectorStore
 from twin.services import Services
-from twin.storage.vector_schema import VectorKind
+from twin.storage.vector_schema import FACT_SCHEMA, VectorKind
 
 
 def vectors_of(services: Services) -> MemoryVectors:
@@ -177,3 +181,87 @@ def test_a_search_on_vectors_of_another_model_raises_instead_of_finding_nothing(
     with pytest.raises(EmbedderError):  # what the callers that can go on without vectors catch
         after.vectors.search(VectorKind.FACT, "考试", 5)
     assert after.vectors.search(VectorKind.SUMMARY, "考试", 5) == []  # no table: nothing to find
+
+
+def test_a_reader_never_sees_the_meta_of_a_table_half_written(tmp_path: Path) -> None:
+    """R18-C2 follow-up (D-781): the meta file was rewritten in place (truncate, then write).
+
+    Since D-781 a search reads it to tell "made with another model" from "current", so a replay
+    job that read it while a job beside it was syncing saw an empty file, decided the vectors
+    were stale and failed (the Windows CI run of
+    ``test_spending_above_the_estimate_pauses_the_batch_and_approving_again_continues``).  The
+    file is now replaced as a whole: a reader sees the old meta or the new one, never nothing.
+    """
+    table = VectorStore(tmp_path).table(FACT_SCHEMA)
+    metas = [
+        IndexMeta(
+            table="facts",
+            encoding=f"model-{n}|512|{'0' * 16}|v1",
+            model=f"model-{n}",
+            dimension=512,
+            revision="r",
+            weights_sha256="0" * 64,
+            written_at=f"2026-10-09T12:00:{n:02d}+00:00",
+        )
+        for n in range(2)
+    ]
+    table.write_meta(metas[0])
+    stop = threading.Event()
+    missed: list[int] = []
+
+    def read_while_written() -> None:
+        reads = 0
+        while not stop.is_set():
+            reads += 1
+            if table.read_meta() not in metas:
+                missed.append(reads)
+
+    reader = threading.Thread(target=read_while_written)
+    reader.start()
+    try:
+        for n in range(3000):
+            table.write_meta(metas[n % 2])
+    finally:
+        stop.set()
+        reader.join()
+    assert missed == []
+    assert (
+        sorted(p.name for p in table.meta_path.parent.iterdir() if p.name.endswith(".part")) == []
+    )
+
+
+def test_a_meta_file_held_open_for_a_moment_is_replaced_once_it_is_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-781 follow-up: Windows refuses to replace a file another thread holds open; the write
+    tries again, briefly, and a file that stays busy is an error (no stray ``.part`` left)."""
+    from twin.retrieval import vector_store
+
+    monkeypatch.setattr(vector_store, "META_PAUSE_S", 0.0)
+    table = VectorStore(tmp_path).table(FACT_SCHEMA)
+    meta = IndexMeta(
+        table="facts",
+        encoding="m|512|0000000000000000|v1",
+        model="m",
+        dimension=512,
+        revision="r",
+        weights_sha256="0" * 64,
+        written_at="2026-10-09T12:00:00+00:00",
+    )
+    real_replace = os.replace
+    busy = {"left": 3}
+
+    def replace_when_free(source: str | Path, target: str | Path) -> None:
+        if busy["left"] > 0:
+            busy["left"] -= 1
+            raise PermissionError(13, "the file is in use by another process")
+        real_replace(source, target)
+
+    monkeypatch.setattr(vector_store.os, "replace", replace_when_free)
+    table.write_meta(meta)
+    assert table.read_meta() == meta and busy["left"] == 0
+    busy["left"] = vector_store.META_ATTEMPTS  # never free in time
+    with pytest.raises(PermissionError):
+        table.write_meta(meta)
+    assert [p.name for p in tmp_path.rglob("*.part")] == []
+    assert table.read_meta() == meta  # the old meta is still whole
