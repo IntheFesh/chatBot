@@ -13,7 +13,10 @@ Every call to DeepSeek goes through :class:`DeepSeekClient`.  What happens to a 
    left out when thinking because the API ignores them (a warning is logged once);
 4. the call is retried on 429, 5xx, connection errors and timeouts with exponential backoff and
    jitter, limited by a semaphore, and guarded by a circuit breaker (R-LLM-005); 400/401/402/
-   403/422 are not retried and 401/402/403 raise an alert at once.  A reply whose
+   403/422 are not retried and 401/402/403 raise an alert at once.  A *live* call - somebody is
+   waiting for it (:func:`~twin.llm.types.is_live`) - is not retried after a timeout and its other
+   retries must start within 30 seconds of its start, so that the engine hears of a failure within
+   one deadline plus 30 seconds (round 18, user decision, D-890).  A reply whose
    ``finish_reason`` says the service cut the generation off (``insufficient_system_resource``,
    ``aborted``) is booked like any paid call and then retried the same way: its text is a
    fragment, and after the last attempt :class:`RetriesExhaustedError` is raised (D-796);
@@ -92,7 +95,6 @@ from twin.llm.scope import current_call_scope
 from twin.llm.tokens import TokenEstimator
 from twin.llm.types import (
     DAILY,
-    LIVE_PURPOSES,
     OFFLINE_PURPOSES,
     ChatMessage,
     ChatResult,
@@ -101,6 +103,7 @@ from twin.llm.types import (
     LedgerTag,
     Purpose,
     Usage,
+    is_live,
 )
 from twin.ops.alerts import AlertSink
 from twin.ops.logging import get_logger
@@ -529,14 +532,16 @@ class DeepSeekClient:
         self._offline_semaphore = asyncio.Semaphore(self._offline_slots)
 
     @contextlib.asynccontextmanager
-    async def _slot(self, purpose: Purpose) -> AsyncIterator[None]:
-        """A concurrency slot: the live conversation may use all of them, the rest all but one.
+    async def _slot(self, live: bool) -> AsyncIterator[None]:
+        """A concurrency slot: a live call may use all of them, the rest all but one.
 
         The offline limit is taken first, so a call that is waiting for it holds no slot of the
         shared limit and cannot keep the reply out (R-NFR-001, D-701).  With a single slot
-        nothing can be kept back: everything shares it.
+        nothing can be kept back: everything shares it.  "Live" is the one definition of
+        :func:`~twin.llm.types.is_live` (D-890): the picture the user has just sent is described
+        in a live slot too, not behind the night's jobs.
         """
-        if purpose in LIVE_PURPOSES or self._offline_slots >= self._config.max_concurrency:
+        if live or self._offline_slots >= self._config.max_concurrency:
             async with self._semaphore:
                 yield
             return
@@ -610,13 +615,18 @@ class DeepSeekClient:
         tag: LedgerTag = DAILY,
         capabilities: LlmCapabilities | None = None,
         redactor: Redactor | None = None,
+        live: bool | None = None,
+        retry_window_from: float | None = None,
     ) -> ChatResult:
         """One chat completion.  See the module docstring for everything this does.
 
         ``json_schema`` (a pydantic model class or a JSON schema mapping) or ``json_mode=True``
         switches on JSON output.  ``tag`` selects the budget account: ``one_time`` batch calls
         are recorded separately and never degrade the daily budget.  ``capabilities`` overrides
-        what the M0 probe stored (used by the probe itself).
+        what the M0 probe stored (used by the probe itself).  ``live`` says whether somebody is
+        waiting for the call where the purpose cannot tell (:func:`~twin.llm.types.is_live`);
+        ``retry_window_from`` is the monotonic moment a live call's retry window opened when it
+        opened before this request (:meth:`chat_json` re-asking, D-890).
         """
         requested = Purpose(purpose)
         purpose = requested
@@ -625,6 +635,7 @@ class DeepSeekClient:
             scope is not None
         ):  # booked as evaluation / a one-time batch; the model stays the caller's
             purpose, tag = scope.purpose, scope.tag
+        live_call = self.is_live_call(requested, live)
         caps = capabilities or self._capabilities()
         layout = messages if isinstance(messages, PromptLayout) else None
         raw_messages: Sequence[ChatMessage] = (
@@ -695,7 +706,17 @@ class DeepSeekClient:
             sent=sent,
             layout=layout,
             image_count=total_images,
+            live=live_call,
+            began=self._clock.monotonic() if retry_window_from is None else retry_window_from,
         )
+
+    def is_live_call(self, purpose: Purpose | str, live: bool | None = None) -> bool:
+        """Whether a call made here and now is live (D-890).
+
+        Inside a :func:`~twin.llm.scope.call_scope` nothing is: the evaluation runs the reply
+        pipeline as a batch nobody is waiting for, so its calls keep the offline rules.
+        """
+        return current_call_scope() is None and is_live(Purpose(purpose), live)
 
     def _gate(self, purpose: Purpose, thinking: bool, tag: LedgerTag) -> bool:
         """Apply the batch and budget rules; returns the thinking flag to use."""
@@ -731,6 +752,8 @@ class DeepSeekClient:
         sent: Sequence[ChatMessage],
         layout: PromptLayout | None,
         image_count: int,
+        live: bool,
+        began: float,
     ) -> ChatResult:
         attempts = 0
         self._enter()
@@ -741,7 +764,7 @@ class DeepSeekClient:
             started = self._clock.monotonic()
             conn: _Connection | None = None
             try:
-                async with self._slot(purpose):
+                async with self._slot(live):
                     conn = self._lease()
                     try:
                         async with asyncio.timeout(timeout_s + self._deadline_slack_s):
@@ -770,16 +793,23 @@ class DeepSeekClient:
                     attempt=attempts,
                     kind=failure.kind.value,
                     status=failure.status,
+                    live=live,
                 )
-                if attempts > self._retry.max_retries:
+                wait = self._retry.next_wait(
+                    attempts,
+                    failure.kind,
+                    self._rng,
+                    live=live,
+                    elapsed_s=self._clock.monotonic() - began,
+                    retry_after_s=failure.retry_after_s,
+                )
+                if wait is None:
                     raise RetriesExhaustedError(
                         f"DeepSeek call failed after {attempts} attempts: {failure.message}",
                         attempts=attempts,
                         last_status=failure.status,
                     ) from None
-                await self._clock.sleep(
-                    self._retry.delay(attempts, self._rng, failure.retry_after_s)
-                )
+                await self._clock.sleep(wait)
                 continue
             latency_ms = max(0, round((self._clock.monotonic() - started) * 1000))
             cut_off = interrupted_finish(response)
@@ -812,13 +842,21 @@ class DeepSeekClient:
                 attempt=attempts,
                 kind="interrupted",
                 finish_reason=cut_off,
+                live=live,
             )
-            if attempts > self._retry.max_retries:
+            wait = self._retry.next_wait(  # a generation cut off for lack of resources: a 503
+                attempts,
+                FailureKind.SERVER,
+                self._rng,
+                live=live,
+                elapsed_s=self._clock.monotonic() - began,
+            )
+            if wait is None:
                 raise RetriesExhaustedError(
                     f"DeepSeek interrupted the generation {attempts} times ({cut_off})",
                     attempts=attempts,
                 )
-            await self._clock.sleep(self._retry.delay(attempts, self._rng))
+            await self._clock.sleep(wait)
 
     def _note_attempt(self, ok: bool) -> None:
         """Tell the health record how an attempt ended (R-OPS-003)."""
@@ -1013,19 +1051,33 @@ class DeepSeekClient:
         the call is repeated once (``retries``); a second failure raises
         :class:`StructuredOutputError` (offline jobs are retried by the queue, online callers
         degrade).  Both calls are recorded in the ledger; ``total_cost_usd`` adds them up.
+
+        A live call (D-890) asks again only inside its retry window, which the re-ask shares with
+        the first request: an answer that came after the window ends the call, so a slow invalid
+        answer and a slow second one never add up to two deadlines.
         """
         limit = max_tokens or (JSON_THINKING_MAX_TOKENS if thinking else JSON_MAX_TOKENS)
         base = messages.messages() if isinstance(messages, PromptLayout) else list(messages)
         conversation = normalize_messages(base)
         total_cost = 0.0
         last_problem = "no attempt was made"
+        live = self.is_live_call(purpose, options.get("live"))
+        began = self._clock.monotonic()
         for attempt in range(1, retries + 2):
+            if attempt > 1 and live and self._clock.monotonic() - began > self._retry.live_window_s:
+                log.warning("structured_output_not_asked_again", purpose=Purpose(purpose).value)
+                raise StructuredOutputError(
+                    f"no valid {schema.__name__} within the retry window of a live call: "
+                    f"{last_problem}",
+                    attempts=attempt - 1,
+                )
             result = await self.chat(
                 conversation,
                 purpose=purpose,
                 thinking=thinking,
                 max_tokens=limit,
                 json_schema=schema,
+                retry_window_from=began,
                 **options,
             )
             total_cost += result.cost_usd

@@ -6,6 +6,11 @@
 * Retries use exponential backoff with jitter: ``base * 2**n`` capped, multiplied by a random
   factor in [0.5, 1.5), and honour a ``Retry-After`` header (capped).  At most
   :attr:`RetryPolicy.max_retries` retries follow the first attempt.
+* A **live** call - somebody is waiting for it (:func:`twin.llm.types.is_live`) - is held to a
+  tighter rule (round 18, user decision, D-890): a timeout is not retried at all (the engine tries
+  the round again later, R-ENG-010), and the other retryable failures are retried only while the
+  retry can start within :data:`LIVE_RETRY_WINDOW_S` (30 s) of the call's start.  Every attempt
+  ends within its deadline, so a live call is over within one deadline plus 30 seconds.
 * The circuit breaker counts consecutive *retryable* failures.  After
   :attr:`CircuitBreaker.failure_threshold` (10) it opens for 300 seconds, during which calls
   fail at once; then one probe call is let through (half-open): success closes the breaker,
@@ -28,6 +33,9 @@ from twin.llm.errors import CircuitOpenError
 from twin.llm.redaction import redact_text
 
 MAX_RETRY_AFTER_S = 60.0
+# R18-D6 (D-890): the retries of a live call must start within this many seconds of its start.  A
+# constant, not a setting: the user fixed it ("实时用途的 429/5xx 短重试总时长上限 30 秒").
+LIVE_RETRY_WINDOW_S = 30.0
 MAX_MESSAGE_CHARS = 300
 _KEY_LIKE = re.compile(r"\bsk-[A-Za-z0-9_\-]{6,}")
 
@@ -121,10 +129,37 @@ class RetryPolicy:
     max_retries: int = 4
     base_s: float = 1.0
     cap_s: float = 30.0
+    live_window_s: float = LIVE_RETRY_WINDOW_S
 
     @property
     def max_attempts(self) -> int:
         return self.max_retries + 1
+
+    def next_wait(
+        self,
+        retry_number: int,
+        kind: FailureKind,
+        rng: random.Random,
+        *,
+        live: bool = False,
+        elapsed_s: float = 0.0,
+        retry_after_s: float | None = None,
+    ) -> float | None:
+        """Seconds to wait before retry ``retry_number`` (1 for the first), or ``None``: give up.
+
+        ``kind`` is the retryable failure the last attempt ended with and ``elapsed_s`` the
+        seconds since the call started.  Offline: :attr:`max_retries` retries with back-off.  Live
+        (R18-D6, D-890): never after a timeout, and only if the retry starts within
+        :attr:`live_window_s` of the start - a ``Retry-After`` that does not fit ends the call.
+        """
+        if retry_number > self.max_retries:
+            return None
+        if live and kind is FailureKind.TIMEOUT:
+            return None
+        wait = self.delay(retry_number, rng, retry_after_s)
+        if live and elapsed_s + wait > self.live_window_s:
+            return None
+        return wait
 
     def delay(
         self, retry_number: int, rng: random.Random, retry_after_s: float | None = None

@@ -10,6 +10,8 @@ deepseek  share of failed attempts over a window, and an open circuit breaker
 style     the style model's endpoint, only when the backend needs it
 disk      free space of the data directory (below 5 GB: bad)
 queue     waiting jobs (more than 500, or one waiting for more than 24 hours: bad)
+failed_jobs jobs that failed within the last 24 hours and are still failed (a warning that is
+          announced, counted by job type, with the command that retries them - round 18, D-892)
 backup    age of the newest backup (more than 36 hours: bad)
 budget    the degradation level (information only: the budget manager raises its own alerts)
 readiness her live profile, routine model and persona card exist (D-873: a warning, no alert -
@@ -50,6 +52,11 @@ if TYPE_CHECKING:
     from twin.services import Services
 
 FIRST_RUN_KEY = "ops.first_run_at"
+# R18-D1-② (D-892, user decision): "24 小时内有仍处于失败状态的任务".  Constants, not settings: the
+# user fixed the day, and the category is the check's own notice (``twin.ops.alerts.SPECS``).
+FAILED_JOBS_WINDOW = timedelta(hours=24)
+FAILED_JOBS_CATEGORY = "failed_jobs"
+RETRY_FAILED_COMMAND = "twin jobs retry --failed"
 
 
 class HealthLevel(StrEnum):
@@ -279,6 +286,27 @@ def check_queue(
     return HealthCheck("queue", HealthLevel.OK, f"{waiting} job(s) waiting", value=float(waiting))
 
 
+def check_failed_jobs(counts: Mapping[str, int]) -> HealthCheck:
+    """``failed_jobs``: jobs of the last day that are still failed, by type (D-892).
+
+    A warning, but one the monitor announces (it names a category): a job that failed for good
+    is not told one by one (``job_failed`` is recorded only, D-445), so this is how the user hears
+    of it - once, with a reminder while it goes on, and "recovered" when the jobs were retried.
+    """
+    total = sum(counts.values())
+    if total == 0:
+        return HealthCheck("failed_jobs", HealthLevel.OK, "no job failed in the last 24 h")
+    kinds = ", ".join(f"{name} ×{counts[name]}" for name in sorted(counts))
+    return HealthCheck(
+        "failed_jobs",
+        HealthLevel.WARN,
+        f"{total} job(s) of the last 24 h are still failed ({kinds}); "
+        f"queue them again with `{RETRY_FAILED_COMMAND}`",
+        value=float(total),
+        category=FAILED_JOBS_CATEGORY,
+    )
+
+
 def check_backup(
     newest_age: timedelta | None, *, since_first_run: timedelta, stale_h: float
 ) -> HealthCheck:
@@ -415,6 +443,16 @@ class HealthCollector:
             oldest_h=self._config.queue_oldest_h,
         )
 
+    def _failed_jobs(self, now: datetime) -> HealthCheck:
+        failed_at = func.coalesce(Job.finished_at, Job.updated_at)
+        with self._services.db.session() as session:
+            rows = session.execute(
+                select(Job.type, func.count())
+                .where(Job.status == "failed", failed_at >= now - FAILED_JOBS_WINDOW)
+                .group_by(Job.type)
+            ).all()
+        return check_failed_jobs({str(job_type): int(count) for job_type, count in rows})
+
     def _backup(self, now: datetime) -> HealthCheck:
         with self._services.db.session() as session:
             newest = session.scalar(
@@ -453,6 +491,7 @@ class HealthCollector:
             channel,
             self._disk(),
             self._queue(now),
+            self._failed_jobs(now),
             self._backup(now),
             self._budget_check(),
             self._readiness(),

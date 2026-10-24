@@ -648,3 +648,153 @@ def test_old_alerts_are_pruned(services: Services, clock: ManualClock) -> None:
     services.alerts.raise_alert("job_failed", "new")
     assert services.alerts.prune() == 1
     assert [v.title for v in views(services.alerts)] == ["new"]
+
+
+# --------------------------------------------- a held-back alert after the cooldown (R18-D8-②)
+
+
+async def test_r18_d8_a_held_back_alert_is_sent_once_when_the_hour_is_over_and_it_still_holds(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8-② (D-893, user decision 【后台任务失败与告警补发】②): alert, recovery, the same
+    fault again within the hour - held back, and before the fix never told: the user's last news
+    stayed "recovered" (the put-off recovery was withdrawn) while the disk was full again."""
+    notifier, mailer = RecordingNotifier(), RecordingMailer()
+    delivery = make_delivery(services, clock, notifier=notifier, mailer=mailer)
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    await delivery.deliver_once()
+    clock.tick(10 * 60)
+    alerts.recover("disk_low", "disk space is back")
+    clock.tick(10 * 60)
+    alerts.raise_alert("disk_low", "low again", severity="critical")  # held back
+    again = views(alerts)[-1]
+    assert again.suppressed and (again.toast_state, again.mail_state) == ("none", "none")
+    clock.tick(40 * 60 - 1)  # one second before the hour of the first notice is over
+    assert await delivery.deliver_once() == 0
+    clock.tick(1)
+    assert await delivery.deliver_once() == 1
+    assert [m.subject for m in mailer.sent] == ["[wechat-twin] 磁盘剩余空间不足"] * 2
+    assert len(notifier.shown) == 2
+    again = views(alerts)[-1]
+    assert not again.suppressed and (again.toast_state, again.mail_state) == ("sent", "sent")
+    clock.tick(3 * 3600)
+    assert await delivery.deliver_once() == 0 and len(mailer.sent) == 2  # once, not again
+
+
+async def test_r18_d8_a_fault_that_ended_before_the_hour_is_over_is_not_sent_again(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8-②: "问题仍在" is judged when the hour is over: recovered by then, nothing is resent
+    (the user hears "recovered", once)."""
+    notifier, mailer = RecordingNotifier(), RecordingMailer()
+    delivery = make_delivery(services, clock, notifier=notifier, mailer=mailer)
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    await delivery.deliver_once()
+    clock.tick(10 * 60)
+    alerts.recover("disk_low", "back")
+    clock.tick(10 * 60)
+    alerts.raise_alert("disk_low", "low again", severity="critical")  # held back
+    clock.tick(10 * 60)
+    assert alerts.recover("disk_low", "back for good") is True
+    clock.tick(30 * 60)
+    await delivery.deliver_once()
+    await delivery.deliver_once()
+    assert [m.subject for m in mailer.sent] == [
+        "[wechat-twin] 磁盘剩余空间不足",
+        "[wechat-twin] 已恢复：磁盘剩余空间不足",
+    ]
+    assert sum(1 for v in views(alerts) if v.kind == "alert" and not v.suppressed) == 1
+
+
+async def test_r18_d8_several_held_back_alerts_are_sent_as_one_and_the_worst_of_them(
+    services: Services, clock: ManualClock
+) -> None:
+    mailer = RecordingMailer()
+    delivery = make_delivery(services, clock, notifier=RecordingNotifier(), mailer=mailer)
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "getting low", severity="warning")
+    await delivery.deliver_once()
+    for severity in ("warning", "critical", "warning"):
+        clock.tick(5 * 60)
+        alerts.raise_alert("disk_low", f"still low ({severity})", severity=severity)
+    clock.tick(45 * 60)
+    assert await delivery.deliver_once() == 1
+    assert len(mailer.sent) == 2 and mailer.sent[1].text.startswith("严重：磁盘剩余空间不足")
+    told = [v for v in views(alerts) if not v.suppressed]
+    assert [v.severity for v in told] == ["warning", "critical"]
+
+
+async def test_r18_d8_the_resend_waits_for_the_hour_of_the_notice_that_reached_the_user_last(
+    services: Services, clock: ManualClock
+) -> None:
+    """The first mail failed and went out a minute later: the hour counts from that mail."""
+    mailer = RecordingMailer()
+    mailer.errors = ["network"]
+    delivery = make_delivery(services, clock, notifier=RecordingNotifier(), mailer=mailer)
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    await delivery.deliver_once()  # the notification shows, the mail fails
+    clock.tick(30)
+    alerts.raise_alert("disk_low", "still low", severity="critical")  # held back
+    clock.tick(31)
+    await delivery.deliver_once()  # the mail goes out now, a minute after the alert
+    assert len(mailer.sent) == 1
+    clock.tick(59 * 60)  # an hour after the alert, 59 minutes after its mail
+    assert await delivery.deliver_once() == 0 and len(mailer.sent) == 1
+    clock.tick(61)
+    assert await delivery.deliver_once() == 1 and len(mailer.sent) == 2
+
+
+async def test_r18_d8_a_new_notice_after_the_hour_is_the_resend_and_nothing_follows_it(
+    services: Services, clock: ManualClock
+) -> None:
+    """Nobody delivered when the hour ended (the application was not running) and the fault
+    was raised again afterwards: that alert goes out, the held-back one is not sent as well."""
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    assert len(alerts.claim_due()) == 1
+    alerts.finish_toast(views(alerts)[0].id, ok=True)
+    alerts.finish_mail(views(alerts)[0].id, ok=True)
+    clock.tick(10 * 60)
+    alerts.raise_alert("disk_low", "still low", severity="critical")  # held back
+    clock.tick(2 * 3600)
+    alerts.raise_alert("disk_low", "low, two hours on", severity="critical")  # not held back
+    assert [v.title for v in alerts.claim_due()] == ["low, two hours on"]
+    assert alerts.claim_due() == []
+
+
+def test_r18_d8_a_resend_is_never_put_off_beyond_the_day_after_which_notices_expire(
+    clock: ManualClock, services: Services
+) -> None:
+    long = AlertService(services.db, clock, cooldown_min=3 * 24 * 60)
+    long.raise_alert("disk_low", "low", severity="critical")
+    (first,) = long.claim_due()
+    long.finish_toast(first.id, ok=True)
+    long.finish_mail(first.id, ok=True)
+    clock.tick(60)
+    long.raise_alert("disk_low", "still low", severity="critical")  # held back for three days?
+    due = long.resend_due("disk_low")
+    assert due is not None and due < clock.now_utc() + timedelta(hours=24)
+    clock.set_time(due)
+    assert [view.title for view in long.claim_due()] == ["still low"]  # not expired
+
+
+def test_r18_d8_a_held_back_alert_nobody_could_send_for_a_day_is_dropped(
+    services: Services, clock: ManualClock
+) -> None:
+    """The application was not running when the hour ended, nor for a day after: stale news."""
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    (first,) = alerts.claim_due()
+    alerts.finish_toast(first.id, ok=True)
+    alerts.finish_mail(first.id, ok=True)
+    clock.tick(10 * 60)
+    alerts.raise_alert("disk_low", "still low", severity="critical")  # held back
+    assert alerts.resend_due("disk_low") is not None
+    clock.tick(25 * 3600)
+    assert alerts.claim_due() == []
+    assert alerts.resend_due("disk_low") is None
+    held = views(alerts)[-1]
+    assert held.suppressed and (held.toast_state, held.mail_state) == ("none", "none")

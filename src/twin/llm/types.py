@@ -43,8 +43,23 @@ OFFLINE_PURPOSES = frozenset(
         Purpose.CONSISTENCY,
     }
 )
-# purposes that belong to the live conversation path
-LIVE_PURPOSES = frozenset({Purpose.REPLY, Purpose.PLAN, Purpose.PROACTIVE})
+# purposes whose calls somebody is waiting for (R-LLM-005, round 18 user decision, D-890): the
+# reply - its hybrid planning step and the second judgement of a crisis are booked as ``reply`` -
+# and the proactive message.  ``plan`` is the life line's purpose: background work.
+LIVE_PURPOSES = frozenset({Purpose.REPLY, Purpose.PROACTIVE})
+
+
+def is_live(purpose: Purpose, live: bool | None = None) -> bool:
+    """Whether somebody is waiting for a call of ``purpose`` (D-890).
+
+    ``live`` is the caller's word where the purpose alone cannot tell: describing the picture or
+    sticker the user has just sent is live, describing the pictures of the history in a job is
+    not, and both are ``caption`` / ``sticker_tag``.  ``None`` follows :data:`LIVE_PURPOSES`.  A
+    live call is held to the live retry rule (:meth:`twin.llm.reliability.RetryPolicy.next_wait`)
+    and may use every concurrency slot (D-701).
+    """
+    return purpose in LIVE_PURPOSES if live is None else live
+
 
 Account = Literal["daily", "one_time"]
 Role = Literal["system", "user", "assistant"]

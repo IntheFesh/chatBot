@@ -14,10 +14,12 @@ from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 import respx
 
-from tests.support.deepseek import API, TEST_KEY, error, ok
+from tests.support.clock import ManualClock
+from tests.support.deepseek import API, TEST_KEY, error, ok, on_clock
 from tests.support.reply_view import StaticDataView
 from tests.support.style_models import ScriptedStyleClient, down, register_model
 from tests.support.style_server import StyleServer, llama_defaults
@@ -490,3 +492,26 @@ async def test_the_runtime_registers_the_two_backends_by_their_names(
     assert runtime.backends["style"].name == "style" and runtime.backends["hybrid"].name == "hybrid"
     await runtime.aclose()
     assert isinstance(runtime.client, ScriptedStyleClient) and runtime.client.closed
+
+
+async def test_r18_d6_the_hybrid_planning_step_is_a_live_call(
+    ready: Services, llm: LlmRuntime, api: respx.MockRouter, clock: ManualClock
+) -> None:
+    """R18-D6 (D-890): the plan is part of the reply - a planner that times out is asked once,
+    and the reply goes to DeepSeek at once instead of after four more planning attempts."""
+    planned: list[str] = []
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        system = json.loads(request.content)["messages"][0]["content"]
+        if "只是先把这一轮想清楚" in system:  # the planner's prompt
+            planned.append(system)
+            clock.tick(60)
+            raise httpx.ReadTimeout("no answer", request=request)
+        return ok(content="好呀")
+
+    api.post(API).mock(side_effect=answer)
+    client = ScriptedStyleClient(["不该被用"])
+    pipeline = pipeline_of(ready, llm, style(ready, llm, client))
+    draft = await on_clock(clock, pipeline.run(context("周末去看电影吧", backend="hybrid"), data()))
+    assert len(planned) == 1
+    assert draft.usable and draft.backend == "deepseek" and client.prompts == []
