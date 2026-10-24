@@ -21,7 +21,14 @@ from sqlalchemy import func, select
 
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+)
 from twin.services import Services, get_cli_context
 from twin.stickers.catalog import StickerCatalog, StickerRecord, UnknownStickerError
 from twin.stickers.download import STICKER_JOB, handle_sticker_download, queue_sticker_download
@@ -59,7 +66,7 @@ def stickers_download(
     verb = "a download job is already waiting" if queued.already_queued else "queued a download job"
     typer.echo(f"{verb} for {queued.pending} sticker(s) (job {queued.job_id})")
     if not foreground:
-        typer.echo("the running application executes it; `twin jobs list --type sticker_download`")
+        typer.echo(queued_hint(services, foreground="twin stickers download --foreground"))
         return
     if app_is_running(services):
         typer.echo("the application is running and will execute the job")

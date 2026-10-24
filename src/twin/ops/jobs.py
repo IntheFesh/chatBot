@@ -65,6 +65,9 @@ DEFAULT_PRIORITY = 100
 WORKER_DRAIN_S = 20.0
 MAX_ERROR_CHARS = 500  # of ``jobs.last_error``: the type, its facts and the stack
 MAX_ERROR_DETAIL_CHARS = 2000  # of ``jobs.last_error_detail``: the sealed, redacted message
+# how long a foreground run (``twin jobs run --until-idle``, ``--foreground``) waits, in all, for
+# jobs it handed back with ``JobDeferred`` to be due again (D-826); ``twin run`` never stops anyway
+FOREGROUND_WAIT_S = 300.0
 
 
 class JobError(RuntimeError):
@@ -399,6 +402,32 @@ class JobQueue:
                 job.run_after = run_after
             return True
 
+    def bring_forward(self, job_id: str) -> bool:
+        """Make a pending job runnable now (a foreground run retrying what it handed back)."""
+        now = self._clock.now_utc()
+        with self._db.transaction(bump_state=False) as session:
+            job = session.get(Job, job_id)
+            if job is None or job.status != "pending":
+                return False
+            job.run_after = min(job.run_after, now)
+            return True
+
+    def awaiting_approval(self) -> list[BatchSummary]:
+        """The batches with jobs that wait for ``twin jobs approve <batch>``, oldest first."""
+        with self._db.session() as session:
+            rows = session.execute(
+                select(Job.batch_id)
+                .where(
+                    Job.status == "pending",
+                    Job.requires_approval.is_(True),
+                    Job.approved_at.is_(None),
+                    Job.batch_id.is_not(None),
+                )
+                .group_by(Job.batch_id)
+                .order_by(func.min(Job.created_at))
+            ).all()
+        return [self.batch_summary(str(batch_id)) for (batch_id,) in rows]
+
     def recover_running(self) -> tuple[int, list[JobView]]:
         """After a restart: ``running`` -> ``pending`` (or ``failed`` if attempts are used up).
 
@@ -692,6 +721,11 @@ class Worker:
         self._worker_id = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._running: set[asyncio.Task[None]] = set()
         self._summary = RunSummary()
+        # jobs a waiting foreground run handed back with ``JobDeferred`` (id -> due again); only
+        # :meth:`run_until_idle` with ``wait_s`` keeps them (``twin run`` never needs them)
+        self._waiting = False
+        self._handed_back: dict[str, datetime] = {}
+        self._brought_forward: set[str] = set()
 
     @property
     def worker_id(self) -> str:
@@ -752,7 +786,9 @@ class Worker:
             await asyncio.shield(asyncio.to_thread(self._queue.release, job.id, self._worker_id))
             raise
         except JobDeferred as deferred:
-            await self._defer(job, deferred.retry_in_s, deferred.__cause__ or deferred)
+            retry_at = await self._defer(job, deferred.retry_in_s, deferred.__cause__ or deferred)
+            if self._waiting:  # it waits for something: see run_until_idle
+                self._handed_back[job.id] = retry_at
         except Exception as exc:
             wait = unavailable_retry_s(exc)
             if wait is not None:  # DeepSeek cannot do it now: not the job's fault (D-795)
@@ -767,7 +803,7 @@ class Worker:
             else:
                 self._summary.discarded += 1
 
-    async def _defer(self, job: JobView, retry_in_s: float, reason: BaseException) -> None:
+    async def _defer(self, job: JobView, retry_in_s: float, reason: BaseException) -> datetime:
         """Hand the job back unchanged: claimable again in ``retry_in_s``, no attempt counted."""
         retry_at = self._clock.now_utc() + timedelta(seconds=retry_in_s)
         await asyncio.to_thread(
@@ -781,6 +817,7 @@ class Worker:
             reason=exception_summary(reason),
             retry_in_s=retry_in_s,
         )
+        return retry_at
 
     async def _record_failure(self, job: JobView, exc: Exception) -> None:
         error = describe_failure(exc)
@@ -828,16 +865,57 @@ class Worker:
             dedup_key=f"job_failed:{job.type}",
         )
 
-    async def run_until_idle(self) -> RunSummary:
-        """Run until no job is runnable *now* and nothing is still executing."""
+    async def run_until_idle(self, *, wait_s: float = 0.0) -> RunSummary:
+        """Run until no job is runnable *now* and nothing is still executing.
+
+        ``wait_s`` is for the foreground runs of the command line (:data:`FOREGROUND_WAIT_S`,
+        D-826).  A job this run handed back with ``JobDeferred`` waits for something - the persona
+        statistics for the profile that is being recomputed beside them - so once nothing else
+        runs it is tried again at once (one time), and after that it is waited for until it is
+        due, on this worker's clock, while the waits add up to no more than ``wait_s``.  Jobs that
+        wait for an approval, for the off-peak hours or for DeepSeek (D-795) are not waited for.
+        ``twin run`` uses :meth:`run_forever`; with ``wait_s=0`` this is the plain "until idle".
+        """
         self._summary = RunSummary()
-        while True:
-            started = await self._fill_slots()
-            if not self._running:
-                if started == 0:
+        self._handed_back.clear()
+        self._brought_forward.clear()
+        self._waiting = wait_s > 0
+        budget = wait_s
+        try:
+            while True:
+                started = await self._fill_slots()
+                if self._running:
+                    await asyncio.wait(set(self._running), return_when=asyncio.FIRST_COMPLETED)
+                    continue
+                if started:
+                    continue
+                if not self._handed_back:
                     return self._summary
-                continue
-            await asyncio.wait(set(self._running), return_when=asyncio.FIRST_COMPLETED)
+                slept = await self._wait_for_handed_back(budget)
+                if slept is None:
+                    return self._summary
+                budget -= slept
+        finally:
+            self._waiting = False
+
+    async def _wait_for_handed_back(self, budget: float) -> float | None:
+        """Make the earliest handed-back job runnable: the seconds slept, ``None`` to give up.
+
+        The first time a job is picked it is brought forward at once - whatever it waited for in
+        this queue has finished, since nothing runs.  A job that hands itself back again waits for
+        something outside the queue: it is slept for until it is due, if that fits in ``budget``.
+        """
+        job_id, due = min(self._handed_back.items(), key=lambda item: item[1])
+        del self._handed_back[job_id]
+        if job_id not in self._brought_forward:
+            self._brought_forward.add(job_id)
+            await asyncio.to_thread(self._queue.bring_forward, job_id)
+            return 0.0
+        delay = max(0.0, (due - self._clock.now_utc()).total_seconds())
+        if delay > budget:
+            return None
+        await self._clock.sleep(delay)
+        return delay
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         """Poll for work until ``stop`` is set, then wait for running jobs to finish."""

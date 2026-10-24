@@ -23,7 +23,15 @@ from rich.table import Table
 from twin.learning.jobs import RULES_JOB, handle_rules, queue_rules_job
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+    rerun_hint,
+)
 from twin.profile.holdout import HoldoutError
 from twin.profile.persona import edit as editing
 from twin.profile.persona.api import (
@@ -85,7 +93,10 @@ def persona_show(
     except PersonaVersionError as exc:
         raise CliError(str(exc)) from exc
     if card is None:
-        raise CliError(f"no {scope} card yet; run `twin persona regenerate --stats-only`")
+        again = "twin persona regenerate --stats-only" + (
+            f" --scope {scope}" if scope != "live" else ""
+        )
+        raise CliError(f"no {scope} card yet; run {rerun_hint(services, again)}")
     console = _console()
     console.print(
         f"persona card {card.label} ({card.scope}) {card.id}, {card.created_at:%Y-%m-%d %H:%M} UTC,"
@@ -242,7 +253,11 @@ def persona_regenerate(
                 typer.echo(f"{result.scope}: {result.status} - {result.note}")
             return
         job_id = queue_refresh(services, scope=scope, reason="manual")
-        typer.echo(f"queued a statistics refresh (job {job_id})")
+        again = "twin persona regenerate --stats-only" + (
+            f" --scope {scope}" if scope != "all" else ""
+        )
+        hint = queued_hint(services, foreground=f"{again} --foreground")
+        typer.echo(f"queued a statistics refresh (job {job_id}); {hint}")
         return
     try:
         plan = plan_generation(services, scopes, reason="manual")

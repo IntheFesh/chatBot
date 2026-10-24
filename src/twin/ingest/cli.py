@@ -38,11 +38,20 @@ from twin.ingest.layout import ConversationEntry, ExportLayout, ExportLayoutErro
 from twin.ingest.runs import RunView, get_run, latest_run
 from twin.ingest.schema import UnsupportedSchema
 from twin.ops.foreground import run_jobs_until_idle
-from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.jobs import HandlerRegistry, JobQueue
+from twin.ops.process_model import (
+    RUN_THE_QUEUE,
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+)
 from twin.services import Services, get_cli_context
 
 DEFAULT_COMMAND = "start"
+RESUME_IN_FOREGROUND = "twin import --resume --foreground"
 TERMINAL_STATUSES = ("done", "failed", "superseded")
 
 
@@ -322,9 +331,8 @@ def import_start(
         if queued.resumed:
             typer.echo(f"continuing the unfinished run {run_id} of the same export files")
     if not foreground:
-        typer.echo(
-            f"queued import run {run_id} (job {job_id}); the running application executes it"
-        )
+        hint = queued_hint(services, foreground=RESUME_IN_FOREGROUND)
+        typer.echo(f"queued import run {run_id} (job {job_id}); {hint}")
         typer.echo("check progress with `twin import status` (or `twin import status --watch`)")
         return
     if app_is_running(services):
@@ -341,6 +349,24 @@ def import_start(
     if view.report_path:
         typer.echo("")
         typer.echo(Path(view.report_path).read_text(encoding="utf-8"))
+    _say_what_the_hooks_queued(services)
+
+
+def _say_what_the_hooks_queued(services: Services) -> None:
+    """After a foreground import: the hooks' jobs wait in the queue (D-144), and how to run them.
+
+    ``--foreground`` runs the import job only; the profile, the example library, the persona
+    statistics and the rest that the hooks queued are run by ``twin jobs run --until-idle`` - or by
+    the application when it starts (README "第一次使用", D-826).
+    """
+    queued = JobQueue(services.db, services.clock).list_jobs(status="pending", limit=1000)
+    runnable = [job for job in queued if not job.requires_approval or job.approved_at]
+    if runnable:
+        typer.echo(
+            f"the post-import hooks queued {len(runnable)} job(s) (profile, examples, persona "
+            f"card statistics, ...): `{RUN_THE_QUEUE}` runs them now; the batches that cost money "
+            "wait for `twin jobs approve <batch>` (see the report above)"
+        )
 
 
 # ---------------------------------------------------------------- caption backfill

@@ -186,12 +186,16 @@ uv run twin channel probe stop           # 中途放弃（已测到的保留）
 
 ```powershell
 uv run twin import inspect "D:\你的导出目录"
+# 应用在运行：入队，由它执行
 uv run twin import "D:\你的导出目录"
 uv run twin import status --watch
+# 应用没在运行（第一次使用）：就地导入，再把导入后排队的作业跑完
+uv run twin import "D:\你的导出目录" --foreground
+uv run twin jobs run --until-idle
 ```
 
 1. `twin import inspect` 只输出**结构**（文件树、每个 JSON 的键名与类型、`renderType` 取值计数、`_integrity/` 清单），**不含任何值**，写 `data\reports\inspect-<UTC>.md`。大导出可加 `--sample 20000`。目录名含中文没关系，加引号。
-2. `twin import <目录>`（等同 `twin import start <目录>`）默认入队后立即返回，由运行中的应用执行；应用没在运行时加 `--foreground` 在本窗口里跑（带进度条）。第一次会列出非群聊会话让你选目标（`--target 2` 或 `--yes` 在只有一个候选时直接选），选择记入 `target.username`。群聊一律跳过，其他会话不读取内容。
+2. `twin import <目录>`（等同 `twin import start <目录>`）默认入队后立即返回，由运行中的应用执行；应用没在运行时命令会这样提示，加 `--foreground` 在本窗口里跑（带进度条）。`--foreground` 只执行导入本身（D-144）：画像与作息、检索库、人设卡统计等导入后钩子排进队列的作业，用 `twin jobs run --until-idle` 跑完——它会等候“等另一个作业”的作业（人设卡统计要等画像重算完），最多几分钟，并在结束时列出等批准的批次和批准命令（D-826）。第一次会列出非群聊会话让你选目标（`--target 2` 或 `--yes` 在只有一个候选时直接选），选择记入 `target.username`。群聊一律跳过，其他会话不读取内容。
 3. `twin import status` 显示阶段、已处理条数、速度、预计剩余时间与各导入后钩子的进度。中断后 `twin import --resume` 从断点继续。结构化导入 100 万条目标 < 30 分钟（不含下载与 LLM 任务）。
 
 导入报告（不含任何消息正文）在终端和 `data\reports\import-<UTC>.md`：按类型与发送方计数、日期范围、新增/重复/冲突、缺失媒体、表情包下载统计、风格指标变化。

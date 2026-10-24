@@ -11,7 +11,9 @@ Every CLI command is declared with :func:`command` and one of four kinds:
 ``HEAVY``
     long work.  The command only enqueues jobs (:func:`enqueue_heavy`); the
     running application executes them, or ``twin jobs run --until-idle`` does when
-    the application is stopped (``--foreground`` does that immediately).
+    the application is stopped (``--foreground`` does that immediately).  What the command
+    says about it depends on whether the application runs (:func:`queued_hint`,
+    :func:`rerun_hint`; D-826).
 ``EXCLUSIVE``
     restore, purge, key rotation, migrations: the wrapper *takes* the ``run`` and
     ``supervisor`` instance locks (the ones the command does not ``acquires`` or ``tolerates``
@@ -158,7 +160,8 @@ def _guard_locks(
         lock = InstanceLock(name, locks_dir=locks_dir, platform=platform, win32=win32)
         if not lock.acquire():
             raise CliError(
-                f"another '{name}' instance is already running (lock '{name}' is held)",
+                f"another '{name}' instance is already running (lock '{name}' is held); "
+                f"{STOP_HINT}",
                 ExitCode.BUSY,
             )
         stack.callback(lock.release)
@@ -262,6 +265,33 @@ def app_is_running(services: Services) -> bool:
     return bool(locks_held_elsewhere(services.paths.locks_dir, ("run",)))
 
 
+RUNNING_EXECUTES = "the running application executes it"
+RUN_THE_QUEUE = "twin jobs run --until-idle"
+
+
+def queued_hint(services: Services, *, foreground: str | None = None) -> str:
+    """Who executes work a command has just queued - the one wording of every HEAVY command.
+
+    With the application running: it does.  Without: the command's ``foreground`` form (when it
+    has one) or ``twin jobs run --until-idle`` runs it now; otherwise it waits for the next start
+    (R-ARCH-006, D-826).  Not for an EXCLUSIVE command, which holds the ``run`` lock itself.
+    """
+    if app_is_running(services):
+        return RUNNING_EXECUTES
+    here = f"`{foreground}` or " if foreground else ""
+    return (
+        f"the application is not running: {here}`{RUN_THE_QUEUE}` runs it now "
+        "(otherwise it waits for the next start)"
+    )
+
+
+def rerun_hint(services: Services, command: str) -> str:
+    """``command`` as the user should type it now: with ``--foreground`` while nothing runs it."""
+    if app_is_running(services):
+        return f"`{command}` ({RUNNING_EXECUTES})"
+    return f"`{command} --foreground`"
+
+
 def enqueue_heavy(
     services: Services, specs: Sequence[JobSpec], *, foreground: bool = False
 ) -> list[str]:
@@ -272,7 +302,7 @@ def enqueue_heavy(
     """
     from twin.llm.runtime import activate_offpeak_policy, close_llm_runtime
     from twin.ops.foreground import ApplicationRunningError, foreground_run_lock
-    from twin.ops.jobs import JobQueue, Worker, default_registry, load_handlers
+    from twin.ops.jobs import FOREGROUND_WAIT_S, JobQueue, Worker, default_registry, load_handlers
 
     queue = JobQueue(services.db, services.clock)
     ids = [
@@ -289,7 +319,7 @@ def enqueue_heavy(
         for spec in specs
     ]
     if not foreground:
-        typer.echo(f"queued {len(ids)} job(s); the running application will execute them")
+        typer.echo(f"queued {len(ids)} job(s); {queued_hint(services)}")
         return ids
     try:
         with foreground_run_lock(services):
@@ -307,7 +337,7 @@ def enqueue_heavy(
             async def run_and_close() -> Any:
                 try:
                     await worker.recover()
-                    return await worker.run_until_idle()
+                    return await worker.run_until_idle(wait_s=FOREGROUND_WAIT_S)
                 finally:
                     # the jobs shared the process's one client (D-701)
                     await close_llm_runtime(services)

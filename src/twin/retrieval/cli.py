@@ -17,7 +17,14 @@ from rich.table import Table
 
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+)
 from twin.profile.holdout import HoldoutError, resplit_holdout
 from twin.profile.jobs import handle_profile_rebuild
 from twin.profile.queue import PROFILE_JOB
@@ -109,7 +116,9 @@ def retrieval_rebuild(
     verb = "an index run is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id}{', full' if full else ''})")
     if not foreground:
-        typer.echo("the running application executes it; see progress with `twin retrieval stats`")
+        again = "twin retrieval rebuild" + (" --full" if full else "")
+        hint = queued_hint(services, foreground=f"{again} --foreground")
+        typer.echo(f"{hint}; see progress with `twin retrieval stats`")
         return
     registry = HandlerRegistry()
     registry.register(INDEX_JOB, handle_retrieval_index)
@@ -202,7 +211,7 @@ def retrieval_resplit(
     for note in result.notes:
         typer.echo(f"  {note}")
     if not foreground:
-        typer.echo("the running application executes the queued jobs")
+        typer.echo(queued_hint(services))  # a second re-split is not the way to run them
         return
     registry = HandlerRegistry()
     registry.register(INDEX_JOB, handle_retrieval_index)

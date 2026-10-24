@@ -28,8 +28,8 @@ from twin.ops.process_model import (
     CliError,
     CommandKind,
     ExitCode,
-    app_is_running,
     command,
+    queued_hint,
 )
 from twin.schedule.jobs import queue_lifeline
 from twin.schedule.planner import TimezoneError, validate_zone
@@ -263,7 +263,4 @@ def plan_lifeline_generate(
     job_id = queue_lifeline(services, plan)
     kit.planner.store.mark_lifeline_queued(plan.id, job_id)
     typer.echo(f"queued the life line of {target.isoformat()} as job {job_id}")
-    if app_is_running(services):
-        typer.echo("the running application will draw it; see it with `twin plan lifeline`")
-    else:
-        typer.echo("the application is stopped: run `twin jobs run --until-idle` to draw it now")
+    typer.echo(f"{queued_hint(services)}; see it with `twin plan lifeline`")
