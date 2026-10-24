@@ -199,6 +199,7 @@ def test_r18_b8_the_notice_and_the_status_never_carry_a_message(services: Servic
     assert gate.notice(readiness, services.clock.now_utc(), None) is None  # told: not again now
     install_ready(services)
     assert status_lines(services) == ["已就绪"]
+    assert explain(services, check_readiness(services)) == []  # nothing stands in the way
     assert gate.notice(gate.check(), services.clock.now_utc(), None) is None  # ready: nothing
 
 

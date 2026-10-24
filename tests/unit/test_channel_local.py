@@ -35,6 +35,7 @@ from tests.support.ilink import (
     updates,
 )
 from tests.support.persona import sticker_scenario
+from tests.support.readiness import install_ready
 from twin.channel.base import (
     AuthState,
     BypassRefused,
@@ -634,6 +635,7 @@ async def test_the_chat_application_answers_through_the_engine_at_her_pace(
     from twin.llm.runtime import DEEPSEEK_SECRET
 
     services.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
+    install_ready(services)  # her profile, routine and card: the engine may answer (D-870)
     extracted: list[list[str]] = []
     monkeypatch.setattr(
         "twin.engine.component.queue_bot_extraction",

@@ -392,7 +392,8 @@ async def test_the_command_sends_the_same_report(
 async def test_r18_b8_the_report_says_first_whether_the_bot_is_ready(
     rig: Rig, services: Services, llm: LlmRuntime
 ) -> None:
-    """D-873: ``未就绪：缺 …`` and what stands in the way, right under the header; then ``已就绪``."""
+    """R18-B8 (D-873): ``未就绪：缺 …`` and what stands in the way right under the header;
+    ``已就绪`` once her profile, routine and card exist."""
     router = CommandRouter.from_services(services, llm, selector=rig.selector)
     outcome = await router.handle("/状态", CommandContext(rig.clock.now_utc(), "in-1"))
     assert outcome is not None

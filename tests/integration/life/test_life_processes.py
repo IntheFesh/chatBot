@@ -120,6 +120,8 @@ async def test_a_persona_edit_in_another_process_is_in_the_next_reply_within_two
     world.deepseek.book.when("在吗", "在呀")
     world.deepseek.book.when("早点睡", "知道啦")
     write_card(world, "宝宝")
+    written = PersonaStore(world.services.db, world.services.clock).active("live")
+    assert written is not None  # (the world's own card of D-870 is the version before it)
     await world.clock.step(SOON)  # the application has seen the card
     await world.say("在吗")
     await world.run_until_idle()
@@ -132,7 +134,7 @@ async def test_a_persona_edit_in_another_process_is_in_the_next_reply_within_two
     )
     before = state_version(world.services)
     code, out = world.cli("persona", "edit")
-    assert code == 0 and "saved as version v2" in out, out
+    assert code == 0 and f"saved as version v{written.number + 1}" in out, out
     after = state_version(world.services)
     assert after == before + 1  # a LIGHT command counts the change up, once, in its transaction
     assert world.assembly.watcher.version == before  # the application has not looked yet
@@ -146,7 +148,7 @@ async def test_a_persona_edit_in_another_process_is_in_the_next_reply_within_two
     assert "称呼：小笨蛋" in second and "称呼：宝宝" not in second
     assert world.persona_said[-1].text == "知道啦"
     card = PersonaStore(world.services.db, world.services.clock).active("live")
-    assert card is not None and card.reason == "edit" and card.number == 2
+    assert card is not None and card.reason == "edit" and card.number == written.number + 1
     # the edit is her card's, not a message of anybody: the file of the editor is gone
     assert list(world.services.paths.tmp_dir.glob("persona-*")) == []
     assert_clean_screen(world)

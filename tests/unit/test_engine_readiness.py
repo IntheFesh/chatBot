@@ -79,9 +79,18 @@ async def held(harness: Harness) -> None:
 
 
 async def hold_for(harness: Harness, seconds: float) -> None:
-    """Let ``seconds`` of the manual clock go by while the round is held, one look at a time."""
+    """Let ``seconds`` of the manual clock go by while the round is held, one look at a time.
+
+    Every look reads the database a few times; hours of looks on a slow disk take real seconds
+    (``SLOWDB_MS=30``), so the real bound is generous - the clock's time costs nothing.
+    """
     end = harness.clock.now_utc() + timedelta(seconds=seconds)
-    await run_to_idle(harness.engine, harness.clock, until=lambda: harness.clock.now_utc() >= end)
+    await run_to_idle(
+        harness.engine,
+        harness.clock,
+        until=lambda: harness.clock.now_utc() >= end,
+        limit_s=20.0 + seconds / READY_RECHECK_S,
+    )
     await held(harness)
 
 
