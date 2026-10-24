@@ -33,6 +33,7 @@ import httpx
 from tests.support.clock import ManualClock
 from tests.support.deepseek import TEST_KEY, completion, error
 from tests.support.engine_harness import Out
+from tests.support.readiness import install_ready
 from tests.support.routine import Rig, student_model
 from twin.channel.base import (
     AuthState,
@@ -526,8 +527,13 @@ def build_world(
     silence: EmpiricalDistribution | None = None,
     rng: random.Random | None = None,
     salt: str = "proactive-world",
+    ready: bool = True,
 ) -> World:
     """Wire the production scheduler over the synthetic world (see the module description).
+
+    ``ready``: the database gets the rig's routine as the stored one, a profile and a described
+    persona card (:mod:`tests.support.readiness`), so that the production readiness check lets her
+    write (D-870, D-872); ``False`` leaves them out - the not-ready path.
 
     ``instant`` replaces the pauses between bubbles by a jump of the manual clock (the user can
     still interrupt: a message that arrives makes the pause return ``True``).
@@ -546,6 +552,8 @@ def build_world(
         salt=salt,
     )
     services.extras[KIT_KEY] = rig.kit
+    if ready:  # the rig's routine is also the stored one, with a profile and a card (D-870)
+        install_ready(services, model=rig.holder["model"])
     channel = WindowedChannel(clock, window_h=window_h, quota=bubbles)
     engine = build_engine(services, channel, rng=random.Random(seed))
     component = EngineComponent(engine, channel, services)

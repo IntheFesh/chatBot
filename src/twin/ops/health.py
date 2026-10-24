@@ -12,6 +12,8 @@ disk      free space of the data directory (below 5 GB: bad)
 queue     waiting jobs (more than 500, or one waiting for more than 24 hours: bad)
 backup    age of the newest backup (more than 36 hours: bad)
 budget    the degradation level (information only: the budget manager raises its own alerts)
+readiness her live profile, routine model and persona card exist (D-873: a warning, no alert -
+          until they do the bot neither answers nor writes first, D-871/D-872)
 app       components of the application that report themselves unhealthy
 ========  ============================================================================
 
@@ -318,6 +320,11 @@ def check_budget(level: int, daily_ratio: float, monthly_ratio: float) -> Health
     )
 
 
+def check_ready(ready: bool, line: str) -> HealthCheck:
+    """``readiness``: a warning while her profile, routine or persona card is missing (D-873)."""
+    return HealthCheck("readiness", HealthLevel.OK if ready else HealthLevel.WARN, line)
+
+
 def check_components(components: Mapping[str, ComponentHealth] | None) -> HealthCheck:
     if components is None:
         return HealthCheck("app", HealthLevel.OK, "not visible outside the running application")
@@ -428,6 +435,12 @@ class HealthCollector:
         status = build_llm_runtime(self._services).budget.compute()
         return check_budget(status.level, status.daily_ratio, status.monthly_ratio)
 
+    def _readiness(self) -> HealthCheck:
+        from twin.engine.readiness import check_readiness
+
+        readiness = check_readiness(self._services)
+        return check_ready(readiness.ready, readiness.status_line())
+
     def _disk(self) -> HealthCheck:
         directory = self._services.paths.data_dir
         return check_disk(shutil.disk_usage(directory).free, min_gb=self._config.disk_min_gb)
@@ -436,7 +449,14 @@ class HealthCollector:
         """The checks a process other than the application can make."""
         now = self._services.clock.now_utc()
         channel, channel_ok, last_ok = self._channel(now)
-        checks = (channel, self._disk(), self._queue(now), self._backup(now), self._budget_check())
+        checks = (
+            channel,
+            self._disk(),
+            self._queue(now),
+            self._backup(now),
+            self._budget_check(),
+            self._readiness(),
+        )
         return checks, channel_ok, last_ok
 
     def register_probe(self, name: str, probe: Callable[[], Awaitable[HealthCheck]]) -> None:

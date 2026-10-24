@@ -12,6 +12,7 @@ from datetime import timedelta
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.readiness import install_ready
 from tests.support.style_models import ScriptedStyleClient, register_model
 from twin.channel.base import AuthState, SessionState
 from twin.commands import texts
@@ -386,6 +387,28 @@ async def test_the_command_sends_the_same_report(
     found = lines_of(outcome.reply)
     assert found["后端"] == "deepseek" and found["风格模型"] == "还没有登记"
     assert "今日费用" in found and found["平台窗口"] == "暂无"
+
+
+async def test_r18_b8_the_report_says_first_whether_the_bot_is_ready(
+    rig: Rig, services: Services, llm: LlmRuntime
+) -> None:
+    """R18-B8 (D-873): ``未就绪：缺 …`` and what stands in the way right under the header;
+    ``已就绪`` once her profile, routine and card exist."""
+    router = CommandRouter.from_services(services, llm, selector=rig.selector)
+    outcome = await router.handle("/状态", CommandContext(rig.clock.now_utc(), "in-1"))
+    assert outcome is not None
+    lines = outcome.reply.split("\n")
+    assert lines[0] == PREFIX + texts.STATUS_HEADER
+    assert lines[1] == "未就绪：缺 画像、作息模型、人设卡（先不回复、不主动）"
+    assert lines[2].startswith("- 导入：还没有导入聊天记录") and lines[4].startswith("- 人设卡：")
+    install_ready(services)
+    outcome = await router.handle("/状态", CommandContext(rig.clock.now_utc(), "in-2"))
+    assert outcome is not None and outcome.reply.split("\n")[1] == "已就绪"
+
+
+async def test_r18_b8_a_report_without_a_readiness_source_has_no_such_line(rig: Rig) -> None:
+    report = await rig.report()
+    assert "就绪" not in report
 
 
 def test_a_span_is_told_in_hours_and_minutes() -> None:

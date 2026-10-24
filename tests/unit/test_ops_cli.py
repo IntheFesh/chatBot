@@ -94,8 +94,12 @@ def test_health_without_the_application_says_what_only_it_could_tell(home: Servi
     assert code == 0, out
     checks = data["checks"]
     assert set(checks) == {
-        "channel", "disk", "queue", "backup", "budget", "process", "deepseek", "style_model", "app",
+        "channel", "disk", "queue", "backup", "budget", "readiness", "process", "deepseek",
+        "style_model", "app",
     }  # fmt: skip
+    # nothing imported yet: the bot is not ready (D-873), a warning without an alert
+    assert checks["readiness"]["status"] == "warn" and checks["readiness"]["category"] is None
+    assert checks["readiness"]["detail"] == "未就绪：缺 画像、作息模型、人设卡"
     assert checks["process"]["status"] == "warn" and "not running" in checks["process"]["detail"]
     assert "unknown: only the running application can tell" in checks["deepseek"]["detail"]
     assert data["snapshot_at"] is None and data["snapshot_age_s"] is None

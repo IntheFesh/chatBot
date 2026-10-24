@@ -25,6 +25,7 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo
 
 from tests.support.clock import DEFAULT_START, ManualClock
+from tests.support.readiness import install_ready
 from tests.support.reply_view import StaticDataView, make_profile
 from tests.support.waiting import wait_until
 from twin.channel.base import (
@@ -45,6 +46,7 @@ from twin.engine.history import HistoryLoader
 from twin.engine.inbound import InboundRenderer
 from twin.engine.machine import ConversationEngine
 from twin.engine.pacing import PacingModel
+from twin.engine.readiness import ReadinessGate
 from twin.engine.rounds import RoundStore
 from twin.engine.safety.crisis import CrisisAssessment, CrisisOutcome
 from twin.engine.state_store import ConversationStateStore
@@ -499,8 +501,14 @@ def build_harness(
     renderer: InboundRenderer | None = None,
     probe_active: Callable[[], bool] | None = None,
     stop_grace_s: float | None = None,
+    ready: bool = True,
 ) -> Harness:
     """Wire an engine the way ``build_engine`` does, with the doubles of this module.
+
+    ``ready``: the database gets the minimal live profile, routine model and described persona
+    card of :mod:`tests.support.readiness`, so that the engine's own readiness check (the
+    production :class:`~twin.engine.readiness.ReadinessGate`, D-870) lets it answer; ``False``
+    leaves them out - the not-ready path.
 
     ``stop_grace_s``: how many real seconds ``engine.stop()`` waits for a bubble that is being
     handed to the channel (the engine's own default when not given); a test whose channel never
@@ -527,6 +535,8 @@ def build_harness(
         else ShortAnswers(tuple((text, 10) for text in answers))
     )
     chosen_pacing = pacing or reference_pacing()
+    if ready:
+        install_ready(services)
     engine = ConversationEngine(
         channel=chosen_channel,
         store=store,
@@ -547,6 +557,7 @@ def build_harness(
         clock=clock,
         settings=services.settings,
         rng=random.Random(seed),
+        readiness=ReadinessGate(services),
         commands=commands,
         backends=backends,
         pacing=lambda view: chosen_pacing,

@@ -8,16 +8,18 @@ the only place the constraints live.  The order is the order of the reasons in t
 
 1. proactive messages are off (``/主动 关``), paused (``/暂停``) or held for a running channel probe
    (the probe counts what the platform lets the bot send; D-684);
-2. no day plan - nobody can tell whether she is asleep;
-3. **deep sleep: never** (no setting reaches this line, R-PRO-003);
-4. the edge of her sleep: only the edge message, and only ``edge_of_sleep_weekly_max`` a week;
-5. the budget has paused proactive messages (R-LLM-008, level 3);
-6. the platform: login, window, messages left (R-CH-008) - "suppressed by the window";
-7. the spacing to the last proactive message (``min_spacing_min``);
-8. a message that nobody answered: the last one has to be ``unanswered_after_min`` old before it
+2. the bot is not ready - her profile, routine model or described persona card is missing
+   (:mod:`twin.engine.readiness`, D-872): nothing of hers goes out before it is;
+3. no day plan - nobody can tell whether she is asleep;
+4. **deep sleep: never** (no setting reaches this line, R-PRO-003);
+5. the edge of her sleep: only the edge message, and only ``edge_of_sleep_weekly_max`` a week;
+6. the budget has paused proactive messages (R-LLM-008, level 3);
+7. the platform: login, window, messages left (R-CH-008) - "suppressed by the window";
+8. the spacing to the last proactive message (``min_spacing_min``);
+9. a message that nobody answered: the last one has to be ``unanswered_after_min`` old before it
    counts, and at most ``max_chase`` more may follow it;
-9. the day's maximum (``daily_max``), which holds for every kind including follow-ups;
-10. the day's quota: once the draw of the plan is used up only follow-ups may still go out.
+10. the day's maximum (``daily_max``), which holds for every kind including follow-ups;
+11. the day's quota: once the draw of the plan is used up only follow-ups may still go out.
 
 :func:`window_refusal` is the platform window as the session state tells it, the same rule as
 :meth:`twin.channel.window.SessionWindow.refusal_reason`.
@@ -56,6 +58,7 @@ class Situation:
     min_spacing: timedelta
     max_chase: int
     unanswered_after: timedelta
+    ready: bool  # her profile, routine model and persona card exist (D-872)
     need: int = 1  # bubbles the platform must still have room for
     probe_running: bool = False  # a channel probe is measuring: nothing else may be sent
 
@@ -91,6 +94,8 @@ def check(kind: TriggerKind, situation: Situation) -> Refusal | None:
         return Refusal(Reason.PAUSED)
     if s.probe_running:
         return Refusal(Reason.PROBE_RUNNING)
+    if not s.ready:
+        return Refusal(Reason.NOT_READY)
     if s.state is None:
         return Refusal(Reason.NO_PLAN)
     if s.state == "deep_sleep":

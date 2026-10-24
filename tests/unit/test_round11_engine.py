@@ -24,6 +24,7 @@ from tests.support.deepseek import API, error
 from tests.support.embedding import HashingBackend
 from tests.support.engine_harness import ScriptedChannel, ScriptedWriter, make_draft, run_to_idle
 from tests.support.ingest import make_export, run_import
+from tests.support.readiness import install_ready
 from tests.support.waiting import wait_until
 from twin.app import Application
 from twin.commands import texts
@@ -57,6 +58,7 @@ async def running(
     services: Services, clock: ManualClock, embedder: HashingBackend
 ) -> AsyncIterator[Running]:
     services.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
+    install_ready(services)  # her profile, routine and card: the engine may answer (D-870)
     clock.set_time(START)
     channel = ScriptedChannel(clock)
     writer = ScriptedWriter()

@@ -5,7 +5,9 @@
 
 1. reads the facts of the moment in one pass (:class:`Facts`): the day plan, her state, the
    settings, how many messages went out today and since the plan took effect, how many are
-   unanswered, what the platform window allows;
+   unanswered, what the platform window allows, whether the bot is ready (D-872: before it is,
+   the day counts as one she may not write - nothing is drawn - and every candidate is refused
+   ``not_ready``);
 2. lays out the day the first time it sees a plan: the fixed moments (greeting, meals, goodnight,
    :mod:`~twin.schedule.proactive.slots`) become ``proactive_candidates``, follow-ups that came due
    become candidates, windows that passed become ``expired``;
@@ -203,6 +205,7 @@ class ProactiveScheduler:
         model_source: Callable[[], ActivityModel | None],
         silence_source: Callable[[], EmpiricalDistribution | None],
         budget_allowed: Callable[[], bool],
+        ready: Callable[[], bool],
         rng: random.Random | None = None,
         probe_active: Callable[[], bool] | None = None,
     ) -> None:
@@ -223,6 +226,7 @@ class ProactiveScheduler:
         self._model_source = model_source
         self._silence_source = silence_source
         self._budget_allowed = budget_allowed
+        self._ready = ready
         self._probe_active = probe_active
         self._rng = rng or random.Random()  # noqa: S311 - a draw, not security
         self._lock = asyncio.Lock()
@@ -325,6 +329,7 @@ class ProactiveScheduler:
         session = self._channel_state()
         refusal = window_refusal(session)
         config = self._config
+        ready = self._ready()
         situation = Situation(
             now=now,
             state=state,
@@ -347,6 +352,7 @@ class ProactiveScheduler:
             min_spacing=timedelta(minutes=config.min_spacing_min),
             max_chase=config.max_chase,
             unanswered_after=timedelta(minutes=config.unanswered_after_min),
+            ready=ready,
             probe_running=self._probe_active() if self._probe_active is not None else False,
         )
         return Facts(
@@ -356,7 +362,8 @@ class ProactiveScheduler:
             plan=plan,
             day_type=day.day_type,
             state=state,
-            enabled=switch and plan.quota.enabled,
+            # a day before the bot is ready is opened as a day she may not write (D-872)
+            enabled=switch and plan.quota.enabled and ready,
             low=low,
             high=high,
             allowance=plan.quota.for_plan,

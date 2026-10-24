@@ -19,6 +19,7 @@ from tests.support.engine_harness import (
     run_to_idle,
 )
 from tests.support.memory import add_fact, utc
+from tests.support.readiness import install_ready
 from tests.support.style_models import ScriptedStyleClient
 from tests.support.waiting import wait_until
 from twin.app import Application, HealthStatus
@@ -42,6 +43,7 @@ from twin.services import Services
 @pytest.fixture
 def keyed(services: Services) -> Services:
     services.secrets.set(DEEPSEEK_SECRET, "synthetic-test-key-0001")
+    install_ready(services)  # her profile, routine and card: the engine may answer (D-870)
     return services
 
 

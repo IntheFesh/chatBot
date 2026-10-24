@@ -90,6 +90,16 @@ the router would not take for a command - "/::)", "/ 吃饭" - is chat and waits
 the probe ends the round is decided afresh from that moment with the short "just seen" pause.  The
 answer to a crisis is the one exception (it goes out as an urgent send, D-685).
 
+Before the bot is ready - her live profile, routine model and described persona card all exist
+(:mod:`twin.engine.readiness`, D-870) - the round is held the same way (D-871): the user's messages
+are stored and screened for a crisis (a crisis is answered at once, as always), commands work, and
+nothing of hers is said.  One system message says what is missing and what stands in the way, at
+most once in six hours for the same missing things (the book is in the database: a restart does not
+repeat it).  The driver looks again when a setting changes (a new profile, routine or card moves
+``state_version``) and every ``READY_RECHECK_S``; once ready, the messages that piled up are one
+round, timed from that moment like the end of a probe ("just seen"), and her plan decides when she
+answers (asleep: when she wakes).
+
 Backends: with a :class:`BackendChooser` (``BackendSelector`` of the style model) every reply asks
 it which backend to use and tells it how the reply went, which is what makes the fallback to
 DeepSeek and the way back work (R-SRV-004); without one the setting ``backend.active`` is used
@@ -104,7 +114,7 @@ import random
 from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from twin.channel.base import (
     Channel,
@@ -156,11 +166,18 @@ from twin.schedule.events import Resumed
 from twin.schedule.time_service import TimeService
 from twin.storage.ids import new_id
 
+if TYPE_CHECKING:
+    from twin.engine.readiness import Readiness
+
 log = get_logger("twin.engine.machine")
 
 MERGE_SHARE = 0.8  # past this share of the wait, a message that joins adds a short pause
 STEP_FAILURE_PAUSE_S = 5.0
 PROBE_RECHECK_S = 60.0  # while a probe holds the round: look again at least this often
+# before the bot is ready: look again at least this often (a new profile, routine or persona card
+# moves ``state_version`` and wakes the driver at once; this is the safety net, D-871)
+READY_RECHECK_S = 300.0
+HOLD_PROBE, HOLD_NOT_READY = "probe", "not_ready"  # why a round is held (``_hold``)
 STEP_FAILURES_BEFORE_RESET = 5
 STOP_GRACE_S = 10.0  # real seconds a stop waits for a bubble that is being handed over (D-721)
 LEAD_MAX_S = 30.0  # the reply is begun at most this long before her delay ends (D-723)
@@ -218,6 +235,21 @@ class MessageRenderer(Protocol):
     async def render(self, message: InboundMessage) -> InboundItem: ...
 
 
+class ReadinessPort(Protocol):
+    """Is the bot ready, and what to say until it is: :class:`~twin.engine.readiness.ReadinessGate`.
+
+    Every method is blocking (the engine calls it in a worker thread).
+    """
+
+    def check(self) -> Readiness: ...
+
+    def notice(
+        self, readiness: Readiness, now: datetime, last_inbound: datetime | None
+    ) -> str | None: ...
+
+    def noted(self, readiness: Readiness, at: datetime) -> None: ...
+
+
 PacingSource = Callable[[ReplyDataView], PacingModel]
 ExtractionQueue = Callable[[Sequence[BotMessage]], str | None]
 
@@ -268,6 +300,7 @@ class ConversationEngine:
         clock: Clock,
         settings: Settings,
         rng: random.Random,
+        readiness: ReadinessPort,
         commands: CommandPort | None = None,
         backends: BackendChooser | None = None,
         pacing: PacingSource = PacingModel.from_view,
@@ -299,7 +332,8 @@ class ConversationEngine:
         self._pacing_source = pacing
         self._queue_extraction = queue_extraction
         self._probe_active = probe_active
-        self._probe_held = False  # held for a probe: re-timed when it ends
+        self._readiness = readiness
+        self._held: set[str] = set()  # why the round is held (probe, not ready): re-timed after
         self._stop_grace_s = stop_grace_s
         self._stopping = False  # ``stop`` was called: nothing new is started, a send is let finish
         # clear while a bubble is being handed to the channel (and while the crisis answer goes out)
@@ -781,7 +815,8 @@ class ConversationEngine:
         alert ``reply_failed``, the bubble marked ``fallback`` so that it never becomes a style
         sample) and the normal sender says it.  The attempt is made once per round
         (``_gave_up_round``): when the sender is what keeps failing, the next fifth failure resets
-        the state silently, as before.  Any error of the attempt itself is the same as no
+        the state silently, as before.  Before the bot is ready (D-871) no word of hers is said:
+        the state is reset silently.  Any error of the attempt itself is the same as no
         attempt: the state is reset and the loop lives on.
         """
         try:
@@ -806,6 +841,8 @@ class ConversationEngine:
             return False  # the round answers a crisis: never a word of the persona (D-750)
         if data.outgoing is not None and data.outgoing.reply_id is not None:
             return False  # a part of her reply is out: no second word on top of it
+        if not (await asyncio.to_thread(self._readiness.check)).ready:
+            return False  # before the bot is ready nothing of hers is said (D-871)
         self._gave_up_round = snap.round_id
         await self._short_answer("step_failed", None, data)
         return True
@@ -859,7 +896,7 @@ class ConversationEngine:
             return
         if await self._screen(snap, data):
             return
-        if await self._probe_hold(snap):
+        if await self._probe_hold(snap) or await self._ready_hold(snap):
             return
         await self._decide(snap, continuation=data.skip_quiet)
 
@@ -925,7 +962,7 @@ class ConversationEngine:
         data = RoundData.of(snap)
         if await self._screen(snap, data):
             return
-        if await self._probe_hold(snap):
+        if await self._probe_hold(snap) or await self._ready_hold(snap):
             return
         decision = data.decision
         planned = snap.planned_send_at
@@ -2007,24 +2044,64 @@ class ConversationEngine:
         news.  The pause of ``/暂停`` is a separate thing (``_active_pause``).
         """
         if await self._probe_running():
-            if not self._probe_held:
-                log.info("round_held_for_probe", waiting=len(snap.pending))
-            self._probe_held = True
-            if snap.state != STATE_COLLECTING:  # a decision or a planned time made before the probe
-                await self._edit(
-                    lambda d: replace(d, decision=None, decided_for=0),
-                    state=STATE_COLLECTING,
-                    planned_send_at=None,
-                )
+            await self._hold(snap, HOLD_PROBE)
             await self._wait_wake(PROBE_RECHECK_S)
             return True
-        if self._probe_held:
-            self._probe_held = False
-            log.info("round_released_after_probe", waiting=len(snap.pending))
-            now = self._clock.now_utc()
-            await self._edit(lambda d: replace(d, quiet_from=now, skip_quiet=True))
-            return True  # the driver looks again with the round re-timed
-        return False
+        return await self._release(snap, HOLD_PROBE)
+
+    async def _ready_hold(self, snap: ConversationSnapshot) -> bool:
+        """Hold the round until the bot is ready (D-871); ``True`` if the driver is done for now.
+
+        The same hold as for a probe (:meth:`_hold`): asked after the crisis screening, so a
+        crisis is answered before anything else.  While held, the system message that says what
+        is missing goes out when its book says it is due (:meth:`_tell_not_ready`).  Once ready
+        the round is timed afresh from that moment, as after a probe; the decision then reads her
+        plan, so a backlog that becomes answerable in her deep sleep waits for her waking.
+        """
+        readiness = await asyncio.to_thread(self._readiness.check)
+        if readiness.ready:
+            return await self._release(snap, HOLD_NOT_READY)
+        await self._hold(snap, HOLD_NOT_READY, missing=readiness.key)
+        await self._tell_not_ready(snap, readiness)
+        await self._wait_wake(READY_RECHECK_S)
+        return True
+
+    async def _tell_not_ready(self, snap: ConversationSnapshot, readiness: Readiness) -> None:
+        """Say what is missing, if the book says it is due; noted only once it is delivered."""
+        now = self._clock.now_utc()
+        text = await asyncio.to_thread(self._readiness.notice, readiness, now, snap.last_inbound_at)
+        if text is None:
+            return
+        if await self._say_system(SYSTEM_PREFIX + text):
+            log.info("readiness_notice_sent", missing=readiness.key)
+            await asyncio.to_thread(self._readiness.noted, readiness, now)
+
+    async def _hold(self, snap: ConversationSnapshot, why: str, **detail: Any) -> None:
+        """Hold the round for ``why``: nothing is decided, written or sent; it waits in COLLECTING.
+
+        A decision or a planned time made before the hold is taken back.  The one mechanism of
+        the probe (D-684) and of readiness (D-871).
+        """
+        if why not in self._held:
+            log.info("round_held", why=why, waiting=len(snap.pending), **detail)
+        self._held.add(why)
+        if snap.state != STATE_COLLECTING:  # a decision or a planned time made before the hold
+            await self._edit(
+                lambda d: replace(d, decision=None, decided_for=0),
+                state=STATE_COLLECTING,
+                planned_send_at=None,
+            )
+
+    async def _release(self, snap: ConversationSnapshot, why: str) -> bool:
+        """The hold ``why`` is over: the round is timed afresh from now, as a continuation (she
+        has "just seen" the messages).  ``True`` if it was held: the driver looks again."""
+        if why not in self._held:
+            return False
+        self._held.discard(why)
+        log.info("round_released", why=why, waiting=len(snap.pending))
+        now = self._clock.now_utc()
+        await self._edit(lambda d: replace(d, quiet_from=now, skip_quiet=True))
+        return True
 
     async def _active_pause(self) -> datetime | None:
         """The end of the pause (``/暂停``) if one is in force now."""

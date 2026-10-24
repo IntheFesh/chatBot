@@ -6,7 +6,9 @@ its line says it is not enabled or that there is nothing (``暂无``).  A source
 its own line only (``暂无``); the rest of the report is still sent, and the failure is logged by
 type.
 
-The sections, in order: time zone and local time; what she is doing and until when; the backend
+The sections, in order: whether the bot is ready (D-873: ``未就绪：缺 …`` and what stands in the
+way until her profile, routine model and persona card exist); time zone and local time; what she is
+doing and until when; the backend
 and the thinking mode; proactive messages; the platform window and the messages that may still
 be sent; the cost of today with the cache hit rate; the budget level; the style model; the last
 three alerts; reminders (training data left on a rented machine, the retraining reminder).
@@ -81,6 +83,7 @@ class StatusSources:
     proactive: Callable[[], ProactiveStatus | None] | None = None
     retrain: Callable[[], str | None] | None = None
     uncleaned: Callable[[], int] | None = None
+    readiness: Callable[[], Sequence[str]] | None = None  # D-873: ``status_lines`` of readiness
     extra: Sequence[Callable[[], str | Awaitable[str | None] | None]] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -112,6 +115,7 @@ class StatusReport:
 
     async def render(self) -> str:
         sections: list[tuple[str, Section]] = [
+            ("就绪", self._ready),
             ("时区", self._time),
             ("她此刻", self._her),
             ("后端", self._backend),
@@ -143,6 +147,10 @@ class StatusReport:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------------- sections
+
+    async def _ready(self) -> list[str]:
+        source = self._s.readiness
+        return [] if source is None else list(await asyncio.to_thread(source))
 
     async def _time(self) -> list[str]:
         zone = self._s.time.bot_timezone()

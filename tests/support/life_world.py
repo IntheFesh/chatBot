@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import respx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from tests.fixtures.synth_export import make_image_bytes
 from tests.support.console import ScriptedInput
@@ -53,6 +53,7 @@ from tests.support.memory import ScriptedMemoryModel
 from tests.support.network import OfflineTransport
 from tests.support.persona import attach_files, sync_counters
 from tests.support.proactive_world import ProactiveScript, proactive_model
+from tests.support.readiness import install_card, record_import
 from tests.support.style_models import register_model
 from tests.support.synth_chat import ChatSpec, MessageWriter, build_chat
 from tests.support.waiting import wait_until
@@ -79,7 +80,7 @@ from twin.schedule.store import SALT_KEY
 from twin.services import CliContext, Services, build_services, get_cli_context, set_cli_context
 from twin.stickers.catalog import StickerCatalog
 from twin.stickers.library import store_sticker_file
-from twin.storage.chat_models import Sticker
+from twin.storage.chat_models import Message, Sticker
 from twin.storage.crypto import set_active_keyring
 from twin.storage.engine_models import BotTurn
 from twin.storage.models import Alert, Job
@@ -463,6 +464,7 @@ class LifeWorld:
     before_start: set[asyncio.Task[Any]] = field(default_factory=set)
     retired: list[Services] = field(default_factory=list)
     real_data: IsolationSnapshot | None = None  # her real messages as the story begins (fixture)
+    history: Callable[[Services], None] | None = None  # the import a ``ready=False`` world lacks
 
     # ---- building it ------------------------------------------------------------------
 
@@ -487,8 +489,14 @@ class LifeWorld:
         platform_window_h: float = 24.0,
         platform_quota: int = 10,
         her_answers: tuple[str, ...] = (),
+        ready: bool = True,
     ) -> LifeWorld:
-        """Build the world and, unless told not to, start the application (see the module text)."""
+        """Build the world and, unless told not to, start the application (see the module text).
+
+        ``ready=False``: the first start before anything was imported (R18-B8, D-870) - no history,
+        no profile, routine or persona card; :meth:`finish_import` and :meth:`describe_her` bring
+        them in later, while the application runs.
+        """
         settings = services.settings
         settings.retrieval.model = embedder.info.model
         settings.channel.kind = "console" if platform == "console" else "ilink"
@@ -501,12 +509,19 @@ class LifeWorld:
             configure(services)
         moment = start or clock.now_utc()
         first = (moment.astimezone(ZoneInfo(CHICAGO)).date()) - timedelta(days=history_days)
-        build_chat(services, ChatSpec(start=first, days=history_days))
-        if her_answers:
-            add_her_answers(services, first, her_answers)
-        rebuild(services, "all")  # her profile, the examples and the like, from the past
-        run_index(services)
-        install_routine(services, model or proactive_model())
+        routine = model or proactive_model()
+
+        def bring_history(target: Services) -> None:
+            build_chat(target, ChatSpec(start=first, days=history_days))
+            if her_answers:
+                add_her_answers(target, first, her_answers)
+            rebuild(target, "all")  # her profile, the examples and the like, from the past
+            run_index(target)
+            install_routine(target, routine)
+
+        if ready:
+            bring_history(services)
+            install_card(services)  # the described live persona card: the bot is ready (D-870)
         services.runtime.initialize()
         with services.db.transaction(bump_state=False) as session:
             put_setting(
@@ -546,6 +561,7 @@ class LifeWorld:
             double,
         )
         clock.fast = world.watch  # what a scenario watches is woken at every step, too
+        world.history = None if ready else bring_history
         if start_application:
             await world.start()
         return world
@@ -576,6 +592,28 @@ class LifeWorld:
                 waiting_since = loop.time()
         await starting
         self.started = True
+        await self.clock.settle()
+
+    async def finish_import(self) -> None:
+        """The import of her history is over and the jobs after it ran (a ``ready=False`` world):
+        her messages, the profile and routine model, the examples.  The persona card still has
+        no description - its batch waits for approval (:meth:`describe_her`)."""
+        bring = self.history
+        assert bring is not None, "the world was built with its history"
+        self.history = None
+
+        def imported() -> None:
+            bring(self.services)
+            with self.services.db.session() as session:
+                count = int(session.scalar(select(func.count()).select_from(Message)) or 0)
+            record_import(self.services, processed=count, total=count)
+
+        await asyncio.to_thread(imported)
+        await self.clock.settle()
+
+    async def describe_her(self) -> None:
+        """The description batch of the persona card was approved and has run (D-870)."""
+        await asyncio.to_thread(install_card, self.services)
         await self.clock.settle()
 
     async def close(self) -> None:

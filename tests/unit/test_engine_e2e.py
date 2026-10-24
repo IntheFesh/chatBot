@@ -28,6 +28,7 @@ from tests.support.console import RecordingOutput, ScriptedInput
 from tests.support.deepseek import API, TEST_KEY, ok
 from tests.support.embedding import HashingBackend
 from tests.support.engine_harness import START, FixedDay, bubbles_written, run_to_idle
+from tests.support.readiness import install_ready
 from tests.support.synth_chat import ChatSpec, build_chat
 from tests.support.waiting import wait_until
 from twin.channel.local import TYPING_TEXT, LocalConsoleChannel
@@ -115,6 +116,7 @@ async def world(
     build_chat(services, ChatSpec(days=40))
     rebuild(services, "all")  # her profile and routine, from the synthetic conversation
     run_index(services)
+    install_ready(services)  # ... and her described persona card: the bot is ready (D-870)
     services.secrets.set(DEEPSEEK_SECRET, TEST_KEY)
     schedule_kit(services).time.attach_states(FixedDay((START - timedelta(days=1), "free")))
     extracted: list[list[BotMessage]] = []
