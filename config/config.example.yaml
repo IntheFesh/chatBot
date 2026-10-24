@@ -1,7 +1,7 @@
 # wechat-twin example configuration (no secrets; secrets live in the credential store).
 # Copy to config/config.yaml and edit.  This file must stay identical to the YAML block in
 # docs/SPEC.md R-CFG-004 and to the defaults of twin.config.Settings (R-CFG-005).
-consent: { confirmed_at: "2026-10-08" }
+consent: { confirmed_at: null }                       # 她同意的日期，`twin setup` 问过你后写入；没有默认值，缺失时拒绝运行
 paths: { data_dir: "./data", export_dir: null }       # export_dir 指向用户本地的全部导出
 target: { username: null }                            # 目标会话 wxid，首次导入时确认
 time:

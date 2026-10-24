@@ -29,7 +29,7 @@
 
 - **R-SCOPE-001** 单用户系统：只服务仓库主人一人；机器人只在用户微信的 ClawBot 会话中出现。
 - **R-SCOPE-002** 模仿对象是导出记录中目标会话的对方；`isSent=false` 为她，`isSent=true` 为用户。
-- **R-SCOPE-003** 她已知情并授权（2026-10-08）。配置中记录 `consent.confirmed_at`，缺失时程序拒绝启动。
+- **R-SCOPE-003** 她已知情并授权（2026-10-08）。配置中记录 `consent.confirmed_at`（没有默认值，由 `twin setup` 确认后写入），缺失时程序拒绝启动。
 - **R-SCOPE-004** 运行环境：用户的 Windows 10/11 x64 常开电脑（不休眠）。全部聊天记录只在本地导入和保存。
 - **R-SCOPE-005** 机器人时区可切换：默认 `America/Chicago`，用户回国后切到 `Asia/Shanghai`；夏令时自动处理。
 - **R-SCOPE-006** 只有"真实模式"：回复可以慢，睡觉时不回、醒来再回；不实现"随叫随到"模式。
@@ -58,7 +58,7 @@
 - **R-CFG-004** 必须包含的配置项与默认值：
 
 ```yaml
-consent: { confirmed_at: "2026-10-08" }
+consent: { confirmed_at: null }                       # 她同意的日期，`twin setup` 问过你后写入；没有默认值，缺失时拒绝运行
 paths: { data_dir: "./data", export_dir: null }       # export_dir 指向用户本地的全部导出
 target: { username: null }                            # 目标会话 wxid，首次导入时确认
 time:

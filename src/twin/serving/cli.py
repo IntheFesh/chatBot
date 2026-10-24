@@ -335,7 +335,7 @@ def model_verify_command(
 
 
 @model_app.command("recommend")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def model_recommend_command(
     vram: Annotated[
         str | None,

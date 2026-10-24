@@ -20,6 +20,7 @@ from typing import Any
 
 import respx
 
+from tests.support.consent import CONSENT_DATE, CONSENT_ENV
 from tests.support.embedding import HashingBackend
 from tests.support.life_clock import LifeClock
 from tests.support.life_world import LifeWorld
@@ -42,6 +43,7 @@ def isolate(home: Path) -> None:
     os.environ["TWIN_SECRETS_DIR"] = str(home / "secrets")
     os.environ["TWIN_KEYRING_BACKEND"] = "file"
     os.environ["TWIN_ALLOW_FILE_KEYRING"] = "1"  # D-744: the explicit test switch (Windows)
+    os.environ[CONSENT_ENV] = CONSENT_DATE  # R-SCOPE-003 has no default date (D-825)
     os.environ["XDG_CONFIG_HOME"] = str(home / "xdg")
     os.environ["COLUMNS"] = "160"
 

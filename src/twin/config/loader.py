@@ -5,7 +5,8 @@
   nested mapping handed to :class:`~twin.config.settings.Settings`;
 * :func:`resolve_paths` anchors relative paths to the project root;
 * :func:`ensure_consent` refuses to start without a valid
-  ``consent.confirmed_at`` (R-SCOPE-003).
+  ``consent.confirmed_at`` (R-SCOPE-003); there is no default date, ``twin setup`` writes it
+  (D-825).
 """
 
 from __future__ import annotations
@@ -115,15 +116,15 @@ def ensure_consent(settings: Settings) -> date:
     if raw is None or not str(raw).strip():
         raise ConsentError(
             "consent.confirmed_at is missing. This bot imitates a real person and may only run "
-            "with her knowledge and permission. Set consent.confirmed_at to the date she "
-            "agreed (YYYY-MM-DD) in config/config.yaml."
+            "with her knowledge and permission. Run `twin setup`: it asks whether she knows and "
+            "agrees and records the date (consent.confirmed_at, YYYY-MM-DD, in config/config.yaml)."
         )
     try:
         return date.fromisoformat(str(raw).strip())
     except ValueError:
         raise ConsentError(
             f"consent.confirmed_at={raw!r} is not a valid date. Use the form YYYY-MM-DD "
-            "(for example 2026-10-08) in config/config.yaml."
+            "(for example 2026-10-08) in config/config.yaml, or run `twin setup`."
         ) from None
 
 

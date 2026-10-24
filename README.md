@@ -48,8 +48,8 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 uv python install 3.12
 uv sync --frozen
 uv run twin doctor          # 体检：Python、依赖、时区库、凭据存储、磁盘、数据库、网络、计划任务
+uv run twin setup           # 第一次配置向导：先确认她知情并同意（没有同意日期，其他命令一律拒绝）
 uv run twin db upgrade      # 建库 / 迁移
-uv run twin setup           # 第一次配置向导
 ```
 
 ## 第一次使用

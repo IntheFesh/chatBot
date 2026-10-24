@@ -10,7 +10,7 @@ db_app = typer.Typer(help="Database migrations.", no_args_is_help=True)
 
 
 @db_app.command("upgrade")
-@command(CommandKind.EXCLUSIVE, consent=False)
+@command(CommandKind.EXCLUSIVE)
 def db_upgrade() -> None:
     """Create or migrate the database to the latest schema (stop the application first)."""
     paths = get_cli_context().paths()
@@ -22,7 +22,7 @@ def db_upgrade() -> None:
 
 
 @db_app.command("status")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def db_status() -> None:
     """Show the applied and the latest schema revision."""
     paths = get_cli_context().paths()

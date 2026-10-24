@@ -23,7 +23,7 @@ cost_app = typer.Typer(help="What the model calls cost.", no_args_is_help=True)
 
 
 @cost_app.command("report")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def cost_report(
     month: Annotated[
         str | None, typer.Option("--month", help="Month as YYYY-MM (default: this month)")

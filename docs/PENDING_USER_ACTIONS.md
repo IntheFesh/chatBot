@@ -28,7 +28,7 @@
    - 预期：之后每次 `git commit` 会先跑 `scripts/privacy_scan.py`、`ruff check`、`ruff format --check`。
 
 5. **（可选）创建本地配置**
-   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 默认已是 `2026-10-08`；删除或改成非日期时程序会拒绝启动并给出提示。
+   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 没有默认值（示例文件里是 `null`）：运行 `uv run twin setup`，向导问她是否知情并同意，你确认后输入 `2026-10-08` 写入；缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除的命令外一律拒绝运行（退出码 3，D-825）。
 
 6. **（已确认）Windows CI 修复：第 00 轮首次 `windows-latest` 运行有 13 个失败，按根因修复后，提交 `eac181e`、`e3fac3e` 的 `windows-latest` 与 `ubuntu-latest` 任务均为绿色。以下仅作记录，无需再做。**
    - 做什么：看下一次推送后 GitHub Actions 里 `quality (windows-latest)` 任务，或本机 `uv run pytest -q`。

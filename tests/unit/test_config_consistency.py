@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 import yaml
 
+from tests.support.consent import CONSENT_ENV
 from twin.config.lists import load_regex_list, load_word_list
 from twin.config.settings import Settings
 
@@ -49,7 +50,11 @@ def comparable(tree: dict[str, Any]) -> dict[str, Any]:
     return {key: normalise(value) for key, value in flatten(tree).items()}
 
 
-def test_spec_block_example_file_and_settings_defaults_have_identical_keys_and_values() -> None:
+def test_spec_block_example_file_and_settings_defaults_have_identical_keys_and_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # the defaults alone: not the consent the suite's fixture records for every test (D-825)
+    monkeypatch.delenv(CONSENT_ENV, raising=False)
     defaults = comparable(Settings().to_plain())
     spec = comparable(spec_block())
     example = comparable(example_file())

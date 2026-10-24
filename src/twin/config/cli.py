@@ -35,7 +35,7 @@ def _console() -> Console:
 
 
 @config_app.command("show")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def config_show() -> None:
     """Print the effective configuration (secrets and personal ids masked)."""
     settings = get_cli_context().settings()
@@ -128,7 +128,7 @@ def _known(name: str) -> str:
 
 
 @secrets_app.command("set")
-@command(CommandKind.LIGHT, consent=False)
+@command(CommandKind.LIGHT)
 def secrets_set(
     name: Annotated[str, typer.Argument(help="Secret name, see `twin secrets list`")],
     from_stdin: Annotated[
@@ -149,7 +149,7 @@ def secrets_set(
 
 
 @secrets_app.command("delete")
-@command(CommandKind.LIGHT, consent=False)
+@command(CommandKind.LIGHT)
 def secrets_delete(name: Annotated[str, typer.Argument(help="Secret name")]) -> None:
     """Remove a secret from the credential store."""
     _known(name)
@@ -159,7 +159,7 @@ def secrets_delete(name: Annotated[str, typer.Argument(help="Secret name")]) -> 
 
 
 @secrets_app.command("list")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def secrets_list() -> None:
     """List secret names and whether they are set (values are never shown)."""
     store = get_cli_context().secret_store()
@@ -179,7 +179,7 @@ def secrets_list() -> None:
 
 
 @secrets_app.command("check")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def secrets_check(name: Annotated[str, typer.Argument(help="Secret name")]) -> None:
     """Exit 0 if the secret is set, 1 if not (the value is never printed)."""
     _known(name)

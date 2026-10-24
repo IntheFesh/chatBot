@@ -195,7 +195,7 @@ def check_config(ctx: DoctorContext) -> CheckResult:
             "config",
             CheckStatus.FAIL,
             str(exc),
-            "set consent.confirmed_at (YYYY-MM-DD) in config/config.yaml",
+            "run `twin setup` (it asks whether she knows and agrees and records the date)",
         )
     return CheckResult("config", CheckStatus.OK, f"loaded; consent confirmed {confirmed}")
 

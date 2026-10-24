@@ -31,7 +31,7 @@ STEPS = (
 
 
 @drill_app.command("network")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def drill_network() -> None:
     """Print the steps of the network drill."""
     typer.echo("断网演练（观察期内做一次）")

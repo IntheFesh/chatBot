@@ -75,20 +75,20 @@ uv run twin setup
 
 | 问什么 | 写到哪里 | 说明 |
 | --- | --- | --- |
-| 她同意的日期（consent） | `config\config.yaml` 的 `consent.confirmed_at` | 缺失或不是日期时，除 `twin doctor` 等少数命令外一律拒绝运行（退出码 3，R-SCOPE-003） |
+| 她同意的日期（consent） | `config\config.yaml` 的 `consent.confirmed_at` | 没有默认值：向导先问她是否知情并同意，你确认后写入你输入的日期（2026-10-08）。缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除（`twin service stop`、`twin service uninstall`、`twin purge`）外一律拒绝运行（退出码 3，R-SCOPE-003，D-825） |
 | DeepSeek API Key | Windows 凭据管理器 `deepseek_api_key` | 输入时不回显，从不写入文件或日志 |
 | 告警邮件（SMTP） | `ops.smtp.*`；密码进凭据管理器 `smtp_password` | 端口 465 用隐式 TLS，其余端口 STARTTLS；可发一封测试邮件 |
 | 她的 wxid（目标会话） | `target.username` | 留空就在第一次导入时从非群聊会话里选 |
 | 机器人时区 | `time.bot_timezone` | 默认 `America/Chicago`，回国后切到 `Asia/Shanghai`（第 9 章） |
 | 紧急联系人（默认关） | `safety.emergency_contact` | 开启前屏幕上会原样显示将要发出的固定邮件（只有时间，没有任何聊天内容） |
 
-不想用向导的话，等价的手动命令：
+不想用向导的话，等价的手动命令（先写好同意日期：没有它，下面的命令都以退出码 3 拒绝）：
 
 ```powershell
+copy config\config.example.yaml config\config.yaml   # 然后编辑：consent.confirmed_at 填她同意的日期；该文件不会被提交
 uv run twin secrets set deepseek_api_key      # 粘贴 Key，不回显
 uv run twin secrets set smtp_password         # 可选
 uv run twin secrets list                      # 哪些秘密已设置（从不显示值）
-copy config\config.example.yaml config\config.yaml   # 然后编辑；该文件不会被提交
 uv run twin config show                       # 生效配置（秘密和个人 id 已打码）
 uv run twin settings list                     # 存在数据库里的运行时设置
 ```
@@ -634,7 +634,7 @@ uv run twin purge --all
 
 只想删训练相关的（训练集、训练包、本地风格模型文件），保留其余：`uv run twin purge --training-only`（确认短语是 `删除训练数据`）。
 
-删除之后要重新使用必须从头来：`uv run twin db upgrade`、`uv run twin setup`、重新登录和导入。
+删除之后要重新使用必须从头来：`uv run twin setup`、`uv run twin db upgrade`、重新登录和导入。
 
 ---
 
