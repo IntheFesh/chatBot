@@ -284,6 +284,20 @@ manifest = json.load(open(sys.argv[1], encoding="utf-8"))
 print("profile=%s dataset=%s" % (manifest.get("profile"), manifest.get("dataset_version")))' "$1"
 }
 
+# pairs_after_cutoff DATASET_META: how many preference pairs the export left for a later one
+# because they were made after the hold-out cut-off (stats.dpo.after_cutoff, D-860); 0 if unknown.
+pairs_after_cutoff() {
+    "${TWIN_PYTHON}" -c 'import json, sys
+try:
+    meta = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    meta = {}
+stats = meta.get("stats") if isinstance(meta, dict) else None
+dpo = stats.get("dpo") if isinstance(stats, dict) else None
+value = dpo.get("after_cutoff") if isinstance(dpo, dict) else None
+print(value if isinstance(value, int) and not isinstance(value, bool) else 0)' "$1"
+}
+
 # training_output_present: success when output/ holds anything a training left.
 training_output_present() {
     [ -d "${TWIN_HOME}/output" ] && [ -n "$(find "${TWIN_HOME}/output" -mindepth 1 -print -quit)" ]

@@ -5,7 +5,10 @@
 #
 # Runs only when the package holds at least TWIN_DPO_MIN_PAIRS preference pairs
 # (training.dpo_min_pairs, 200 by default); otherwise it says so and ends successfully without
-# touching anything.
+# touching anything.  The pairs of the package are all from before the hold-out cut-off (D-860);
+# they are counted with the fifth that `twin train export-dpo` held out in data/dpo_holdout.jsonl
+# for the stack choice (D-861).  The training reads data/dpo_train.jsonl only: dataset_info.json
+# does not name the held-out file, and eval.sh scores those pairs with both stacks.
 #
 # The reference model of the run is the SFT model, never the bare base (D-650):
 #   layered   (the bf16 profiles) config/dpo.yaml has adapter_name_or_path = the SFT adapter and
@@ -45,6 +48,7 @@ start_logging dpo
 use_data_disk
 
 PAIRS_FILE="${TWIN_HOME}/data/dpo_train.jsonl"
+HOLDOUT_FILE="${TWIN_HOME}/data/dpo_holdout.jsonl"
 CONFIG="${TWIN_HOME}/config/dpo.yaml"
 RECORD="${TWIN_HOME}/artifacts/dpo/dpo_reference.json"
 TRIAL_DATA="${TWIN_HOME}/trial_data_dpo"
@@ -52,11 +56,19 @@ TRIAL_PAIRS=64
 MINIMUM="${TWIN_DPO_MIN_PAIRS:-200}"
 REFERENCE_KEYS=(ref_model ref_model_adapters ref_model_quantization_bit)
 pairs=0
+held_out=0
 if [ -f "${PAIRS_FILE}" ]; then
     pairs="$(wc -l <"${PAIRS_FILE}")"
 fi
-if [ "${pairs}" -lt "${MINIMUM}" ]; then
-    log "DPO skipped: ${pairs} preference pairs, at least ${MINIMUM} are needed"
+if [ -f "${HOLDOUT_FILE}" ]; then
+    held_out="$(wc -l <"${HOLDOUT_FILE}")"
+fi
+after_cutoff="$(pairs_after_cutoff "${TWIN_HOME}/data/dataset_meta.json")"
+if [ "${after_cutoff}" -gt 0 ]; then
+    log "${after_cutoff} preference pairs were made after the hold-out cut-off of the dataset; they wait for a later export (D-860)"
+fi
+if [ "$((pairs + held_out))" -lt "${MINIMUM}" ]; then
+    log "DPO skipped: $((pairs + held_out)) preference pairs, at least ${MINIMUM} are needed"
     exit 0
 fi
 [ -f "${TWIN_HOME}/output/sft/adapter_model.safetensors" ] || die "no SFT adapter; run train.sh first"
@@ -83,8 +95,8 @@ write_record() {
     if [ "${DPO_FALLBACK}" = "1" ]; then fallback=true; fi
     if [ -n "${DPO_REASON}" ]; then reason="\"${DPO_REASON}\""; fi
     mkdir -p "${TWIN_HOME}/artifacts/dpo"
-    printf '{\n  "mode": "%s",\n  "reference": "%s",\n  "reference_quantization_bit": %s,\n  "fallback": %s,\n  "fallback_reason": %s,\n  "per_device_batch": %s,\n  "accumulation": %s,\n  "pairs": %s\n}\n' \
-        "${TWIN_DPO_MODE}" "${DPO_REFERENCE}" "${bits}" "${fallback}" "${reason}" "$1" "$2" "${pairs}" >"${RECORD}"
+    printf '{\n  "mode": "%s",\n  "reference": "%s",\n  "reference_quantization_bit": %s,\n  "fallback": %s,\n  "fallback_reason": %s,\n  "per_device_batch": %s,\n  "accumulation": %s,\n  "pairs": %s,\n  "held_out_pairs": %s,\n  "after_cutoff_pairs": %s\n}\n' \
+        "${TWIN_DPO_MODE}" "${DPO_REFERENCE}" "${bits}" "${fallback}" "${reason}" "$1" "$2" "${pairs}" "${held_out}" "${after_cutoff}" >"${RECORD}"
 }
 
 # drop_reference FILE: the explicit reference out of a config (the reference is then the base with
@@ -172,7 +184,7 @@ fi
 write_record "$(yaml_get "${CONFIG}" per_device_train_batch_size)" "$(yaml_get "${CONFIG}" gradient_accumulation_steps)"
 
 start_gpu_sampler "${TWIN_HOME}/logs/gpu_memory_dpo.csv"
-log "DPO on ${pairs} preference pairs (${TWIN_DPO_MODE}, reference model: ${DPO_REFERENCE})"
+log "DPO on ${pairs} preference pairs (${held_out} more held out for the stack choice; ${TWIN_DPO_MODE}, reference model: ${DPO_REFERENCE})"
 llamafactory-cli train "${CONFIG}"
 stop_gpu_sampler
 "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/summarize_train.py" \

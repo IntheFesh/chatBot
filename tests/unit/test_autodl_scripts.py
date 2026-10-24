@@ -1404,6 +1404,39 @@ def test_dpo_is_skipped_below_the_minimum_and_runs_above_it(tmp_path: Path) -> N
     assert (workdir / "artifacts" / "dpo" / "metrics.json").exists()
 
 
+@posix_only
+def test_the_held_out_pairs_count_towards_the_minimum_but_are_never_trained_on(
+    tmp_path: Path,
+) -> None:
+    """R18-E6/R18-DPO13 (D-860, D-861): "at least 200 pairs" are the pairs of the package - all
+    from before the cut-off - with the held-out fifth; the training reads ``dpo_train.jsonl``."""
+    short = tmp_path / "short"
+    short.mkdir()
+    workdir = prepared_workdir(short, pairs=1, held_out=1, dpo_min_pairs=3)
+    log = install_fake_cli(short)
+    done = run_script(workdir, script_env(workdir, short), "dpo.sh", "5090-8b")
+    assert done.returncode == 0 and "DPO skipped: 2 preference pairs, at least 3" in done.stdout
+    assert cli_calls(log) == []
+    workdir = prepared_workdir(tmp_path, pairs=2, held_out=1, dpo_min_pairs=3)
+    meta_path = workdir / "data" / "dataset_meta.json"
+    meta = json.loads(meta_path.read_text("utf-8"))
+    meta["stats"]["dpo"] = {"after_cutoff": 4}  # what export-dpo left for a later export
+    meta_path.write_text(json.dumps(meta), "utf-8")
+    log = install_fake_cli(tmp_path)
+    env = script_env(workdir, tmp_path)
+    assert run_script(workdir, env, "train.sh", "5090-8b").returncode == 0
+    done = run_script(workdir, env, "dpo.sh", "5090-8b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "DPO on 2 preference pairs (1 more held out for the stack choice" in done.stdout
+    assert "4 preference pairs were made after the hold-out cut-off" in done.stdout
+    [call] = [c for c in cli_calls(log) if c["stage"] == "dpo"]
+    assert call["dataset"] == "twin_dpo_train" and call["samples"] == ["p0", "p1"]
+    record = dpo_record(workdir)
+    assert (record["pairs"], record["held_out_pairs"], record["after_cutoff_pairs"]) == (2, 1, 4)
+    report = json.loads((workdir / "artifacts" / "dpo" / "metrics.json").read_text("utf-8"))
+    assert report["dpo"]["after_cutoff_pairs"] == 4 and report["dpo"]["held_out_pairs"] == 1
+
+
 def dpo_record(workdir: Path) -> dict[str, Any]:
     value = json.loads((workdir / "artifacts" / "dpo" / "dpo_reference.json").read_text("utf-8"))
     assert isinstance(value, dict)
@@ -1435,6 +1468,8 @@ def test_dpo_of_a_bf16_profile_trains_a_new_adapter_on_sft_without_a_trial(
         "per_device_batch": 1,
         "accumulation": 16,
         "pairs": 3,
+        "held_out_pairs": 0,
+        "after_cutoff_pairs": 0,
     }
     metrics = json.loads((workdir / "artifacts" / "dpo" / "metrics.json").read_text("utf-8"))
     assert metrics["dpo"]["reference"] == "sft"
@@ -1468,6 +1503,8 @@ def test_dpo_of_the_4bit_profile_tries_one_step_with_the_explicit_reference_firs
         "per_device_batch": 1,
         "accumulation": 16,
         "pairs": 3,
+        "held_out_pairs": 0,
+        "after_cutoff_pairs": 0,
     }
 
 

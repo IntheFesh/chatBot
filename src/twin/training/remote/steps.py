@@ -85,12 +85,25 @@ DPO_RECORD_KEYS = (
     "fallback_reason",
     "per_device_batch",
     "accumulation",
+    "pairs",
+    "held_out_pairs",
+    "after_cutoff_pairs",
 )
 
 
 def dpo_record_fields(reference: Mapping[str, Any]) -> dict[str, Any]:
     """The part of ``dpo_reference.json`` that goes into the record of the ``dpo`` step."""
     return {key: reference.get(key) for key in DPO_RECORD_KEYS}
+
+
+def dpo_pairs_line(reference: Mapping[str, Any]) -> str:
+    """How many pairs the preference run trained on, held out and left for later (D-860/861)."""
+    return (
+        f"dpo: trained on {reference.get('pairs')} preference pairs; "
+        f"{reference.get('held_out_pairs') or 0} held out for the stack choice; "
+        f"{reference.get('after_cutoff_pairs') or 0} made after the hold-out cut-off wait for a "
+        "later export"
+    )
 
 
 def dpo_reference_line(reference: Mapping[str, Any]) -> str:
@@ -373,6 +386,7 @@ class RemoteSteps:
             if reference:  # no record: the step was skipped (too few pairs)
                 self._store.set_step_fields(run_id, "dpo", **dpo_record_fields(reference))
                 self._emit(dpo_reference_line(reference))
+                self._emit(dpo_pairs_line(reference))
         return self._finish(run_id, "dpo", outcome)
 
     async def evaluate(self, run_id: str, *, again: bool = False) -> StepReport:

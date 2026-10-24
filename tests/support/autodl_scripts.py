@@ -504,10 +504,14 @@ def prepared_workdir(
     profile: str = "5090-8b",
     *,
     pairs: int = 3,
+    held_out: int = 0,
     dpo_min_pairs: int = 200,
     train: int = 40,
 ) -> Path:
-    """A work directory as it is after upload, setup and decrypt (data and config in place)."""
+    """A work directory as it is after upload, setup and decrypt (data and config in place).
+
+    ``pairs`` preference pairs to train on and ``held_out`` more in ``dpo_holdout.jsonl`` (D-861).
+    """
     from datetime import UTC, datetime
 
     from tests.support.training_data import write_synthetic_dataset
@@ -515,7 +519,7 @@ def prepared_workdir(
 
     workdir = tmp_path / "twin"
     install_scripts(workdir, profile, dpo_min_pairs=dpo_min_pairs)
-    dataset = write_synthetic_dataset(tmp_path / "ds", train=train, pairs=pairs)
+    dataset = write_synthetic_dataset(tmp_path / "ds", train=train, pairs=pairs, held_out=held_out)
     layout_dir = str(workdir)
 
     result = bundle.build_bundle(

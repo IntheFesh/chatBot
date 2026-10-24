@@ -688,6 +688,36 @@ def test_the_dpo_step_records_how_the_reference_model_was_chosen_and_a_fallback_
 
 
 @posix_only
+def test_the_dpo_step_says_how_many_pairs_were_trained_held_out_and_left_for_later(
+    instance: Instance,
+) -> None:
+    """R18-DPO13/R18-E6 (D-860, D-861): the training report counts the three kinds of pairs."""
+    uploaded(instance)
+    record = {
+        "mode": "layered",
+        "reference": "sft",
+        "reference_quantization_bit": None,
+        "fallback": False,
+        "fallback_reason": None,
+        "per_device_batch": 1,
+        "accumulation": 16,
+        "pairs": 160,
+        "held_out_pairs": 40,
+        "after_cutoff_pairs": 12,
+    }
+    script = DPO_SCRIPT.replace("{RECORD}", json.dumps(record))
+    (instance.workdir / "autodl" / "dpo.sh").write_text(script, encoding="utf-8")
+    done = instance.cli("train", "remote", "dpo")
+    assert done.exit_code == 0, done.output
+    assert (
+        "dpo: trained on 160 preference pairs; 40 held out for the stack choice; 12 made after "
+        "the hold-out cut-off wait for a later export" in done.output
+    )
+    step = instance.latest_run().steps["dpo"]
+    assert (step["pairs"], step["held_out_pairs"], step["after_cutoff_pairs"]) == (160, 40, 12)
+
+
+@posix_only
 def test_the_eval_step_compares_the_two_stacks_and_tells_the_instance_which_is_kept(
     instance: Instance, monkeypatch: pytest.MonkeyPatch
 ) -> None:
