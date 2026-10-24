@@ -47,7 +47,14 @@ from rich.table import Table
 from twin.learning.pairs import PreferencePairStore, dpo_hint
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+)
 from twin.profile.holdout import drift_warning, holdout_share
 from twin.services import Services, get_cli_context
 from twin.training import bundle_crypto
@@ -398,7 +405,8 @@ def export_command(
     typer.echo(f"{verb} (job {queued.job_id})")
     _warn_about_the_holdout(services)
     if not foreground:
-        typer.echo("the running application executes it; see `twin train export-status`")
+        hint = queued_hint(services, foreground="twin train export --foreground")
+        typer.echo(f"{hint}; see `twin train export-status`")
         return
     if app_is_running(services):
         typer.echo("the application is running and will execute the job")
@@ -458,7 +466,8 @@ def export_dpo_command(
     verb = "a DPO export is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id})")
     if not foreground:
-        typer.echo("the running application executes it; see `twin train export-status`")
+        hint = queued_hint(services, foreground="twin train export-dpo --foreground")
+        typer.echo(f"{hint}; see `twin train export-status`")
         return
     if app_is_running(services):
         typer.echo("the application is running and will execute the job")

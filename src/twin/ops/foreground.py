@@ -23,7 +23,7 @@ from contextlib import contextmanager
 
 from twin.llm.runtime import activate_offpeak_policy, close_llm_runtime
 from twin.ops.instance_lock import LOCK_RUN, InstanceAlreadyRunningError, InstanceLock
-from twin.ops.jobs import HandlerRegistry, JobQueue, RunSummary, Worker
+from twin.ops.jobs import FOREGROUND_WAIT_S, HandlerRegistry, JobQueue, RunSummary, Worker
 from twin.ops.winapi import Win32
 from twin.services import Services
 
@@ -84,7 +84,8 @@ async def run_jobs_until_idle(
             concurrency=1,
         )
         await worker.recover()
-        task = asyncio.ensure_future(worker.run_until_idle())
+        # a job handed back while it waits for another one is finished here too (D-826)
+        task = asyncio.ensure_future(worker.run_until_idle(wait_s=FOREGROUND_WAIT_S))
         try:
             while not task.done():
                 if on_tick is not None:

@@ -48,16 +48,16 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 uv python install 3.12
 uv sync --frozen
 uv run twin doctor          # 体检：Python、依赖、时区库、凭据存储、磁盘、数据库、网络、计划任务
+uv run twin setup           # 第一次配置向导：先确认她知情并同意（没有同意日期，其他命令一律拒绝）
 uv run twin db upgrade      # 建库 / 迁移
-uv run twin setup           # 第一次配置向导
 ```
 
 ## 第一次使用
 
 1. **登录并绑定微信**：`uv run twin channel login`，用手机扫码，再给 ClawBot 发一条消息确认“这就是我”（绑定后机器人只会对这个账号说话）。
-2. **导入聊天记录**：先 `uv run twin import inspect "<导出目录>"` 只看结构，再 `uv run twin import "<导出目录>"`，用 `uv run twin import status` 看进度。需要花钱的一次性任务会先给估算，你确认后 `uv run twin jobs approve <批次号>` 才执行。
+2. **导入聊天记录**：先 `uv run twin import inspect "<导出目录>"` 只看结构。应用还没在运行时（第一次使用就是这样）：`uv run twin import "<导出目录>" --foreground` 就地导入（带进度条），然后 `uv run twin jobs run --until-idle` 把导入后排队的作业（画像与作息、检索库、人设卡的统计规则等）跑完——不加 `--foreground` 只会排队，要等应用启动才执行，命令会提示你。需要花钱的一次性任务（人设描述、记忆回放、表情包打标）会先给估算，`twin jobs run --until-idle` 结束时列出批次号；你确认后 `uv run twin jobs approve <批次号>`，再 `uv run twin jobs run --until-idle` 执行。应用在运行时直接 `uv run twin import "<导出目录>"`，用 `uv run twin import status` 看进度。
 3. **看画像、核对作息**：`uv run twin profile show`，睡眠时段不对就用 `uv run twin routine add sleep 01:00 08:30` 修正；`uv run twin persona show` 看人设卡，`uv run twin persona edit` 手改。
-4. **试聊**：`uv run twin chat --local`（终端里聊，她按真实节奏回复）。
+4. **试聊**：`uv run twin chat --local`（终端里聊，她按真实节奏回复）。它会启动整个应用，与 `twin run` 互斥：应用在运行时先 `uv run twin service stop`（或在 `twin run` 的窗口按 Ctrl+C），聊完再 `uv run twin service start`。
 5. **常驻运行**：`uv run twin service start`（或下次登录 Windows 时自动启动）。
 
 每一步的细节、预期输出和出问题怎么办都在 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)。

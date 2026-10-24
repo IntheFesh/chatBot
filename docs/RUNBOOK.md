@@ -38,7 +38,7 @@
 
 **必须先停止应用的命令**（`twin service stop` 之后再执行，做完 `twin service start`）：
 
-- `twin backup restore`、`twin purge`、`twin db upgrade`、`twin secrets rotate-db-key`、`twin service install`、`twin service uninstall`。
+- `twin backup restore`、`twin purge`、`twin db upgrade`、`twin secrets rotate-db-key`、`twin secrets migrate`、`twin service install`、`twin service uninstall`。
 
 **与应用互斥的命令**（它们自己持有 `run` 锁，同一时间只能有一个在轮询微信或回复）：
 
@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\install.ps1
 
 ### 1.3 配置向导 `twin setup`
 
-向导一次问一件事，已经有的答案会显示出来、不改就保留，所以可以重复运行：
+向导一次问一件事，已经有的答案会显示出来、不改就保留，所以可以重复运行。数据库建好以后再运行时，目标会话和时区显示的是**正在生效**的值（存在数据库里，可能已被 `/时区` 改过），改了立即生效：时区是一次正常的切换（写入时区历史，与 `twin timezone set` 相同，D-830）；目标会话在库里已经导入了别人的会话时不改，提示先 `twin purge`（一个数据库只放一个目标会话）：
 
 ```powershell
 uv run twin setup
@@ -75,25 +75,25 @@ uv run twin setup
 
 | 问什么 | 写到哪里 | 说明 |
 | --- | --- | --- |
-| 她同意的日期（consent） | `config\config.yaml` 的 `consent.confirmed_at` | 缺失或不是日期时，除 `twin doctor` 等少数命令外一律拒绝运行（退出码 3，R-SCOPE-003） |
+| 她同意的日期（consent） | `config\config.yaml` 的 `consent.confirmed_at` | 没有默认值：向导先问她是否知情并同意，你确认后写入你输入的日期（2026-10-08）。缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除（`twin service stop`、`twin service uninstall`、`twin purge`、`twin secrets migrate`）外一律拒绝运行（退出码 3，R-SCOPE-003，D-825） |
 | DeepSeek API Key | Windows 凭据管理器 `deepseek_api_key` | 输入时不回显，从不写入文件或日志 |
 | 告警邮件（SMTP） | `ops.smtp.*`；密码进凭据管理器 `smtp_password` | 端口 465 用隐式 TLS，其余端口 STARTTLS；可发一封测试邮件 |
 | 她的 wxid（目标会话） | `target.username` | 留空就在第一次导入时从非群聊会话里选 |
 | 机器人时区 | `time.bot_timezone` | 默认 `America/Chicago`，回国后切到 `Asia/Shanghai`（第 9 章） |
 | 紧急联系人（默认关） | `safety.emergency_contact` | 开启前屏幕上会原样显示将要发出的固定邮件（只有时间，没有任何聊天内容） |
 
-不想用向导的话，等价的手动命令：
+不想用向导的话，等价的手动命令（先写好同意日期：没有它，下面的命令都以退出码 3 拒绝）：
 
 ```powershell
+copy config\config.example.yaml config\config.yaml   # 然后编辑：consent.confirmed_at 填她同意的日期；该文件不会被提交
 uv run twin secrets set deepseek_api_key      # 粘贴 Key，不回显
 uv run twin secrets set smtp_password         # 可选
 uv run twin secrets list                      # 哪些秘密已设置（从不显示值）
-copy config\config.example.yaml config\config.yaml   # 然后编辑；该文件不会被提交
 uv run twin config show                       # 生效配置（秘密和个人 id 已打码）
 uv run twin settings list                     # 存在数据库里的运行时设置
 ```
 
-配置优先级：命令行 `--set 键.路径=值` > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config\config.yaml` > 默认值。运行时可变的设置（时区、思考模式、后端、主动范围、暂停状态）存数据库，由指令或 `twin settings set` 修改，重启后保留。
+配置优先级：命令行 `--set 键.路径=值` > 环境变量（`TWIN_` 前缀，嵌套用 `__`）> `config\config.yaml` > 默认值。运行时可变的设置（时区、思考模式、后端、主动范围、暂停状态）存数据库，由指令或 `twin settings set` 修改，重启后保留；`twin settings set time.bot_timezone …` 与 `twin timezone set …` 是同一次切换（写入时区历史，过去的对话仍按当时的时区定日期，D-829）。
 
 ### 1.4 体检与 DeepSeek 探针
 
@@ -186,12 +186,16 @@ uv run twin channel probe stop           # 中途放弃（已测到的保留）
 
 ```powershell
 uv run twin import inspect "D:\你的导出目录"
+# 应用在运行：入队，由它执行
 uv run twin import "D:\你的导出目录"
 uv run twin import status --watch
+# 应用没在运行（第一次使用）：就地导入，再把导入后排队的作业跑完
+uv run twin import "D:\你的导出目录" --foreground
+uv run twin jobs run --until-idle
 ```
 
 1. `twin import inspect` 只输出**结构**（文件树、每个 JSON 的键名与类型、`renderType` 取值计数、`_integrity/` 清单），**不含任何值**，写 `data\reports\inspect-<UTC>.md`。大导出可加 `--sample 20000`。目录名含中文没关系，加引号。
-2. `twin import <目录>`（等同 `twin import start <目录>`）默认入队后立即返回，由运行中的应用执行；应用没在运行时加 `--foreground` 在本窗口里跑（带进度条）。第一次会列出非群聊会话让你选目标（`--target 2` 或 `--yes` 在只有一个候选时直接选），选择记入 `target.username`。群聊一律跳过，其他会话不读取内容。
+2. `twin import <目录>`（等同 `twin import start <目录>`）默认入队后立即返回，由运行中的应用执行；应用没在运行时命令会这样提示，加 `--foreground` 在本窗口里跑（带进度条）。`--foreground` 只执行导入本身（D-144）：画像与作息、检索库、人设卡统计等导入后钩子排进队列的作业，用 `twin jobs run --until-idle` 跑完——它会等候“等另一个作业”的作业（人设卡统计要等画像重算完），最多几分钟，并在结束时列出等批准的批次和批准命令（D-826）。第一次会列出非群聊会话让你选目标（`--target 2` 或 `--yes` 在只有一个候选时直接选），选择记入 `target.username`。群聊一律跳过，其他会话不读取内容。
 3. `twin import status` 显示阶段、已处理条数、速度、预计剩余时间与各导入后钩子的进度。中断后 `twin import --resume` 从断点继续。结构化导入 100 万条目标 < 30 分钟（不含下载与 LLM 任务）。
 
 导入报告（不含任何消息正文）在终端和 `data\reports\import-<UTC>.md`：按类型与发送方计数、日期范围、新增/重复/冲突、缺失媒体、表情包下载统计、风格指标变化。
@@ -636,7 +640,7 @@ uv run twin purge --all
 
 只想删训练相关的（训练集、训练包、本地风格模型文件），保留其余：`uv run twin purge --training-only`（确认短语是 `删除训练数据`）。
 
-删除之后要重新使用必须从头来：`uv run twin db upgrade`、`uv run twin setup`、重新登录和导入。
+删除之后要重新使用必须从头来：`uv run twin setup`、`uv run twin db upgrade`、重新登录和导入。
 
 ---
 
@@ -678,6 +682,7 @@ uv run twin purge --all
 | 退出码 3 | 缺少 `consent.confirmed_at`，用 `uv run twin setup` 补上她同意的日期 |
 | 退出码 5 / “schema outdated” | `uv run twin db upgrade`（先停应用） |
 | 退出码 6 | 秘密缺失：`uv run twin secrets list` 看哪个没设，`uv run twin secrets set <名字>` |
+| 退出码 6，提示 “encrypted file fallback (TWIN_KEYRING_BACKEND=file)” | Windows 上的加密文件凭据库只给测试和开发用，除 `twin doctor` 外的命令都拒绝它：先停应用，`uv run twin secrets migrate` 把全部条目（含已退役的数据库密钥）迁入凭据管理器，读回比对并解密数据抽样后删除文件；再从环境变量里去掉 `TWIN_KEYRING_BACKEND`（和 `TWIN_ALLOW_FILE_KEYRING`）。任何一步失败都不删文件（D-828） |
 | 电脑睡眠或重启之后 | 不补发错过的主动消息；重建当天计划；通道重连；睡眠期间你发来的消息会带延迟地回复。`twin doctor` 的 `power-plan` 提醒关掉自动睡眠 |
 | 睡眠时段落在白天的警告 | 多半是 `time.source_timezone` 设错（第 4.1 节）；用 `/作息` 或 `uv run twin routine add sleep` 修正 |
 | 邮件收不到 | `uv run twin setup` 重走 SMTP 一步并发测试邮件；Gmail 要应用专用密码，QQ/163 要授权码 |
@@ -824,6 +829,7 @@ uv run twin purge --all
 | `twin secrets check` | 只读 | Exit 0 if the secret is set, 1 if not (the value is never printed). |
 | `twin secrets delete` | 轻量修改 | Remove a secret from the credential store. |
 | `twin secrets list` | 只读 | List secret names and whether they are set (values are never shown). |
+| `twin secrets migrate` | 独占（先停止应用） | Move the encrypted file store into the Windows Credential Manager, check it, delete it. |
 | `twin secrets rotate-db-key` | 独占（先停止应用） | Re-encrypt all data with a new database key (resumable; stop the application first). |
 | `twin secrets set` | 轻量修改 | Store a secret in the credential store (never echoed, never logged). |
 | `twin service install` | 独占（先停止应用） | Register the scheduled task that starts the bot when you log on. |

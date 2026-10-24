@@ -33,7 +33,8 @@ class _Section(BaseModel):
 
 
 class ConsentConfig(_Section):
-    confirmed_at: str | None = "2026-10-08"
+    # no default date (R-SCOPE-003, D-825): `twin setup` writes it after asking the user
+    confirmed_at: str | None = None
 
     @field_validator("confirmed_at", mode="before")
     @classmethod

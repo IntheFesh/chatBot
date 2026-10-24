@@ -160,7 +160,7 @@ def test_settings_set_list_and_history(initialised: Path) -> None:
     changed = runner.invoke(app, ["settings", "set", "time.bot_timezone", "Asia/Shanghai"])
     assert changed.exit_code == 0 and "Asia/Shanghai" in changed.output
     unchanged = runner.invoke(app, ["settings", "set", "time.bot_timezone", "Asia/Shanghai"])
-    assert "unchanged" in unchanged.output
+    assert "nothing changed" in unchanged.output  # R18-F3: a switch, worded as `timezone set`
     listing = runner.invoke(app, ["settings", "list"])
     assert (
         listing.exit_code == 0 and "Asia/Shanghai" in listing.output and "paused" in listing.output

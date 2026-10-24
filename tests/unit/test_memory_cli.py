@@ -356,7 +356,10 @@ def test_reindex_only_queues_one_job_and_does_no_work_in_the_command(
     monkeypatch.setattr(Memory, "reindex", forbidden)
     first = cli("memory", "reindex")
     assert first.exit_code == 0, first.output
-    assert "queued (job " in first.output and "the running application executes it" in first.output
+    assert "queued (job " in first.output
+    # R18-F1 (D-826): the application is not running here, so the hint says how to run it now
+    assert "`twin memory reindex --foreground`" in first.output
+    assert "the running application executes it" not in first.output
     second = cli("memory", "reindex")
     assert "already waiting" in second.output  # one job, however often it is typed
 

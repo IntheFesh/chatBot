@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.consent import CONSENT_ENV
 from twin.config.loader import (
     ConfigError,
     ConsentError,
@@ -27,12 +28,13 @@ def write_yaml(path: Path, text: str) -> Path:
     return path
 
 
-def test_defaults_without_any_source() -> None:
+def test_defaults_without_any_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(CONSENT_ENV, raising=False)  # the suite's fixture records her consent
     settings = load_settings()
     assert settings.budget.daily_usd == 1.0
     assert settings.time.bot_timezone == "America/Chicago"
     assert settings.backend.active == "deepseek"
-    assert settings.consent.confirmed_at == "2026-10-08"
+    assert settings.consent.confirmed_at is None  # no default date: `twin setup` writes it (D-825)
     assert settings.pricing_usd_per_mtok["deepseek-flash"].cache_miss == 0.30
 
 
@@ -233,7 +235,9 @@ def test_none_values_stay_none_and_secret_looking_keys_are_hidden() -> None:
 
 
 def test_valid_consent_returns_the_date() -> None:
-    assert ensure_consent(load_settings()) == date(2026, 10, 8)
+    assert ensure_consent(load_settings(None, {"consent": {"confirmed_at": "2026-10-08"}})) == date(
+        2026, 10, 8
+    )
 
 
 def test_unquoted_yaml_date_is_accepted(tmp_path: Path) -> None:

@@ -193,6 +193,8 @@ def _environment(home: Path) -> dict[str, str]:
             "TWIN_SECRETS_DIR": str(home / "secrets"),
             "TWIN_KEYRING_BACKEND": "file",
             "TWIN_ALLOW_FILE_KEYRING": "1",  # D-744: a development tool, not the bot
+            # her consent is written explicitly: there is no default date (R-SCOPE-003, D-825)
+            "TWIN_CONSENT__CONFIRMED_AT": "2026-10-08",
             "PYTHONUTF8": "1",
             "NO_PROXY": "*",
         }

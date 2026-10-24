@@ -1,5 +1,6 @@
 """CLI: ``twin config``, ``twin settings`` and ``twin secrets``."""
 
+import os
 import sys
 from typing import Annotated, Any
 
@@ -11,12 +12,24 @@ from rich.table import Table
 from twin.config.loader import ConfigError
 from twin.config.mask import mask_value, masked_settings
 from twin.config.runtime import (
+    BOT_TIMEZONE,
     SettingSpec,
     SettingValueError,
     registered_settings,
 )
-from twin.config.secrets import KNOWN_SECRETS, SecretStoreError
+from twin.config.secrets import (
+    ENV_ALLOW_FILE,
+    ENV_BACKEND,
+    ENV_PASSPHRASE,
+    KNOWN_SECRETS,
+    EncryptedFileKeyring,
+    SecretStoreError,
+    default_secrets_dir,
+    system_backend,
+)
 from twin.ops.process_model import CliError, CommandKind, ExitCode, command
+from twin.ops.secrets_migrate import migrate_file_store
+from twin.schedule.cli import switch_from_the_command_line
 from twin.services import get_cli_context
 from twin.storage.keystore import KeyStore
 from twin.storage.migrate import schema_status
@@ -35,7 +48,7 @@ def _console() -> Console:
 
 
 @config_app.command("show")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def config_show() -> None:
     """Print the effective configuration (secrets and personal ids masked)."""
     settings = get_cli_context().settings()
@@ -80,12 +93,20 @@ def settings_list() -> None:
 @settings_app.command("set")
 @command(CommandKind.LIGHT)
 def settings_set(
-    key: Annotated[str, typer.Argument(help="Setting key, e.g. time.bot_timezone")],
+    key: Annotated[
+        str,
+        typer.Argument(
+            help="Setting key, e.g. paused; time.bot_timezone is a switch, as `twin timezone set`"
+        ),
+    ],
     value: Annotated[str, typer.Argument(help="New value (YAML scalar)")],
 ) -> None:
     """Change a runtime setting; a running application picks it up within 2 seconds."""
     spec = _find_spec(key)
     services = _services_for_runtime()
+    if spec is BOT_TIMEZONE:  # a switch, as `twin timezone set` makes it (history, plan; D-829)
+        switch_from_the_command_line(services, value)
+        return
     try:
         parsed = yaml.safe_load(value)
         changed = services.runtime.set(spec, parsed, by="cli")
@@ -128,7 +149,7 @@ def _known(name: str) -> str:
 
 
 @secrets_app.command("set")
-@command(CommandKind.LIGHT, consent=False)
+@command(CommandKind.LIGHT)
 def secrets_set(
     name: Annotated[str, typer.Argument(help="Secret name, see `twin secrets list`")],
     from_stdin: Annotated[
@@ -149,7 +170,7 @@ def secrets_set(
 
 
 @secrets_app.command("delete")
-@command(CommandKind.LIGHT, consent=False)
+@command(CommandKind.LIGHT)
 def secrets_delete(name: Annotated[str, typer.Argument(help="Secret name")]) -> None:
     """Remove a secret from the credential store."""
     _known(name)
@@ -159,7 +180,7 @@ def secrets_delete(name: Annotated[str, typer.Argument(help="Secret name")]) -> 
 
 
 @secrets_app.command("list")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def secrets_list() -> None:
     """List secret names and whether they are set (values are never shown)."""
     store = get_cli_context().secret_store()
@@ -179,7 +200,7 @@ def secrets_list() -> None:
 
 
 @secrets_app.command("check")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def secrets_check(name: Annotated[str, typer.Argument(help="Secret name")]) -> None:
     """Exit 0 if the secret is set, 1 if not (the value is never printed)."""
     _known(name)
@@ -216,4 +237,35 @@ def secrets_rotate_db_key() -> None:
         f"done{resumed}: new key id {report.new_key_id}; {report.values_reencrypted} value(s) and "
         f"{report.media_reencrypted} media file(s) re-encrypted; retired keys "
         f"{report.retired_key_ids or 'none'} are kept for old backups"
+    )
+
+
+@secrets_app.command("migrate")
+# exempt from the weak-store refusal and from the consent gate: it is the way out (D-825, D-827)
+@command(CommandKind.EXCLUSIVE, consent=False)
+def secrets_migrate() -> None:
+    """Move the encrypted file store into the Windows Credential Manager, check it, delete it."""
+    context = get_cli_context()
+    source = EncryptedFileKeyring(default_secrets_dir(), os.environ.get(ENV_PASSPHRASE))
+    if not source.exists():
+        typer.echo(
+            f"nothing to migrate: there is no encrypted file store in {source.directory}; "
+            f"remove {ENV_BACKEND} if it is still set"
+        )
+        return
+    target, info = system_backend()
+    report = migrate_file_store(
+        source, target, info, db_path=context.paths().db_path, clock=context.clock
+    )
+    typer.echo(f"moved into {info.name}: {', '.join(report.moved) or 'nothing new'}")
+    if report.already_there:
+        typer.echo(f"already there with the same value: {', '.join(report.already_there)}")
+    if report.database_checked:
+        typer.echo(f"the moved database keys opened {report.values_opened} encrypted value(s)")
+    else:
+        typer.echo("no database data to check the keys against (the entries were compared)")
+    typer.echo(f"deleted: {', '.join(str(path) for path in report.removed) or 'nothing'}")
+    typer.echo(
+        f"now remove {ENV_BACKEND} (and {ENV_ALLOW_FILE}) from the environment: with it the next "
+        "command would open a new, empty file store"
     )

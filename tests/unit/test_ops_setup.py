@@ -13,6 +13,7 @@ import yaml
 from typer.testing import CliRunner
 
 from tests.support.clock import ManualClock
+from tests.support.consent import CONSENT_ENV
 from tests.support.ops import Certificate, SmtpServer, make_certificate
 from twin.cli import app
 from twin.config.loader import ENV_CONFIG
@@ -31,6 +32,7 @@ pytestmark = pytest.mark.filterwarnings("ignore:Requiring AUTH while not requiri
 @pytest.fixture
 def config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secret_store: SecretStore) -> Path:
     """A configuration file that does not exist yet, as on a fresh installation."""
+    monkeypatch.delenv(CONSENT_ENV, raising=False)  # nor her consent: the wizard records it
     path = tmp_path / "config" / "config.yaml"
     monkeypatch.setenv(ENV_CONFIG, str(path))
     set_cli_context(CliContext(secrets=secret_store))

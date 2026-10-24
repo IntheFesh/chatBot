@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests.support.clock import ManualClock
+from tests.support.consent import CONSENT_DATE, CONSENT_ENV
 from tests.support.embedding import HashingBackend
 from tests.support.network import OfflineTransport
 from tests.support.offline import NetworkGuard, guard_network, network_allowed
@@ -85,6 +86,7 @@ def isolated_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Ite
     monkeypatch.setenv("TWIN_SECRETS_DIR", str(tmp_path / "secrets"))
     monkeypatch.setenv("TWIN_KEYRING_BACKEND", "file")  # never the real credential manager
     monkeypatch.setenv("TWIN_ALLOW_FILE_KEYRING", "1")  # D-744: the explicit test switch (Windows)
+    monkeypatch.setenv(CONSENT_ENV, CONSENT_DATE)  # R-SCOPE-003 has no default date (D-825)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.setenv("COLUMNS", "200")  # keep rich tables on one line in captured output
     previous_policy = get_offpeak_policy()  # building an application registers the real one

@@ -50,6 +50,7 @@ def expected_names() -> list[str]:
         "secrets list",
         "secrets check",
         "secrets rotate-db-key",
+        "secrets migrate",
         "db upgrade",
         "db status",
         "jobs list",
@@ -194,7 +195,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 147 == len(expected_names())
+    assert len(names) == 148 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -206,6 +207,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "secrets list": CommandKind.READ,
         "secrets check": CommandKind.READ,
         "secrets rotate-db-key": CommandKind.EXCLUSIVE,
+        "secrets migrate": CommandKind.EXCLUSIVE,  # its keys move: the application is stopped
         "db upgrade": CommandKind.EXCLUSIVE,
         "db status": CommandKind.READ,
         "jobs list": CommandKind.READ,
@@ -662,8 +664,11 @@ def test_commands_refuse_to_run_without_valid_consent(home_services: Services) -
     assert "consent.confirmed_at is missing" in refused.output
     invalid = runner.invoke(app, [*base, "--set", "consent.confirmed_at=someday", "jobs", "list"])
     assert invalid.exit_code == ExitCode.CONSENT and "not a valid date" in invalid.output
-    exempt = runner.invoke(app, [*base, "--set", "consent.confirmed_at=null", "db", "status"])
-    assert exempt.exit_code == 0  # administrative commands that touch no chat data
+    # R18-F10 (D-825): only setup and doctor (and stopping or deleting) run without her consent
+    status = runner.invoke(app, [*base, "--set", "consent.confirmed_at=null", "db", "status"])
+    assert status.exit_code == ExitCode.CONSENT and "twin setup" in status.output
+    exempt = runner.invoke(app, [*base, "--set", "consent.confirmed_at=null", "service", "stop"])
+    assert exempt.exit_code != ExitCode.CONSENT, exempt.output
 
 
 def test_operational_errors_become_short_messages_with_distinct_exit_codes(

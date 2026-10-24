@@ -41,7 +41,14 @@ from twin.memory.replay import (
 )
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+)
 from twin.services import Services, get_cli_context
 
 memory_app = typer.Typer(
@@ -327,7 +334,7 @@ def memory_reindex(
     verb = "a re-encoding is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id})")
     if not foreground:
-        typer.echo("the running application executes it; see `twin jobs list`")
+        typer.echo(queued_hint(services, foreground="twin memory reindex --foreground"))
         return
     if app_is_running(services):
         typer.echo("the application is running and will execute the job")

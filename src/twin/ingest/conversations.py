@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from twin.storage.chat_models import Conversation
 from twin.storage.db import Database
@@ -35,6 +36,16 @@ MANY_HINT = (
     "decide which export is hers, remove the imported data (`twin purge`) and import that "
     "one again; nothing is deleted automatically"
 )
+
+
+def holds_another_conversation(session: Session, username: str) -> bool:
+    """Does the database hold a conversation of anyone but ``username``?
+
+    The one test of the rule: the import refuses such a target (:data:`ONE_TARGET`) and so does
+    ``twin setup`` when it is asked to change the target (D-830).  The user names are encrypted
+    columns, so the rows are read and compared here, not in SQL.
+    """
+    return any(row.username != username for row in session.scalars(select(Conversation)))
 
 
 def count_conversations(db: Database) -> int:

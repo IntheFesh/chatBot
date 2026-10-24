@@ -68,6 +68,7 @@ def _fail_if_left_over(report: PurgeReport) -> None:
         )
 
 
+# deleting her data is what she may ask for when she withdraws her consent (R-OPS-008, D-825)
 @command(CommandKind.EXCLUSIVE, consent=False)
 def purge_command(
     all_data: Annotated[

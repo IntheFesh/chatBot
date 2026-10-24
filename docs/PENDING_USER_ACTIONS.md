@@ -20,7 +20,7 @@
 3. **初始化数据库并空跑应用**
    - 做什么：`uv run twin db upgrade`，然后 `uv run twin run`。
    - 预期：先打印生效配置（YAML，个人信息已打码），随后日志依次出现 `component_started`（state_watcher、heartbeat、job_worker）和 `application_running`。按 Ctrl+C，或直接关闭控制台窗口：日志出现 `application_stopping` → `component_stopped` ×3 → `application_stopped`，进程正常退出（退出码 0）。`data/logs/twin.log` 里是一行一个 JSON，且不含任何聊天正文。
-   - 再开第二个 PowerShell 窗口，应用运行期间执行 `uv run twin run`：应立即报 `another 'run' instance is already running` 并退出（退出码 4）。执行 `uv run twin settings set time.bot_timezone Asia/Shanghai`：运行中的应用 2 秒内在日志里记录 `state_changed`。
+   - 再开第二个 PowerShell 窗口，应用运行期间执行 `uv run twin run`：应立即报 `another 'run' instance is already running` 并退出（退出码 4）。执行 `uv run twin timezone set Asia/Shanghai`（`uv run twin settings set time.bot_timezone Asia/Shanghai` 与它等价：同样是一次时区切换，写入时区历史，D-829）：运行中的应用 2 秒内在日志里记录 `state_changed`；测完用 `uv run twin timezone set America/Chicago` 切回。
    - 防休眠：应用运行期间 `powercfg /requests` 的 SYSTEM 一栏应出现 `python.exe`（`SetThreadExecutionState(ES_SYSTEM_REQUIRED)` 生效）；退出应用后消失。
 
 4. **（可选）安装提交前隐私扫描**
@@ -28,7 +28,9 @@
    - 预期：之后每次 `git commit` 会先跑 `scripts/privacy_scan.py`、`ruff check`、`ruff format --check`。
 
 5. **（可选）创建本地配置**
-   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 默认已是 `2026-10-08`；删除或改成非日期时程序会拒绝启动并给出提示。
+   - 做什么：`copy config\config.example.yaml config\config.yaml`，按需修改（`config/config.yaml` 已在 `.gitignore`，不会被提交）。`consent.confirmed_at` 没有默认值（示例文件里是 `null`）：运行 `uv run twin setup`，向导问她是否知情并同意，你确认后输入 `2026-10-08` 写入；缺失或不是日期时，除 `twin setup`、`twin doctor` 以及停止与删除的命令外一律拒绝运行（退出码 3，D-825）。**已经装好的电脑升级到第 18 轮之后**：如果 `config\config.yaml` 里没有这一行（以前靠默认值），命令会以退出码 3 拒绝，运行一次 `uv run twin setup` 补上即可。
+   - **（需要你确认，D-825）** 你的决定原文是“缺失时除 setup/doctor 外拒绝”。实现另外保留了四条不需要同意的命令：`twin purge`（她撤回同意时要能删除她的数据）、`twin service stop` 与 `twin service uninstall`（要能停下并移除正在运行的机器人）、`twin secrets migrate`（与凭据守卫互锁，见 D-827/D-828）。如果你要严格只留 setup/doctor，告诉我，去掉这四处的 `consent=False` 即可。
+   - **（第 18 轮，D-827/D-828）** 如果你在 Windows 上设过 `TWIN_KEYRING_BACKEND=file`：现在除 `twin doctor` 外所有要读写秘密的命令都会以退出码 6 拒绝。先 `uv run twin service stop`，再 `uv run twin secrets migrate`（把全部条目，含已退役的数据库密钥，迁入 Windows 凭据管理器，读回比对、解密数据抽样后才删除文件），最后从环境变量里删掉 `TWIN_KEYRING_BACKEND` 和 `TWIN_ALLOW_FILE_KEYRING`。
 
 6. **（已确认）Windows CI 修复：第 00 轮首次 `windows-latest` 运行有 13 个失败，按根因修复后，提交 `eac181e`、`e3fac3e` 的 `windows-latest` 与 `ubuntu-latest` 任务均为绿色。以下仅作记录，无需再做。**
    - 做什么：看下一次推送后 GitHub Actions 里 `quality (windows-latest)` 任务，或本机 `uv run pytest -q`。

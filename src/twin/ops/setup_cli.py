@@ -16,7 +16,12 @@ emergency contact         ``safety.emergency_contact``; the wizard says what the
 Answers that are already in place are shown and kept unless the person changes them, so the wizard
 can be run again.  The configuration file is changed with
 :func:`~twin.config.writer.set_section_values` (comments and layout kept, validated before it is
-kept).  LIGHT: it touches no database.
+kept).  The file only seeds the runtime settings of a new database (R-CFG-003), so once the
+database exists the target and the time zone the wizard shows are the ones in force and a changed
+answer is written there too (D-830): the time zone through the planner's ``switch_timezone`` - a
+switch with its ``timezone_history`` row, as ``twin timezone set`` and ``/时区`` make it - and the
+target as the runtime setting, unless the database already holds another conversation (one target
+per database, R-IMP-003, D-695).  LIGHT.
 """
 
 from __future__ import annotations
@@ -29,13 +34,17 @@ import typer
 
 from twin.clock import get_clock
 from twin.config.loader import ConfigError, default_config_path
+from twin.config.runtime import BOT_TIMEZONE, TARGET_USERNAME
 from twin.config.secrets import SecretStore
 from twin.config.settings import Settings
 from twin.config.writer import set_section_values
 from twin.engine.safety.notifier import BODY_TEMPLATE, SUBJECT
+from twin.ingest.conversations import holds_another_conversation
 from twin.ops.mail import SMTP_PASSWORD_SECRET, MailError, OutgoingMail, SmtpMailer
 from twin.ops.process_model import CliError, CommandKind, command
-from twin.services import CliContext, get_cli_context
+from twin.schedule.service import schedule_kit
+from twin.services import CliContext, Services, get_cli_context
+from twin.storage.migrate import SchemaState, schema_status
 
 DEEPSEEK_SECRET = "deepseek_api_key"  # noqa: S105 - the credential store entry name, not a secret
 
@@ -121,27 +130,50 @@ def _smtp(settings: Settings, config: Path, store: SecretStore) -> None:
             )
 
 
-def _target(settings: Settings, config: Path) -> None:
+def _database(context: CliContext) -> Services | None:
+    """The services of a database at the current schema, else ``None`` (nothing in force yet)."""
+    if schema_status(context.paths().db_path).state is not SchemaState.CURRENT:
+        return None
+    return context.services()
+
+
+def _target(settings: Settings, config: Path, services: Services | None) -> None:
     typer.echo("4/6 要模仿的会话")
     typer.echo("她在微信里的 wxid；留空则在第一次导入时从会话列表里选。")
-    answer = _ask("wxid", settings.target.username)
-    if answer:
-        set_section_values(config, "target", {"username": answer})
+    current = services.runtime.get(TARGET_USERNAME) if services else settings.target.username
+    answer = _ask("wxid", current)
+    if not answer:
+        return
+    if services is not None and answer != current:
+        with services.db.session() as session:
+            other = holds_another_conversation(session, answer)
+        if other:
+            typer.echo(
+                "数据库里已经导入了另一个会话的聊天记录，而一个数据库只放一个目标会话"
+                "（换人会把别人的话混进她的画像、例子和训练集）。目标会话保持不变；"
+                "要换成别人，先用 `twin purge` 删掉已导入的数据，再导入她的导出。"
+            )
+            return
+        services.runtime.set(TARGET_USERNAME, answer, by="setup")
+    set_section_values(config, "target", {"username": answer})
 
 
-def _timezone(settings: Settings, config: Path) -> None:
+def _timezone(settings: Settings, config: Path, services: Services | None) -> None:
     typer.echo("5/6 机器人所在的时区")
+    current = services.runtime.get(BOT_TIMEZONE) if services else settings.time.bot_timezone
     while True:
-        answer = _ask(
-            "IANA 时区（美国中部 America/Chicago，中国 Asia/Shanghai）", settings.time.bot_timezone
-        )
+        answer = _ask("IANA 时区（美国中部 America/Chicago，中国 Asia/Shanghai）", current)
         try:
             ZoneInfo(answer)
         except (ZoneInfoNotFoundError, ValueError, OSError):
             typer.echo(f"不认识时区 {answer!r}，再试一次。")
             continue
-        set_section_values(config, "time", {"bot_timezone": answer})
-        return
+        break
+    if services is not None and answer != current:
+        # a switch, written to the history: the bot's past stays dated in the old zone (D-830)
+        outcome = schedule_kit(services).planner.switch_timezone(answer, source="cli")
+        typer.echo(f"已切换时区：{outcome.old_timezone} -> {outcome.new_timezone}（记入时区历史）")
+    set_section_values(config, "time", {"bot_timezone": answer})
 
 
 def _emergency(settings: Settings, config: Path) -> None:
@@ -182,8 +214,9 @@ def setup_command() -> None:
         _smtp(settings, config, store)
         context.reset()
         settings = context.settings()
-        _target(settings, config)
-        _timezone(settings, config)
+        services = _database(context)
+        _target(settings, config, services)
+        _timezone(settings, config, services)
         context.reset()
         settings = context.settings()
         _emergency(settings, config)

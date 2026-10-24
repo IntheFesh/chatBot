@@ -19,7 +19,15 @@ from rich.table import Table
 
 from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
-from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
+from twin.ops.process_model import (
+    CliError,
+    CommandKind,
+    ExitCode,
+    app_is_running,
+    command,
+    queued_hint,
+    rerun_hint,
+)
 from twin.profile.diffing import diff_metrics, summarize
 from twin.profile.holdout import drift_warning, holdout_share
 from twin.profile.jobs import handle_profile_rebuild
@@ -43,6 +51,11 @@ def _console() -> Console:
 
 def _store(services: Services) -> VersionStore:
     return VersionStore(services.db, services.clock)
+
+
+def _rebuild_hint(services: Services, scope: str) -> str:
+    """The command that computes the missing profile, as it runs now (D-826)."""
+    return rerun_hint(services, f"twin profile rebuild --scope {scope}")
 
 
 def _check_scope(scope: str, allowed: tuple[str, ...]) -> str:
@@ -72,7 +85,8 @@ def profile_rebuild(
     verb = "a recomputation is already waiting" if queued.already_queued else "queued"
     typer.echo(f"{verb} (job {queued.job_id}, scope {scope})")
     if not foreground:
-        typer.echo("the running application executes it; `twin jobs list --type profile_rebuild`")
+        again = "twin profile rebuild" + (f" --scope {scope}" if scope != "all" else "")
+        typer.echo(queued_hint(services, foreground=f"{again} --foreground"))
         return
     if app_is_running(services):
         typer.echo("the application is running and will execute the job")
@@ -111,7 +125,9 @@ def profile_history(
         _check_scope(scope, SHOWN_SCOPES)
     versions = _store(services).history(scope, limit)
     if not versions:
-        raise CliError("no profile has been computed yet; run `twin profile rebuild`")
+        raise CliError(
+            f"no profile has been computed yet; run {rerun_hint(services, 'twin profile rebuild')}"
+        )
     table = Table(
         "#", "version", "scope", "created (UTC)", "reason", "her msgs", "changes", "active"
     )
@@ -146,7 +162,7 @@ def profile_show(
     except VersionError as exc:
         raise CliError(str(exc)) from exc
     if chosen is None:
-        raise CliError(f"no {scope} profile yet; run `twin profile rebuild --scope {scope}`")
+        raise CliError(f"no {scope} profile yet; run {_rebuild_hint(services, scope)}")
     activity = store.activity_for_profile(chosen.id)
     model = store.activity_model(activity.id) if activity else None
     overrides = RoutineOverrides(services.db, services.clock).entries()
@@ -185,7 +201,7 @@ def profile_phrases(
     store = _store(services)
     version = store.active_profile(scope)
     if version is None:
-        raise CliError(f"no {scope} profile yet; run `twin profile rebuild --scope {scope}`")
+        raise CliError(f"no {scope} profile yet; run {_rebuild_hint(services, scope)}")
     phrases = store.phrases(version.id)
     if not phrases:
         raise CliError("this profile version has no phrase data")

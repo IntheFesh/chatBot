@@ -311,7 +311,8 @@ def service_install(
 
 
 @service_app.command("uninstall")
-@command(CommandKind.EXCLUSIVE)
+# stopping and removing the bot never needs the consent that may just have been withdrawn (D-825)
+@command(CommandKind.EXCLUSIVE, consent=False)
 def service_uninstall() -> None:
     """Remove the scheduled task (the data stays; `twin purge` deletes data)."""
     scheduler = _need_windows("uninstall")
@@ -323,7 +324,7 @@ def service_uninstall() -> None:
 
 
 @service_app.command("start")
-@command(CommandKind.LIGHT, consent=False)
+@command(CommandKind.LIGHT)
 def service_start() -> None:
     """Start the scheduled task now."""
     context = get_cli_context()
@@ -343,6 +344,7 @@ def service_start() -> None:
 
 
 @service_app.command("stop")
+# stopping the bot never needs the consent that may just have been withdrawn (D-825)
 @command(CommandKind.LIGHT, consent=False)
 def service_stop() -> None:
     """Stop the supervisor and `twin run`: the reply being sent is finished first."""
@@ -372,7 +374,7 @@ def service_stop() -> None:
 
 
 @service_app.command("status")
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def service_status() -> None:
     """The scheduled task, the processes, the restarts of the last day."""
     context = get_cli_context()

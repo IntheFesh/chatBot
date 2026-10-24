@@ -9,6 +9,7 @@ from rich.table import Table
 from twin.llm.runtime import activate_offpeak_policy, build_llm_runtime, close_llm_runtime
 from twin.ops.foreground import foreground_run_lock
 from twin.ops.jobs import (
+    FOREGROUND_WAIT_S,
     BatchNotFoundError,
     BatchTooLargeError,
     JobQueue,
@@ -160,6 +161,19 @@ def jobs_cancel(job_id: Annotated[str, typer.Argument(help="Job id")]) -> None:
     typer.echo(f"job {job_id} cancelled")
 
 
+def _print_waiting_for_approval(services: Services) -> None:
+    """The batches that no worker runs before ``twin jobs approve`` (R-LLM-014)."""
+    batches = _queue(services).awaiting_approval()
+    if not batches:
+        return
+    typer.echo(f"{len(batches)} batch(es) waiting for an approval (they cost money):")
+    for batch in batches:
+        typer.echo(
+            f"  {batch.batch_id}: {batch.awaiting_approval} job(s), estimated "
+            f"${batch.estimated_usd:.2f} - approve with `twin jobs approve {batch.batch_id}`"
+        )
+
+
 @jobs_app.command("run")
 @command(CommandKind.HEAVY)
 def jobs_run(
@@ -170,7 +184,12 @@ def jobs_run(
         bool, typer.Option("--force", help="Run even though the application is running")
     ] = False,
 ) -> None:
-    """Execute queued jobs here (used when the application is not running)."""
+    """Execute queued jobs here (used when the application is not running).
+
+    A job that hands itself back while it waits for another one (the persona statistics for the
+    profile) is finished before the command returns, within a few minutes (D-826); what waits for
+    an approval is listed with the command that approves it.
+    """
     import asyncio
 
     if not until_idle:
@@ -200,7 +219,7 @@ def jobs_run(
         try:
             if not app_running:  # with --force the running application owns its `running` jobs
                 await worker.recover()
-            summary = await worker.run_until_idle()
+            summary = await worker.run_until_idle(wait_s=FOREGROUND_WAIT_S)
         finally:
             await close_llm_runtime(services)
         typer.echo(
@@ -208,6 +227,7 @@ def jobs_run(
             f"failed={summary.failed} discarded={summary.discarded} "
             f"deferred={summary.deferred}"  # handed back: DeepSeek cannot do them now (D-795)
         )
+        _print_waiting_for_approval(services)
 
     if force:  # a second worker beside the application cannot hold the lock the application has
         asyncio.run(_go())

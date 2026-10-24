@@ -87,7 +87,7 @@ def merged_report(
     return HealthReport(now, tuple(checks), channel_ok, last_ok), snapshot.at if snapshot else None
 
 
-@command(CommandKind.READ, consent=False)
+@command(CommandKind.READ)
 def health_command(
     json_output: Annotated[bool, typer.Option("--json", help="Print the report as JSON")] = False,
 ) -> None:

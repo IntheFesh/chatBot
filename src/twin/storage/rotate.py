@@ -36,6 +36,7 @@ from twin.storage.types import EncryptedJSON, EncryptedText
 
 PROGRESS_KEY = "rotation.progress"
 DEFAULT_BATCH = 200
+SAMPLE_ROWS = 20  # rows per encrypted table that `twin secrets migrate` decrypts (D-828)
 
 ProgressCallback = Callable[[str, int], None]
 
@@ -105,6 +106,27 @@ def _reseal_batch(
         session.execute(stmt)
         changed += len(updates)
     return changed
+
+
+def open_samples(db: Database, ring: KeyRing, *, rows: int = SAMPLE_ROWS) -> int:
+    """Decrypt the first ``rows`` rows of every encrypted table with ``ring``; the values opened.
+
+    A value the ring cannot open raises :class:`~twin.storage.crypto.DecryptionError` (or
+    :class:`~twin.storage.crypto.UnknownKeyError`): ``twin secrets migrate`` proves with this that
+    the keys it moved open the data before it removes the store they came from (D-828).
+    """
+    opened = 0
+    with db.session() as session:
+        for spec in encrypted_tables():
+            pk_count = len(spec.pk)
+            for row in _scan_batch(session, spec, None, rows):
+                pk_values = tuple(row[:pk_count])
+                for offset, column in enumerate(spec.columns):
+                    blob = row[pk_count + offset]
+                    if blob is not None:
+                        ring.open(blob, build_aad(spec.table.name, pk_values, column.name))
+                        opened += 1
+    return opened
 
 
 def _remaining(db: Database, ring: KeyRing, target: int) -> int:

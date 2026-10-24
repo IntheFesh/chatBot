@@ -34,7 +34,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from twin.config.settings import Settings
-from twin.ingest.conversations import ONE_TARGET
+from twin.ingest.conversations import ONE_TARGET, holds_another_conversation
 from twin.ingest.hooks import HookContext, HookOutcome, load_hooks, run_hooks
 from twin.ingest.integrity import (
     FileVerdict,
@@ -224,9 +224,8 @@ def _require_single_conversation(session: Session, username: str) -> None:
     be mixed into her profile, her examples and the training set.  Re-importing the same
     conversation is the normal increment and is not touched (R-IMP-003, R17-41, D-695).
     """
-    for candidate in session.scalars(select(Conversation)):
-        if candidate.username != username:
-            raise ImportFailure(ONE_TARGET)
+    if holds_another_conversation(session, username):
+        raise ImportFailure(ONE_TARGET)
 
 
 def resumable_run(services: Services) -> RunView | None:

@@ -18,7 +18,7 @@ from sqlalchemy import select
 from twin.clock import Clock, SystemClock, set_active_clock
 from twin.config.loader import DataPaths, load_settings, resolve_paths
 from twin.config.runtime import RuntimeSettings
-from twin.config.secrets import SecretStore
+from twin.config.secrets import SecretStore, refuse_weak_store
 from twin.config.settings import Settings
 from twin.ops.alerts import AlertService
 from twin.storage.crypto import KeyRing, set_active_keyring
@@ -73,7 +73,8 @@ def build_services(
     ``require_schema`` raises :class:`~twin.storage.migrate.SchemaOutdatedError` (with the
     command to run) unless the database is at the current migration.
     ``allow_create_key`` overrides the default rule "create a master key only for an
-    empty database".
+    empty database".  Without ``secrets`` the default store is opened, which refuses the weak
+    file store on Windows (D-827).
     """
     paths = resolve_paths(settings, root)
     paths.ensure()
@@ -124,10 +125,17 @@ class CliContext:
     def paths(self) -> DataPaths:
         return resolve_paths(self.settings())
 
-    def secret_store(self) -> SecretStore:
+    def secret_store(self, *, allow_weak_file_store: bool = False) -> SecretStore:
+        """The credential store of the command: where every command opens it (D-827).
+
+        The encrypted-file store on Windows without ``TWIN_ALLOW_FILE_KEYRING=1`` is refused here
+        (:class:`~twin.config.secrets.WeakCredentialStoreError`, exit code 6), also when a test
+        injected it; only ``twin doctor`` and ``twin secrets migrate`` pass
+        ``allow_weak_file_store=True``.
+        """
         if self.secrets is None:
-            self.secrets = SecretStore.default()
-        return self.secrets
+            self.secrets = SecretStore.default(allow_weak_file_store=True)
+        return self.secrets if allow_weak_file_store else refuse_weak_store(self.secrets)
 
     def services(self) -> Services:
         if self._services is None:

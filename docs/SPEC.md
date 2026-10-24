@@ -29,7 +29,7 @@
 
 - **R-SCOPE-001** 单用户系统：只服务仓库主人一人；机器人只在用户微信的 ClawBot 会话中出现。
 - **R-SCOPE-002** 模仿对象是导出记录中目标会话的对方；`isSent=false` 为她，`isSent=true` 为用户。
-- **R-SCOPE-003** 她已知情并授权（2026-10-08）。配置中记录 `consent.confirmed_at`，缺失时程序拒绝启动。
+- **R-SCOPE-003** 她已知情并授权（2026-10-08）。配置中记录 `consent.confirmed_at`（没有默认值，由 `twin setup` 确认后写入），缺失时程序拒绝启动。
 - **R-SCOPE-004** 运行环境：用户的 Windows 10/11 x64 常开电脑（不休眠）。全部聊天记录只在本地导入和保存。
 - **R-SCOPE-005** 机器人时区可切换：默认 `America/Chicago`，用户回国后切到 `Asia/Shanghai`；夏令时自动处理。
 - **R-SCOPE-006** 只有"真实模式"：回复可以慢，睡觉时不回、醒来再回；不实现"随叫随到"模式。
@@ -53,12 +53,12 @@
 ## 3. 配置（R-CFG）
 
 - **R-CFG-001** 配置来源优先级：命令行 > 环境变量 > `config/config.yaml` > 默认值；`pydantic-settings` 校验，启动时打印生效配置（秘密打码）。
-- **R-CFG-002** 秘密（DeepSeek Key、SMTP 密码、数据库主密钥）只存 `keyring`（Windows 凭据管理器），`twin secrets set <name>` 交互写入。iLink 登录凭据（bot_token 等）与会话状态一起存加密的 `channel_state`（AES-256-GCM，主密钥在 keyring），不写入配置文件或日志；`twin channel unbind` 一并删除它。`keyring` 的加密文件后端（`TWIN_KEYRING_BACKEND=file`）是各平台的开发/测试开关、永远不是默认；在 Windows 上，只有同时显式设置 `TWIN_ALLOW_FILE_KEYRING=1`（测试夹具统一设置，不按 `TWIN_HOME` 等推断）才可使用，否则 `twin run`、`twin supervise`、`twin service install` 拒绝启动，`twin doctor` 报 FAIL。
+- **R-CFG-002** 秘密（DeepSeek Key、SMTP 密码、数据库主密钥）只存 `keyring`（Windows 凭据管理器），`twin secrets set <name>` 交互写入。iLink 登录凭据（bot_token 等）与会话状态一起存加密的 `channel_state`（AES-256-GCM，主密钥在 keyring），不写入配置文件或日志；`twin channel unbind` 一并删除它。`keyring` 的加密文件后端（`TWIN_KEYRING_BACKEND=file`）是各平台的开发/测试开关、永远不是默认；在 Windows 上，只有同时显式设置 `TWIN_ALLOW_FILE_KEYRING=1`（测试夹具统一设置，不按 `TWIN_HOME` 等推断）才可使用，否则打开秘密库的统一入口拒绝它：除 `twin doctor` 与 `twin secrets migrate` 外，任何要读写秘密的命令都以退出码 6 拒绝，`twin doctor` 报 FAIL 并提示 `twin secrets migrate`。`twin secrets migrate`（独占）把文件后端的全部条目（含已退役的数据库密钥）迁入 Windows 凭据管理器，逐条读回比对、用迁入的密钥解密数据抽样后才删除文件；任何一步失败都不删除。
 - **R-CFG-003** 运行时可变设置（时区、思考模式、后端、主动范围、暂停状态、作息修正等）存数据库 `settings` 表，由指令修改，重启后保留；配置文件只提供初始值。
 - **R-CFG-004** 必须包含的配置项与默认值：
 
 ```yaml
-consent: { confirmed_at: "2026-10-08" }
+consent: { confirmed_at: null }                       # 她同意的日期，`twin setup` 问过你后写入；没有默认值，缺失时拒绝运行
 paths: { data_dir: "./data", export_dir: null }       # export_dir 指向用户本地的全部导出
 target: { username: null }                            # 目标会话 wxid，首次导入时确认
 time:
