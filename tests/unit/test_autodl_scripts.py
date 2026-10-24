@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from tests.support.autodl_scripts import (
     write_tiny_adapter,
     yaml_value,
 )
+from tests.support.tiny_lm import write_tiny_base
 from tests.support.training_data import write_synthetic_dataset
 from twin.training import bundle
 from twin.training.profiles import PROFILES, QUANT_FACTORS
@@ -1339,10 +1341,10 @@ def test_eval_without_a_dpo_adapter_evaluates_the_sft_stack(tmp_path: Path) -> N
 
 
 def trained_with_dpo(
-    tmp_path: Path, profile: str, **fake: int
+    tmp_path: Path, profile: str, *, held_out: int = 0, **fake: int
 ) -> tuple[Path, dict[str, str], Path]:
     """A work directory with the SFT and the DPO adapter, as ``train.sh`` and ``dpo.sh`` leave."""
-    workdir = prepared_workdir(tmp_path, profile, pairs=3, dpo_min_pairs=2)
+    workdir = prepared_workdir(tmp_path, profile, pairs=3, held_out=held_out, dpo_min_pairs=2)
     log = install_fake_cli(tmp_path, **fake)
     env = script_env(workdir, tmp_path)
     assert run_script(workdir, env, "train.sh", profile).returncode == 0
@@ -1382,6 +1384,113 @@ def test_eval_compares_the_sft_stack_with_the_stack_that_has_dpo_on_the_same_sam
     # the evaluation of one stack alone, on request
     run_script(workdir, env, "eval.sh", profile, "sft")
     assert str(cli_calls(log)[-1]["adapter"]) == sft_dir
+
+
+def pair_scores_of(workdir: Path, stack: str) -> list[dict[str, Any]]:
+    path = workdir / "artifacts" / "eval" / stack / "pair_logps.jsonl"
+    return [json.loads(line) for line in path.read_text("utf-8").splitlines()]
+
+
+@posix_only
+def test_eval_scores_the_held_out_pairs_under_both_stacks_with_the_real_tool(
+    tmp_path: Path,
+) -> None:
+    """R18-E6 (D-862, D-865): ``eval.sh`` runs ``tools/pair_logprobs.py`` for each stack on the
+    base of ``config/eval_loss.yaml`` (here a tiny random Qwen3 whose ``q_proj``/``v_proj`` fit the
+    fake command's adapters); the files hold ids and numbers only."""
+    workdir, env, _ = trained_with_dpo(tmp_path, "5090-8b", held_out=2)
+    base = write_tiny_base(tmp_path / "base", hidden=6, heads=1)
+    config = workdir / "config" / "eval_loss.yaml"
+    text = config.read_text("utf-8")
+    model_line = next(line for line in text.splitlines() if line.startswith("model_name_or_path:"))
+    config.write_text(text.replace(model_line, f"model_name_or_path: {base}"), "utf-8")
+    done = run_script(workdir, env, "eval.sh", "5090-8b", timeout=600)
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "scoring the held-out preference pairs under the sft stack" in done.stdout
+    sft, dpo = pair_scores_of(workdir, "sft"), pair_scores_of(workdir, "dpo")
+    assert [row["id"] for row in sft] == [row["id"] for row in dpo] == ["p3", "p4"]
+    for ours, theirs in zip(sft, dpo, strict=True):
+        assert set(ours) == {
+            "id",
+            "chosen_logp",
+            "rejected_logp",
+            "chosen_tokens",
+            "rejected_tokens",
+        }
+        assert (ours["chosen_tokens"], ours["rejected_tokens"]) == (
+            theirs["chosen_tokens"],
+            theirs["rejected_tokens"],
+        )
+        assert ours["chosen_logp"] != theirs["chosen_logp"]  # the DPO adapter is applied
+    held = (workdir / "data" / "dpo_holdout.jsonl").read_text("utf-8")
+    assert "short answer 3" in held
+    assert "short answer" not in (
+        workdir / "artifacts" / "eval" / "sft" / "pair_logps.jsonl"
+    ).read_text("utf-8")
+
+
+RECORDING_PYTHON = """#!/usr/bin/env bash
+# the instance's python in the test: pair_logprobs.py is recorded (and leaves one line), the rest
+# runs for real
+if [ "${1##*/}" = "pair_logprobs.py" ]; then
+    printf '%s\\n' "PYTHONPATH=${PYTHONPATH:-} $*" >>"$(dirname "$0")/pair_calls.log"
+    out=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--out" ]; then out="$2"; fi
+        shift
+    done
+    mkdir -p "$(dirname "$out")"
+    row='{"id": "p3", "chosen_logp": -1.0, "rejected_logp": -2.0, '
+    row+='"chosen_tokens": 2, "rejected_tokens": 3}'
+    echo "$row" >"$out"
+    exit 0
+fi
+exec @REAL_PYTHON@ "$@"
+"""
+
+
+@posix_only
+def test_eval_scores_the_4bit_profile_on_its_quantised_base_with_its_one_adapter(
+    tmp_path: Path,
+) -> None:
+    """R18-E6 (D-865): the quantisation and the stacks of ``config/eval_loss.yaml`` and lib.sh -
+    for the 4-bit profile, 4 bit and one adapter per stack (no GPU here: the call is recorded)."""
+    workdir, env, _ = trained_with_dpo(tmp_path, "5090-14b", held_out=1)
+    python = tmp_path / "stubs" / "recording-python"
+    python.write_text(
+        RECORDING_PYTHON.replace("@REAL_PYTHON@", shlex.quote(sys.executable)), "utf-8"
+    )
+    python.chmod(0o755)
+    done = run_script(workdir, {**env, "TWIN_PYTHON": str(python)}, "eval.sh", "5090-14b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    calls = (tmp_path / "stubs" / "pair_calls.log").read_text("utf-8").splitlines()
+    assert len(calls) == 2
+    for call, stack in zip(calls, ("sft", "dpo"), strict=True):
+        words = call.split()
+        assert words[0] == f"PYTHONPATH={workdir}/pylib"
+        value = {words[i]: words[i + 1] for i in range(len(words) - 1) if words[i].startswith("--")}
+        assert value["--pairs"] == f"{workdir}/data/dpo_holdout.jsonl"
+        assert value["--base"] == str(PROFILES["5090-14b"].model_dir)
+        assert value["--adapters"] == f"{workdir}/output/{stack}"  # continued: one adapter
+        assert value["--quantization-bit"] == "4" and value["--dtype"] == "bfloat16"
+        assert value["--out"] == f"{workdir}/artifacts/eval/{stack}/pair_logps.jsonl"
+    assert pair_scores_of(workdir, "dpo")[0]["id"] == "p3"
+
+
+@posix_only
+def test_eval_of_a_package_without_held_out_pairs_says_the_choice_will_keep_sft(
+    tmp_path: Path,
+) -> None:
+    workdir, env, _ = trained_with_dpo(tmp_path, "5090-8b")
+    stale = workdir / "artifacts" / "eval" / "dpo" / "pair_logps.jsonl"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_text("{}\n", encoding="utf-8")  # left by an earlier evaluation
+    done = run_script(workdir, env, "eval.sh", "5090-8b")
+    assert done.returncode == 0, done.stderr + done.stdout
+    assert "no held-out preference pairs in this package" in done.stdout
+    assert "the stack choice will keep SFT" in done.stdout
+    assert not stale.exists()
+    assert not (workdir / "artifacts" / "eval" / "sft" / "pair_logps.jsonl").exists()
 
 
 @posix_only
