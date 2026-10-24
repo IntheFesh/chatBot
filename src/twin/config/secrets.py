@@ -13,8 +13,11 @@ keyed either by a passphrase (``TWIN_KEYRING_PASSPHRASE``, scrypt) or by a
 random key file kept next to it with mode 0600.  Windows always uses the native
 credential manager; if that is unavailable ``twin doctor`` reports a failure.  The file store is
 a development and test switch on every platform (``TWIN_KEYRING_BACKEND=file``); on Windows it
-needs ``TWIN_ALLOW_FILE_KEYRING=1`` as well, otherwise ``twin run``, ``twin supervise`` and
-``twin service install`` refuse to start and ``twin doctor`` reports a failure (D-744).
+needs ``TWIN_ALLOW_FILE_KEYRING=1`` as well (D-744).  Without it the store is refused where it is
+opened (:meth:`SecretStore.default`, :meth:`twin.services.CliContext.secret_store`), so every
+command that would read or write a secret stops with exit code 6; ``twin doctor`` reports it and
+``twin secrets migrate`` moves the entries into the Windows Credential Manager - the two callers
+that ask for the store with ``allow_weak_file_store=True`` (D-827, D-828).
 """
 
 from __future__ import annotations
@@ -43,6 +46,8 @@ ENV_PASSPHRASE = "TWIN_KEYRING_PASSPHRASE"  # noqa: S105 - environment variable 
 ENV_SECRETS_DIR = "TWIN_SECRETS_DIR"
 # the explicit switch that lets the encrypted-file fallback run on Windows (development, tests)
 ENV_ALLOW_FILE = "TWIN_ALLOW_FILE_KEYRING"
+# the way out of the file store on Windows (D-828)
+MIGRATE_COMMAND = "twin secrets migrate"
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _MAGIC = b"TWSEC1"
@@ -65,6 +70,15 @@ def register_secret_name(name: str, description: str) -> None:
 
 class SecretStoreError(RuntimeError):
     """The credential store could not be read or written."""
+
+
+class WeakCredentialStoreError(SecretStoreError):
+    """The encrypted-file store on Windows without the explicit switch (D-744, D-827)."""
+
+
+def current_platform() -> str:
+    """``sys.platform``; a seam, so that the Windows rule can be tested on any machine."""
+    return sys.platform
 
 
 def _validate_name(name: str) -> None:
@@ -132,6 +146,33 @@ class EncryptedFileKeyring:
             if not items[service]:
                 del items[service]
             self._store(items)
+
+    # -- the whole store (twin secrets migrate) -----------------------------
+
+    def exists(self) -> bool:
+        """Is there a store file at all?"""
+        return self._data_path.exists()
+
+    def entries(self) -> dict[tuple[str, str], str]:
+        """Every ``(service, name) -> value`` the file holds (for ``twin secrets migrate``)."""
+        with self._exclusive():
+            items = self._load()
+        return {
+            (service, name): value
+            for service, names in items.items()
+            for name, value in names.items()
+        }
+
+    def remove(self) -> list[Path]:
+        """Delete the store: the sealed file, its key file and what a write left behind."""
+        removed: list[Path] = []
+        with self._exclusive():
+            for path in (self._data_path, self._key_path, self._data_path.with_suffix(".tmp")):
+                if path.exists():
+                    path.unlink()
+                    removed.append(path)
+        self._lock_path.unlink(missing_ok=True)  # released above: Windows cannot delete it open
+        return removed
 
     # -- internals ---------------------------------------------------------
 
@@ -243,8 +284,8 @@ def file_keyring_refusal(
     The encrypted-file store (``TWIN_KEYRING_BACKEND=file``) is a development and test switch on
     every platform and never the default.  On Windows - the machine the bot runs on - the key of
     the file sits next to the file, protected by a file mode that Windows does not enforce, so
-    ``twin run``, ``twin supervise`` and ``twin service install`` refuse to start with it unless
-    ``TWIN_ALLOW_FILE_KEYRING=1`` says that this is a test or a development run (D-744).
+    no command opens it (:func:`refuse_weak_store`) unless ``TWIN_ALLOW_FILE_KEYRING=1`` says that
+    this is a test or a development run (D-744, D-827).
     """
     plat = sys.platform if platform is None else platform
     if plat != "win32" or info.kind != "file" or file_keyring_allowed(environ):
@@ -252,9 +293,24 @@ def file_keyring_refusal(
     return (
         f"the credential store is the encrypted file fallback ({ENV_BACKEND}=file), which is a "
         "development and test switch: on Windows the key file would sit next to secrets.enc, "
-        "unprotected. Remove the variable so that the Windows Credential Manager is used "
-        f"(or set {ENV_ALLOW_FILE}=1 if this really is a test or development run)"
+        f"unprotected. Run `{MIGRATE_COMMAND}` to move what it holds into the Windows "
+        f"Credential Manager, then remove the variable (or set {ENV_ALLOW_FILE}=1 if this "
+        "really is a test or development run)"
     )
+
+
+def refuse_weak_store(
+    store: SecretStore, *, environ: Mapping[str, str] | None = None
+) -> SecretStore:
+    """``store`` if commands may use it; :class:`WeakCredentialStoreError` if not (D-827).
+
+    The one check behind every way the store is opened; the platform comes from the
+    :func:`current_platform` seam.
+    """
+    refusal = file_keyring_refusal(store.info, platform=current_platform(), environ=environ)
+    if refusal is not None:
+        raise WeakCredentialStoreError(refusal)
+    return store
 
 
 def _probe(backend: CredentialBackend) -> str | None:
@@ -334,6 +390,16 @@ def select_backend(
     )
 
 
+def system_backend(platform: str | None = None) -> tuple[CredentialBackend, BackendInfo]:
+    """The operating system's credential store (the Windows Credential Manager), probed.
+
+    What ``twin secrets migrate`` moves the file store into: ``TWIN_KEYRING_BACKEND`` is ignored
+    and there is no fallback; ``info.usable`` says whether a write/read/delete round trip worked.
+    """
+    environ = {**os.environ, ENV_BACKEND: "system"}
+    return select_backend(environ, platform, probe_system=True)
+
+
 class SecretStore:
     """Named secrets in the credential store (service ``wechat-twin``)."""
 
@@ -344,10 +410,16 @@ class SecretStore:
         )
 
     @classmethod
-    def default(cls) -> SecretStore:
+    def default(cls, *, allow_weak_file_store: bool = False) -> SecretStore:
+        """The store of this machine; the file store on Windows only with the switch (D-827).
+
+        ``allow_weak_file_store`` is for the two callers that must see that store as it is:
+        ``twin doctor`` and ``twin secrets migrate``.
+        """
         # Windows always uses the native Credential Manager: no probe on every command.
         backend, info = select_backend(probe_system=sys.platform != "win32")
-        return cls(backend, info)
+        store = cls(backend, info)
+        return store if allow_weak_file_store else refuse_weak_store(store)
 
     def get(self, name: str) -> str | None:
         _validate_name(name)

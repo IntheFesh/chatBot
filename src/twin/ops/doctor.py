@@ -29,6 +29,8 @@ from twin.clock import now_utc
 from twin.config.loader import DataPaths, ensure_consent, resolve_paths
 from twin.config.secrets import (
     ENV_ALLOW_FILE,
+    ENV_BACKEND,
+    MIGRATE_COMMAND,
     SecretStore,
     SecretStoreError,
     file_keyring_refusal,
@@ -119,6 +121,15 @@ class DoctorContext:
 
 
 DoctorCheck = Callable[[DoctorContext], CheckResult]
+
+
+def _store_as_it_is() -> SecretStore:
+    """The default credential store, also the file store that commands refuse (D-827).
+
+    ``twin doctor`` is exempt from that refusal by name: it has to look at the store to say what
+    is wrong with it and to point to ``twin secrets migrate``.
+    """
+    return SecretStore.default(allow_weak_file_store=True)
 _CHECKS: list[DoctorCheck] = []
 
 
@@ -203,7 +214,7 @@ def check_config(ctx: DoctorContext) -> CheckResult:
 @doctor_check
 def check_keyring(ctx: DoctorContext) -> CheckResult:
     try:
-        store = ctx.secrets or SecretStore.default()
+        store = ctx.secrets or _store_as_it_is()
     except SecretStoreError as exc:
         return CheckResult("keyring", CheckStatus.FAIL, str(exc))
     info = store.info
@@ -229,9 +240,14 @@ def check_keyring(ctx: DoctorContext) -> CheckResult:
     if info.kind == "file":
         refusal = file_keyring_refusal(info, platform=ctx.platform)
         if refusal is not None:
-            # D-744: on Windows the file store is for tests and development only
+            # D-744, D-827: on Windows the file store is for tests and development only
             return CheckResult(
-                "keyring", CheckStatus.FAIL, f"{info.name}: {refusal}", "twin run will not start"
+                "keyring",
+                CheckStatus.FAIL,
+                f"{info.name}: {refusal}",
+                f"`twin run` and every other command except `twin doctor` refuse this store; run "
+                f"`{MIGRATE_COMMAND}` (moves every entry, the retired database keys too, into the "
+                f"Windows Credential Manager), then remove {ENV_BACKEND}",
             )
         if ctx.platform == "win32":
             return CheckResult(
@@ -240,7 +256,8 @@ def check_keyring(ctx: DoctorContext) -> CheckResult:
                 f"read/write ok via encrypted file fallback, which is allowed explicitly "
                 f"({ENV_ALLOW_FILE}=1): {info.detail}",
                 "a development or test switch: the key file sits next to the secrets file; "
-                "production on Windows uses the Credential Manager (unset TWIN_KEYRING_BACKEND)",
+                f"production on Windows uses the Credential Manager (`{MIGRATE_COMMAND}`, then "
+                f"unset {ENV_BACKEND})",
             )
         return CheckResult(
             "keyring",
@@ -257,7 +274,7 @@ def check_database_key(ctx: DoctorContext) -> CheckResult:
     if ctx.settings is None:
         return CheckResult("db-key", CheckStatus.WARN, "skipped (configuration did not load)")
     try:
-        store = ctx.secrets or SecretStore.default()
+        store = ctx.secrets or _store_as_it_is()
         keystore = KeyStore(store)
         if not keystore.exists():
             return CheckResult(
@@ -457,7 +474,7 @@ def check_deepseek_key(ctx: DoctorContext) -> CheckResult:
     store = ctx.secrets
     try:
         if store is None:
-            store = SecretStore.default()
+            store = _store_as_it_is()
         present = store.exists("deepseek_api_key")
     except Exception as exc:  # a locked or broken credential store must not stop diagnostics
         return CheckResult(
@@ -567,7 +584,7 @@ def check_deepseek_net(ctx: DoctorContext) -> CheckResult:
     if ctx.settings is None:
         return CheckResult("deepseek-net", CheckStatus.WARN, "skipped (configuration did not load)")
     try:
-        key = (ctx.secrets or SecretStore.default()).get("deepseek_api_key")
+        key = (ctx.secrets or _store_as_it_is()).get("deepseek_api_key")
     except Exception as exc:
         return CheckResult(
             "deepseek-net", CheckStatus.WARN, f"cannot read the key: {type(exc).__name__}"

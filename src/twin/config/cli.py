@@ -1,5 +1,6 @@
 """CLI: ``twin config``, ``twin settings`` and ``twin secrets``."""
 
+import os
 import sys
 from typing import Annotated, Any
 
@@ -8,6 +9,7 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from twin.clock import get_clock
 from twin.config.loader import ConfigError
 from twin.config.mask import mask_value, masked_settings
 from twin.config.runtime import (
@@ -15,8 +17,18 @@ from twin.config.runtime import (
     SettingValueError,
     registered_settings,
 )
-from twin.config.secrets import KNOWN_SECRETS, SecretStoreError
+from twin.config.secrets import (
+    ENV_ALLOW_FILE,
+    ENV_BACKEND,
+    ENV_PASSPHRASE,
+    KNOWN_SECRETS,
+    EncryptedFileKeyring,
+    SecretStoreError,
+    default_secrets_dir,
+    system_backend,
+)
 from twin.ops.process_model import CliError, CommandKind, ExitCode, command
+from twin.ops.secrets_migrate import migrate_file_store
 from twin.services import get_cli_context
 from twin.storage.keystore import KeyStore
 from twin.storage.migrate import schema_status
@@ -216,4 +228,35 @@ def secrets_rotate_db_key() -> None:
         f"done{resumed}: new key id {report.new_key_id}; {report.values_reencrypted} value(s) and "
         f"{report.media_reencrypted} media file(s) re-encrypted; retired keys "
         f"{report.retired_key_ids or 'none'} are kept for old backups"
+    )
+
+
+@secrets_app.command("migrate")
+# exempt from the weak-store refusal and from the consent gate: it is the way out (D-825, D-827)
+@command(CommandKind.EXCLUSIVE, consent=False)
+def secrets_migrate() -> None:
+    """Move the encrypted file store into the Windows Credential Manager, check it, delete it."""
+    context = get_cli_context()
+    source = EncryptedFileKeyring(default_secrets_dir(), os.environ.get(ENV_PASSPHRASE))
+    if not source.exists():
+        typer.echo(
+            f"nothing to migrate: there is no encrypted file store in {source.directory}; "
+            f"remove {ENV_BACKEND} if it is still set"
+        )
+        return
+    target, info = system_backend()
+    report = migrate_file_store(
+        source, target, info, db_path=context.paths().db_path, clock=get_clock()
+    )
+    typer.echo(f"moved into {info.name}: {', '.join(report.moved) or 'nothing new'}")
+    if report.already_there:
+        typer.echo(f"already there with the same value: {', '.join(report.already_there)}")
+    if report.database_checked:
+        typer.echo(f"the moved database keys opened {report.values_opened} encrypted value(s)")
+    else:
+        typer.echo("no database data to check the keys against (the entries were compared)")
+    typer.echo(f"deleted: {', '.join(str(path) for path in report.removed) or 'nothing'}")
+    typer.echo(
+        f"now remove {ENV_BACKEND} (and {ENV_ALLOW_FILE}) from the environment: with it the next "
+        "command would open a new, empty file store"
     )

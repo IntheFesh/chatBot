@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from keyring.errors import PasswordDeleteError
+from keyring.errors import PasswordDeleteError, PasswordSetError
 
 
 class MemoryCredentials:
@@ -34,3 +34,27 @@ class BrokenCredentials:
 
     def delete_password(self, service_name: str, username: str, /) -> None:
         raise OSError("credential store unavailable")
+
+
+class CredentialManagerDouble(MemoryCredentials):
+    """Stands for the Windows Credential Manager behind ``keyring.get_keyring()`` (R18-A2).
+
+    ``twin secrets migrate`` moves the entries of the encrypted file store into the system
+    credential store; the tests install this double in place of ``keyring.get_keyring`` so that
+    the real credential manager of a Windows CI machine is never touched.  ``priority`` makes it a
+    system candidate for :func:`twin.config.secrets.select_backend`; ``fail_on_write`` makes the
+    n-th ``set_password`` of a test fail as a locked or full credential store would.
+    """
+
+    priority = 5.0
+
+    def __init__(self, *, fail_on_write: int | None = None) -> None:
+        super().__init__()
+        self.fail_on_write = fail_on_write
+        self.writes = 0
+
+    def set_password(self, service_name: str, username: str, password: str, /) -> None:
+        self.writes += 1
+        if self.fail_on_write is not None and self.writes >= self.fail_on_write:
+            raise PasswordSetError("the credential store refused the write")
+        super().set_password(service_name, username, password)

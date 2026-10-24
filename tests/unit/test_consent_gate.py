@@ -35,6 +35,7 @@ EXEMPT = {
     "purge",
     "service stop",
     "service uninstall",
+    "secrets migrate",
 }
 
 

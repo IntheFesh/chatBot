@@ -50,6 +50,7 @@ def expected_names() -> list[str]:
         "secrets list",
         "secrets check",
         "secrets rotate-db-key",
+        "secrets migrate",
         "db upgrade",
         "db status",
         "jobs list",
@@ -194,7 +195,7 @@ def expected_names() -> list[str]:
 def test_every_cli_command_declares_its_process_model_class() -> None:
     assert undeclared_commands(app) == []
     names = dict(iter_commands(app))
-    assert len(names) == 147 == len(expected_names())
+    assert len(names) == 148 == len(expected_names())
     expected = {
         "run": CommandKind.EXCLUSIVE,
         "doctor": CommandKind.READ,
@@ -206,6 +207,7 @@ def test_every_cli_command_declares_its_process_model_class() -> None:
         "secrets list": CommandKind.READ,
         "secrets check": CommandKind.READ,
         "secrets rotate-db-key": CommandKind.EXCLUSIVE,
+        "secrets migrate": CommandKind.EXCLUSIVE,  # its keys move: the application is stopped
         "db upgrade": CommandKind.EXCLUSIVE,
         "db status": CommandKind.READ,
         "jobs list": CommandKind.READ,
