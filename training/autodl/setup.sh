@@ -71,14 +71,18 @@ ensure_torch() {
     die "PyTorch is still not usable on this GPU: ${verdict}"
 }
 
+# A download is complete when the files add up to this share of the bf16 weights.
+BASE_COMPLETE_SHARE=0.95
+
 # base_model_complete DIR: the download is finished when config.json exists and the files add up
-# to (nearly) the size of the bf16 weights.
+# to (nearly) the size of the bf16 weights.  Compared in bytes: du counts KiB, TWIN_BASE_GB is
+# decimal gigabytes (10^9 bytes, the sizes of the model repository; D-810).
 base_model_complete() {
-    local target="$1" kb minimum_gb
+    local target="$1" kb
     [ -f "${target}/config.json" ] || return 1
     kb="$(du -sk "${target}" | awk '{ print $1 }')"
-    minimum_gb=$(awk -v gb="${TWIN_BASE_GB}" 'BEGIN { printf "%d", gb * 0.95 }')
-    [ "$((kb / 1048576))" -ge "${minimum_gb}" ]
+    awk -v kb="${kb}" -v gb="${TWIN_BASE_GB}" -v share="${BASE_COMPLETE_SHARE}" \
+        'BEGIN { exit !(kb * 1024 >= gb * 1e9 * share) }'
 }
 
 download_base_model() {
@@ -145,6 +149,9 @@ run_trial_step() {
     batch="$(yaml_get "${config}" per_device_train_batch_size)"
     accum="$(yaml_get "${config}" gradient_accumulation_steps)"
     trap 'rm -rf "${TWIN_HOME}/trial_data"' EXIT
+    # the output of a trial that was stopped before it was removed: LLaMA-Factory refuses a
+    # directory with a model and no checkpoint (D-813)
+    rm -rf "${TWIN_HOME}/output/trial"
     "${TWIN_PYTHON}" "${SCRIPT_DIR}/tools/make_trial_dataset.py" \
         --data-dir "${TWIN_HOME}/data" --dataset "$(yaml_get "${config}" dataset)" \
         --out-dir "${trial_data}" --count "${TRIAL_SAMPLES}" ||

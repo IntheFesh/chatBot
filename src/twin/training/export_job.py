@@ -64,6 +64,7 @@ class ExportRequest:
     out_dir: Path | None = None
     tokenizer: Path | None = None
     plan_ratio: float | None = None
+    allow_incomplete: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -72,6 +73,7 @@ class ExportRequest:
             "out_dir": str(self.out_dir) if self.out_dir else None,
             "tokenizer": str(self.tokenizer) if self.tokenizer else None,
             "plan_ratio": self.plan_ratio,
+            "allow_incomplete": self.allow_incomplete,
         }
 
     @classmethod
@@ -86,6 +88,7 @@ class ExportRequest:
             out_dir=Path(str(payload["out_dir"])) if payload.get("out_dir") else None,
             tokenizer=Path(str(payload["tokenizer"])) if payload.get("tokenizer") else None,
             plan_ratio=float(ratio) if ratio is not None else None,
+            allow_incomplete=bool(payload.get("allow_incomplete", False)),
         )
 
 
@@ -189,6 +192,7 @@ def run_export(
             until=request.until,
             out_dir=request.out_dir,
             plan_ratio=request.plan_ratio,
+            allow_incomplete=request.allow_incomplete,
         ),
     )
     result = exporter.run()

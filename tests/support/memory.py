@@ -406,3 +406,31 @@ class ScriptedMemoryModel:
         match = re.search(r"日期：(\d{4}-\d{2}-\d{2})", prompt)
         day = match.group(1) if match else ""
         return {"summary": self.summaries.get(day, self.default_summary)}
+
+
+def mark_days_replayed(services: Services, days: set[date] | None = None) -> set[date]:
+    """Record ``days`` (default: every local day with messages) as replayed into the memory.
+
+    What ``twin memory replay start`` leaves in ``memory_replay_days`` once it is through; the
+    facts themselves are the test's business (R18-F7: the export checks the coverage).
+    """
+    from twin.memory.replay import count_message_days
+    from twin.memory.store import MemoryStore
+
+    chosen = (
+        days
+        if days is not None
+        else count_message_days(services, MemoryClock.from_services(services))
+    )
+    store = MemoryStore(services)
+    for day in sorted(chosen):
+        store.mark_replayed(
+            day,
+            input_hash="0" * 40,
+            lines=0,
+            facts_added=0,
+            followups_added=0,
+            summary_version=None,
+            batch_id=None,
+        )
+    return chosen

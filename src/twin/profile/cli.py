@@ -21,7 +21,7 @@ from twin.ops.foreground import run_jobs_until_idle
 from twin.ops.jobs import HandlerRegistry
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
 from twin.profile.diffing import diff_metrics, summarize
-from twin.profile.holdout import get_holdout
+from twin.profile.holdout import drift_warning, holdout_share
 from twin.profile.jobs import handle_profile_rebuild
 from twin.profile.overrides import OverrideError, RoutineOverrides, parse_weekdays
 from twin.profile.queue import PROFILE_JOB, SCOPE_CHOICES, queue_profile_rebuild
@@ -152,14 +152,19 @@ def profile_show(
     overrides = RoutineOverrides(services.db, services.clock).entries()
     if model is not None:
         model = model.with_overrides([o for o in overrides if o.enabled])
-    holdout = get_holdout(services)
+    share = holdout_share(services)  # counted now, not the numbers of the first split (D-818)
     lines = profile_overview(chosen, store.metrics(chosen.id), model, overrides)
-    if holdout is not None:
-        lines.insert(
-            5 if chosen.data_range.get("cutoff") else 4,
-            f"hold-out 切分点：{holdout.cutoff:%Y-%m-%d %H:%M} UTC"
-            f"（她的回复块 {holdout.blocks:,} 个，其中留出 {holdout.held_out_blocks:,} 个）",
-        )
+    if share is not None:
+        position = 5 if chosen.data_range.get("cutoff") else 4
+        found = [
+            f"hold-out 切分点：{share.cutoff:%Y-%m-%d %H:%M} UTC"
+            f"（她的回复块现有 {share.blocks:,} 个，切分点之后 {share.held_out_blocks:,} 个"
+            f"（{share.share:.0%}）；配置的留出比例 {share.ratio:.0%}）"
+        ]
+        warning = drift_warning(share)
+        if warning is not None:
+            found.append(f"!!! {warning}")
+        lines[position:position] = found
     console = _console()
     for line in lines:
         if line.startswith("!!!"):

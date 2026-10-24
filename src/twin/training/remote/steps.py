@@ -348,7 +348,10 @@ class RemoteSteps:
         return self._finish(run_id, "verify", verify)
 
     async def train(self, run_id: str, *, again: bool = False) -> StepReport:
-        outcome = await self._run_job(run_id, "train", "train.sh", again=again)
+        # --again: train anew - LLaMA-Factory would otherwise resume the last checkpoint (D-813)
+        outcome = await self._run_job(
+            run_id, "train", "train.sh", *(["--again"] if again else []), again=again
+        )
         fields: dict[str, Any] = {}
         if outcome.ok:
             metrics = await self._read_json(f"{self._layout.artifacts}/train/metrics.json") or {}
@@ -361,7 +364,10 @@ class RemoteSteps:
         return self._finish(run_id, "train", outcome, fields)
 
     async def dpo(self, run_id: str, *, again: bool = False) -> StepReport:
-        outcome = await self._run_job(run_id, "dpo", "dpo.sh", again=again)
+        # --again: train anew; a plain rerun keeps a finished preference run (D-813)
+        outcome = await self._run_job(
+            run_id, "dpo", "dpo.sh", *(["--again"] if again else []), again=again
+        )
         if outcome.ok:
             reference = await self._read_json(f"{self._layout.artifacts}/{DPO_REFERENCE_FILE}")
             if reference:  # no record: the step was skipped (too few pairs)

@@ -129,6 +129,24 @@ def test_the_command_queues_a_job_and_the_foreground_runs_it(
     assert stats["her_messages_covered"] > 0 and stats["samples"]["total"] == train + val + test
 
 
+def test_r18_f7_allow_incomplete_reaches_the_job(data_dir: Path) -> None:
+    """R18-F7 (D-817): ``--allow-incomplete`` travels in the payload of the queued job; a payload
+    written before the option existed means "stop on a gap"."""
+    queued = invoke("train", "export", "--allow-incomplete")
+    assert queued.exit_code == 0, queued.output
+
+    def payloads(services: Services) -> list[dict[str, Any]]:
+        queue = JobQueue(services.db, services.clock)
+        return [job.payload for job in queue.list_jobs(status="pending", job_type=EXPORT_JOB)]
+
+    (payload,) = with_services(payloads)
+    assert payload["allow_incomplete"] is True
+    request = export_job.ExportRequest.from_payload(payload)
+    assert request.allow_incomplete is True
+    older = {key: value for key, value in payload.items() if key != "allow_incomplete"}
+    assert export_job.ExportRequest.from_payload(older).allow_incomplete is False
+
+
 def test_the_status_command_tells_how_the_last_export_ended(
     world_in_cli_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

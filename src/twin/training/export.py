@@ -37,6 +37,13 @@ always hands the style model a plan (D-643).  When some of them have none yet, t
 after a first pass, hands the missing inputs back, and writes nothing; once the plans exist the
 same command completes.
 
+*What has to exist first* (R18-F7, D-817).  The pre-holdout persona card, profile and routine;
+the description part of that card (``[自动-描述]``: a card of statistics rules only is not what the
+style model is meant to learn from); and the memory replay of every local day with messages in the
+export range, since every prompt carries ``memory_view(t)``.  A gap stops the export with the
+command that closes it; ``ExportOptions.allow_incomplete`` (``--allow-incomplete``) exports anyway,
+and the statistics of the dataset record what was missing (``derived_data``).
+
 *Her state on waking.*  The prompt says she has just woken (``WOKE_UP_LINE``) when the user wrote
 while the routine had her deep asleep and she answers awake, and for a proactive sample in the
 greeting window after her sleep, as the engine and the greeting trigger do (D-644).  A plan
@@ -49,7 +56,7 @@ import json
 import shutil
 from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -66,7 +73,9 @@ from twin.engine.style_prompt import (
 from twin.ingest.corpus import her_message_count
 from twin.llm.redaction import ConsistentRedactor, redact, redact_text
 from twin.memory.asof import AsOfSource, AsOfView
+from twin.memory.replay import days_not_replayed
 from twin.profile.holdout import HoldoutError, holdout_cutoff
+from twin.profile.persona.refresh import has_description
 from twin.profile.persona.render import RenderedPersona
 from twin.stickers.catalog import StickerCatalog
 from twin.training import lf_template
@@ -117,6 +126,9 @@ MIN_PROMPT_TOKENS = 64
 BATCH_BLOCKS = 256
 SCOPE = "pre_holdout"
 WORK_DIR_PREFIX = ".export-"
+PERSONA_COMMAND = "`twin persona regenerate --scope pre_holdout`"
+REPLAY_COMMAND = "`twin memory replay start`"
+ALLOW_INCOMPLETE_OPTION = "--allow-incomplete"
 
 DROP_NO_REPRODUCIBLE = "no_reproducible_line"
 DROP_EMPTY_TARGET = "empty_target"
@@ -142,6 +154,47 @@ class ExportOptions:
     out_dir: Path | None = None
     plan_ratio: float | None = None
     batch_blocks: int = BATCH_BLOCKS
+    allow_incomplete: bool = False  # export although derived data is missing (D-817)
+
+
+@dataclass(frozen=True)
+class DerivedGaps:
+    """What the derived data of the export lacks (R18-F7, D-817); dates only, never text."""
+
+    days_not_replayed: tuple[date, ...]
+    persona_description: bool
+
+    @property
+    def complete(self) -> bool:
+        return not self.days_not_replayed and self.persona_description
+
+    def problems(self) -> list[str]:
+        found = []
+        days = self.days_not_replayed
+        if days:
+            found.append(
+                f"{len(days)} days with messages in the export range ({days[0]} to {days[-1]}) "
+                f"are not replayed into the memory yet; run {REPLAY_COMMAND} and approve it"
+            )
+        if not self.persona_description:
+            found.append(
+                "the pre-holdout persona card has no [自动-描述] yet (statistics rules only); "
+                f"run {PERSONA_COMMAND}"
+            )
+        return found
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "complete": self.complete,
+            "memory_days_not_replayed": len(self.days_not_replayed),
+            "persona_description": self.persona_description,
+        }
+
+
+def derived_gaps(services: Services, since: datetime | None, until: datetime | None) -> DerivedGaps:
+    """The local days with messages in ``[since, until)`` that the replay has not done, and
+    whether the pre-holdout card has its description (dates and a yes or no; no text)."""
+    return DerivedGaps(days_not_replayed(services, since, until), has_description(services, SCOPE))
 
 
 @dataclass
@@ -235,18 +288,25 @@ class TrainingSetExporter:
 
     def _check_derived_data(self) -> None:
         if self._source.compact is None:
-            raise ExportError(
-                "there is no pre-holdout persona card; run `twin persona generate` first"
-            )
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND} first")
         if self._source.profile is None or self._source.activity is None:
             raise ExportError(
                 "there is no pre-holdout profile or routine; run `twin profile rebuild` first"
+            )
+        options = self._options
+        self._gaps = derived_gaps(self._services, options.since, options.until)
+        if not self._gaps.complete and not options.allow_incomplete:
+            raise ExportError(
+                "the derived data of the export is incomplete: "
+                + "; ".join(self._gaps.problems())
+                + f". To export anyway, add {ALLOW_INCOMPLETE_OPTION} "
+                "(the statistics of the dataset record what was missing)"
             )
 
     def _persona_card(self) -> RenderedPersona:
         card = self._source.compact
         if card is None:
-            raise ExportError("there is no pre-holdout persona card; run `twin persona generate`")
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND}")
         return card
 
     @property
@@ -489,6 +549,7 @@ class TrainingSetExporter:
             "context_turns": 8,
             "persona_scope": SCOPE,
             "persona_card": card.version_id,
+            "derived_data": self._gaps.to_json(),
             "redacted_entities": redactor.counts(),
             "parity_cases": len(parity.cases()),
         }

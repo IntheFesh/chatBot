@@ -29,10 +29,11 @@ mask_history: true
 preprocessing_num_workers: 8
 seed: 42
 
-### generation: fixed sampling and seed, one reply per context
+### generation: fixed sampling and seed, one reply per context; top-k off like the live clients
 do_sample: true
 temperature: {{ temperature }}
 top_p: {{ top_p }}
+top_k: {{ top_k }}
 max_new_tokens: {{ max_new_tokens }}
 
 ### output
