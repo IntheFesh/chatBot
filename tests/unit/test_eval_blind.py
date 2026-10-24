@@ -345,3 +345,28 @@ async def test_an_open_breaker_defers_the_job_and_a_resume_generates_the_remaini
     summary = await worker.run_until_idle()
     assert summary.failed == 0 and summary.done >= 1
     assert {i.status for i in store.items(planned.run.id)} == {"generated"}
+
+
+async def test_r18_e2_a_pair_records_what_the_channel_could_do_and_the_quotes_it_dropped(
+    world: World, api: respx.MockRouter, script: DeepSeekScript
+) -> None:
+    """R18-E2 (D-851): the style report reads the channel's abilities from the generation.
+
+    Every generated pair keeps the abilities of the sandbox channel it went through (the quote
+    rate is judged only where the channel could quote) and how many ``[引用:…]`` lines the model
+    wrote before the post-processing removed them - a count, never the quoted words.
+    """
+    answers = iter(range(1000))
+    script.reply = lambda body: (
+        "[引用:在干嘛]\n好呀\n哈哈[拥抱]" if next(answers) % 2 == 0 else "好呀\n哈哈[拥抱]"
+    )
+    planned = await plan(world, 4, 2)
+    store = EvalStore(world.services.db, world.services.clock)
+    ids = [item.id for item in store.items(planned.run.id)]
+    summary = await generate_items(world.services, planned.run.id, ids, planned.batch_ids[0])
+    assert summary.generated == 4
+    items = store.items(planned.run.id)
+    assert all(item.payload["channel"]["supports_quote"] is False for item in items)
+    assert all(item.payload["bot"]["quote"] is None for item in items)  # nothing quoted
+    assert sorted(item.payload["draft"]["quote_lines"] for item in items) == [0, 0, 1, 1]
+    assert "在干嘛" not in str([item.payload["draft"] for item in items])

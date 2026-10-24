@@ -135,6 +135,14 @@ def print_style_report(console: Console, report: StyleReport) -> None:
     console.print(table)
     for note in report.notes:
         console.print(Text(f"注：{note}", style="dim"))
+    if report.quoted is not None:  # the reference number of round 18 (D-851): never judged
+        with_quote, replies = report.quoted
+        console.print(
+            Text(
+                f"参考（不计入判定）：后处理去掉引用行之前，模型在 {replies} 条回复里有 "
+                f"{with_quote} 条写了 [引用:…]（{percent(report.quoted_share)}）"
+            )
+        )
     console.print(Text(f"机器人的消息条数：{report.messages}"))
     verdict = "每项都在 ±30% 内：通过" if report.passed else "有指标超出 ±30%：不通过"
     console.print(Text(verdict, style="green" if report.passed else "red"))

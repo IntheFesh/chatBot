@@ -12,13 +12,21 @@ one function :func:`read_metrics`.  Nothing here counts a comma.
 Two sources (R-EVAL-002):
 
 * ``live`` - the bubbles the bot really sent in the last ``days`` days (read through
-  :mod:`twin.engine.conversation_log`, commands left out), against the **live** profile.  The
-  conversation keeps no quote (the channel cannot send one; the post-processing writes it out as
-  words), so the quote rate is shown as "not measurable" instead of a deviation of -100 %.
+  :mod:`twin.engine.conversation_log`, commands left out), against the **live** profile;
 * ``eval_items`` - the replies the sandbox generated for the contexts of a blind run
   (hold-out, ``pre_holdout`` profile), for one backend (the M5 gate).  The same metrics of her
   real replies in those very contexts are shown next to them, as a feeling for the noise of a
   small sample.
+
+**A metric the channel cannot produce is not measurable** (round 18, user decision, D-851): a
+metric names the ability of the channel it depends on (the quote rate: ``supports_quote``), and in
+both sources, for every backend alike, it is shown as "not measurable" and left out of the verdict
+when the channel the replies went through lacks that ability - the running channel for ``live``
+(:func:`twin.channel.configured.configured_capabilities`), the sandbox's channel for
+``eval_items`` (each generated pair records the abilities of the channel it went through; a pair
+that does not say, generated before round 18, leaves the metric without data).  For the replies of
+the sandbox the report also gives, **outside the verdict**, the share of replies in which the model
+wrote a ``[引用:…]`` line before the post-processing removed it (a count each pair keeps).
 
 A metric passes when its relative deviation ``(bot - her) / her`` is within +-30 %.  When her value
 is 0 the bot has to be 0 as well.  A metric with no data on either side does not pass.
@@ -26,11 +34,12 @@ is 0 the bot has to be 0 as well.  A metric with no data on either side does not
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
+from twin.channel.configured import abilities_of, configured_capabilities
 from twin.engine.conversation_log import conversation_since
 from twin.eval.render import Candidate
 from twin.eval.stats import wilson_interval
@@ -51,6 +60,7 @@ BUBBLE_SPACING_S = 2.0  # between the bubbles of one reply: well inside a burst
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
 
 Status = Literal["pass", "fail", "n/a", "no_data"]
+Abilities = Mapping[str, bool | None]  # an ability of a channel -> it has it (None: not known)
 
 
 @dataclass(frozen=True)
@@ -63,13 +73,23 @@ class MetricReading:
 
 @dataclass(frozen=True)
 class MetricSpec:
-    """One of the six core metrics: where it is read, and whether a source can measure it."""
+    """One of the six core metrics: where it is read, and what it needs of the channel."""
 
     key: str
     label: str
     read: Callable[[ProfileMetrics], MetricReading]
     proportion: bool = True
-    measurable_live: bool = True
+    needs: str | None = None  # the ability of the channel (``supports_*``) it depends on (D-851)
+
+    def measurable(self, channel: Abilities | None) -> bool | None:
+        """Whether replies through ``channel`` can show it (``None``: the record does not say).
+
+        ``channel`` ``None`` is replies that went through no channel at all (the raw output of a
+        model, as the comparison of two adapter stacks reads it): every metric can be measured.
+        """
+        if self.needs is None or channel is None:
+            return True
+        return channel.get(self.needs)
 
 
 def _median_of(name: str) -> Callable[[ProfileMetrics], MetricReading]:
@@ -104,7 +124,7 @@ STYLE_METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("burst_size", "连发中位数", _median_of("burst_size"), proportion=False),
     MetricSpec("sticker_share", "表情包占比", _scalar_of("sticker_share")),
     MetricSpec("emoji_code_rate", "表情代码率", _scalar_of("emoji_code_rate")),
-    MetricSpec("quote_rate", "引用率", _scalar_of("quote_rate"), measurable_live=False),
+    MetricSpec("quote_rate", "引用率", _scalar_of("quote_rate"), needs="supports_quote"),
 )
 
 
@@ -226,12 +246,18 @@ def judge_metric(
     reference: MetricReading,
     measured: MetricReading,
     *,
-    measurable: bool = True,
+    measurable: bool | None = True,
     real: MetricReading | None = None,
 ) -> MetricResult:
-    """The verdict on one metric (see the module description)."""
-    if not measurable:
+    """The verdict on one metric (see the module description).
+
+    ``measurable`` ``False``: the channel cannot produce it - "not measurable", left out of the
+    verdict; ``None``: nobody knows whether it could - no data, which is not a pass.
+    """
+    if measurable is False:
         return MetricResult(spec.key, spec.label, reference, measured, None, "n/a", None, real)
+    if measurable is None:
+        return MetricResult(spec.key, spec.label, reference, measured, None, "no_data", None, real)
     interval = None
     if spec.proportion and measured.value is not None and measured.n > 0:
         hits = min(measured.n, max(0, round(measured.value * measured.n)))
@@ -260,6 +286,14 @@ class StyleReport:
     days: int | None = None
     messages: int = 0  # the bot's messages (bubbles) measured
     notes: list[str] = field(default_factory=list)
+    quoted: tuple[int, int] | None = None  # (replies the model began with a quote, replies)
+
+    @property
+    def quoted_share(self) -> float | None:
+        """Outside the verdict (D-851): the share of replies the model wrote ``[引用:…]`` in."""
+        if self.quoted is None or self.quoted[1] == 0:
+            return None
+        return self.quoted[0] / self.quoted[1]
 
     @property
     def passed(self) -> bool:
@@ -280,6 +314,9 @@ class StyleReport:
             "tolerance": TOLERANCE,
             "metrics": [result.to_json() for result in self.results],
             "notes": list(self.notes),
+            "quoted": None
+            if self.quoted is None
+            else {"replies": self.quoted[1], "with_quote": self.quoted[0], "counted": False},
         }
 
     @property
@@ -297,10 +334,14 @@ def compare(
     reference: ProfileMetrics,
     measured: ProfileMetrics,
     *,
-    live: bool,
+    channel: Abilities | None = None,
     real: ProfileMetrics | None = None,
 ) -> list[MetricResult]:
-    """Judge all six metrics of ``measured`` against ``reference``."""
+    """Judge all six metrics of ``measured`` against ``reference``.
+
+    ``channel`` is what the channel the replies went through could do (``None``: no channel);
+    a metric it cannot produce is not measurable (D-851), whatever the source or the backend.
+    """
     ours, hers = read_metrics(measured), read_metrics(reference)
     reals = read_metrics(real) if real is not None else {}
     return [
@@ -308,11 +349,29 @@ def compare(
             spec,
             hers[spec.key],
             ours[spec.key],
-            measurable=spec.measurable_live or not live,
+            measurable=spec.measurable(channel),
             real=reals.get(spec.key),
         )
         for spec in STYLE_METRICS
     ]
+
+
+def channel_notes(channel: Abilities | None, where: str) -> list[str]:
+    """What the report says about the metrics the channel leaves out or does not tell about."""
+    notes: list[str] = []
+    for spec in STYLE_METRICS:
+        able = spec.measurable(channel)
+        if able is False:
+            notes.append(
+                f"{where} cannot do {spec.needs}: the {spec.key} is not measurable here and "
+                "is left out of the verdict"
+            )
+        elif able is None:
+            notes.append(
+                f"the records do not say whether {where} could do {spec.needs} (generated before "
+                f"round 18): the {spec.key} has no data; generate the replies again"
+            )
+    return notes
 
 
 # -------------------------------------------------------------------- sources
@@ -334,13 +393,14 @@ def style_of_live(services: Services, days: int) -> StyleReport:
     recs = list(live_recs(services, since))
     measured = measure(recs, settings.burst_gap_s, settings.segment_gap_min)
     bubbles = sum(1 for rec in recs if rec.her)
-    notes = ["the conversation table keeps no quote: the quote rate is not measured here"]
+    channel = abilities_of(configured_capabilities(services))
+    notes = channel_notes(channel, f"the {services.settings.channel.kind} channel")
     if bubbles == 0:
         notes.append(f"the bot sent nothing in the last {days} day(s)")
     return StyleReport(
         "live",
         "live",
-        compare(profile.metrics, measured, live=True),
+        compare(profile.metrics, measured, channel=channel),
         days=days,
         messages=bubbles,
         notes=notes,
@@ -360,6 +420,43 @@ def candidates_of(items: Sequence[ItemView], side: Literal["bot", "real"]) -> li
         elif "bot" in item.payload:
             found.append(Candidate.from_json(item.payload["bot"]))
     return found
+
+
+def recorded_abilities(items: Sequence[ItemView]) -> dict[str, bool | None]:
+    """What the channel of the generation could do, from the pairs that have a reply (D-851).
+
+    An ability is there only when every pair says so; one pair without it is enough to leave the
+    metric out; a pair that does not say (generated before round 18) makes it unknown.
+    """
+    generated = [item for item in items if "bot" in item.payload]
+    names = {spec.needs for spec in STYLE_METRICS if spec.needs is not None}
+    names |= {str(name) for item in generated for name in item.payload.get("channel") or {}}
+    found: dict[str, bool | None] = {}
+    for name in sorted(names):
+        said = [(item.payload.get("channel") or {}).get(name) for item in generated]
+        if any(value is False for value in said):
+            found[name] = False
+        elif said and all(value is True for value in said):
+            found[name] = True
+        else:
+            found[name] = None
+    return found
+
+
+def quoted_replies(items: Sequence[ItemView]) -> tuple[int, int] | None:
+    """``(replies with a [引用:…] line before the post-processing, replies)`` - outside the verdict.
+
+    Only the pairs that keep the count (generated from round 18 on) are counted; ``None`` when
+    none does.
+    """
+    counts = [
+        int(item.payload["draft"]["quote_lines"])
+        for item in items
+        if "bot" in item.payload and "quote_lines" in (item.payload.get("draft") or {})
+    ]
+    if not counts:
+        return None
+    return sum(1 for count in counts if count > 0), len(counts)
 
 
 def style_of_items(services: Services, store: EvalStore, run: RunView, backend: str) -> StyleReport:
@@ -387,9 +484,11 @@ def style_of_runs(
         names = ", ".join(run.id for run in runs)
         raise StyleError(f"run {names} has no generated replies of the {backend} backend")
     bots = candidates_of(items, "bot")
+    channel = recorded_abilities(items)
     notes = [f"{len(bots)} replies of the {backend} backend; her real replies to the same contexts"]
     if len(runs) > 1:
         notes.append(f"the contexts of {len(runs)} evaluation runs together")
+    notes += channel_notes(channel, "the channel of the evaluation sandbox")
     return style_of_candidates(
         services,
         profile.metrics,
@@ -398,6 +497,8 @@ def style_of_runs(
         backend=backend,
         run_id=runs[0].id,
         notes=notes,
+        channel=channel,
+        quoted=quoted_replies(items),
     )
 
 
@@ -410,13 +511,16 @@ def style_of_candidates(
     backend: str | None = None,
     run_id: str | None = None,
     notes: Sequence[str] = (),
+    channel: Abilities | None = None,
+    quoted: tuple[int, int] | None = None,
 ) -> StyleReport:
     """The six metrics of ``bots`` (replies to hold-out contexts) against the pre-holdout profile.
 
     The one place that turns replies into a ``pre_holdout`` report: the blind runs
     (:func:`style_of_runs`) and the comparison of two adapter stacks on the same test contexts
     (``twin.training.stack_choice``, D-655) both come through here, so a stack is judged by the
-    very measuring and the very +-30 % of the M5 gate.
+    very measuring and the very +-30 % of the M5 gate.  ``channel`` is what the channel the
+    replies went through could do (``None``: they went through none, as the stacks' raw output).
     """
     settings = services.settings.profile
     measured = measure(candidate_recs(bots), settings.burst_gap_s, settings.segment_gap_min)
@@ -428,9 +532,10 @@ def style_of_candidates(
     return StyleReport(
         "eval_items",
         "pre_holdout",
-        compare(reference, measured, live=False, real=measured_real),
+        compare(reference, measured, channel=channel, real=measured_real),
         backend=backend,
         run_id=run_id,
         messages=sum(len(c.lines) for c in bots),
         notes=list(notes),
+        quoted=quoted,
     )

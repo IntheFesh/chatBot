@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol
 
+from twin.channel.configured import abilities_of
 from twin.config.runtime import THINKING_CHAT
 from twin.engine.style_models import StyleModels
 from twin.engine.style_runtime import StyleRuntime
@@ -74,6 +75,7 @@ FAIL_FELL_BACK = "fell_back"
 FAIL_NO_REPLY = "no_reply"
 FAIL_EMPTY = "empty"
 FAIL_NOT_DEPLOYED = "not_deployed"
+QUOTE_STEPS = frozenset({"quote_removed", "stray_quote_removed"})  # post-processing steps (D-851)
 
 
 class EvalError(RuntimeError):
@@ -449,14 +451,23 @@ def draft_facts(
     attempts: int,
     actions: Sequence[dict[str, Any]],
     kinds: Sequence[str],
+    *,
+    quote_kept: bool = False,
 ) -> dict[str, Any]:
-    """What is kept of how a reply came about: codes and numbers, never text."""
+    """What is kept of how a reply came about: codes and numbers, never text.
+
+    ``quote_lines`` counts the ``[引用:…]`` lines the model wrote - the ones the post-processing
+    removed (the channel cannot quote, or a quote not on the first line) plus the one it kept -
+    for the reference number of the style report (D-851).
+    """
+    removed = sum(int(a.get("count", 1)) for a in actions if a.get("step") in QUOTE_STEPS)
     return {
         "backend": backend,
         "fell_back": fell_back,
         "attempts": attempts,
         "actions": [a.get("step") for a in actions],
         "violations": list(kinds),
+        "quote_lines": removed + (1 if quote_kept else 0),
     }
 
 
@@ -473,7 +484,9 @@ async def generate_item(
         draft.attempts,
         draft.actions_json(),
         [v.kind for v in draft.violations],
+        quote_kept=bool(draft.quote),
     )
+    channel = abilities_of(reply.channel)  # what the style report reads (D-851)
     reason: str | None = None
     if draft.needs_fallback:
         reason = f"fallback:{draft.fallback_reason}"
@@ -486,14 +499,14 @@ async def generate_item(
     if reason is not None:
         store.save_generated(
             item.id,
-            {"failure": reason, "draft": facts},
+            {"failure": reason, "draft": facts, "channel": channel},
             cost_usd=draft.cost_usd,
             status="failed",
         )
         return "failed"
     store.save_generated(
         item.id,
-        {"bot": reply.candidate.to_json(), "draft": facts},
+        {"bot": reply.candidate.to_json(), "draft": facts, "channel": channel},
         cost_usd=draft.cost_usd,
     )
     return "generated"

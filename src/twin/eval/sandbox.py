@@ -44,7 +44,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from twin.channel.base import MediaNotAllowed, QuoteTarget
+from twin.channel.base import ChannelCapabilities, MediaNotAllowed, QuoteTarget
 from twin.channel.policy import StickerAllowList
 from twin.channel.probe.summary import load_channel_probe_summary, measured_capabilities
 from twin.clock import Clock, ensure_aware
@@ -169,12 +169,13 @@ class SandboxRequest:
 
 @dataclass(frozen=True)
 class SandboxReply:
-    """What the sandbox produced for one request."""
+    """What the sandbox produced for one request, and what its channel could do (D-851)."""
 
     draft: ReplyDraft
     candidate: Candidate
     delivered: tuple[SentMessage, ...]
     requested_backend: str
+    channel: ChannelCapabilities
     skipped_stickers: int = 0
 
     @property
@@ -284,7 +285,9 @@ class EvalSandbox:
             else:
                 draft = await self._pipeline.run(context, data, propagate=DEFERRALS)
             delivered, candidate, skipped = await self._deliver(draft, request.inbound)
-        return SandboxReply(draft, candidate, delivered, request.backend, skipped)
+        return SandboxReply(
+            draft, candidate, delivered, request.backend, self._channel.capabilities(), skipped
+        )
 
     # ----------------------------------------------------------------- delivery
 

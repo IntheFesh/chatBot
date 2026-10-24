@@ -448,12 +448,17 @@ class LocalConsoleChannel(Channel):
     # -------------------------------------------------------- introspection
 
     def capabilities(self) -> ChannelCapabilities:
+        return self.capabilities_for(self._window_h, self._quota)
+
+    @staticmethod
+    def capabilities_for(window_h: float, quota: int) -> ChannelCapabilities:
+        """What the channel reports with these simulated limits (no channel needed, D-851)."""
         return ChannelCapabilities(
             supports_quote=False,
             supports_typing=True,
             gif_animated=None,
-            proactive_window_h=self._window_h,
-            outbound_quota=self._quota,
+            proactive_window_h=window_h,
+            outbound_quota=quota,
             max_text_chars=TEXT_CHUNK_LIMIT,
         )
 

@@ -335,7 +335,7 @@ def test_the_memory_test_is_planned_asked_reviewed_and_decides_m2(
 
 def test_the_gate_commands_exit_with_0_1_and_2(cli_world: World) -> None:
     code, out, screen = run("gate", "M3")  # wired by round 10: no observed days yet
-    assert code == 1 and "还差 7 天" in screen and "未通过（样本不足）" in screen
+    assert code == 1 and "还差 7 个" in screen and "未通过（样本不足）" in screen
     # M4 is judged since round 12, M5 since round 14: nothing was evaluated yet, so both are 1
     assert run("gate", "M4")[0] == 1
     code, _, screen = run("gate", "M5")
