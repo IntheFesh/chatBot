@@ -779,3 +779,22 @@ def test_r18_d8_a_resend_is_never_put_off_beyond_the_day_after_which_notices_exp
     assert due is not None and due < clock.now_utc() + timedelta(hours=24)
     clock.set_time(due)
     assert [view.title for view in long.claim_due()] == ["still low"]  # not expired
+
+
+def test_r18_d8_a_held_back_alert_nobody_could_send_for_a_day_is_dropped(
+    services: Services, clock: ManualClock
+) -> None:
+    """The application was not running when the hour ended, nor for a day after: stale news."""
+    alerts = services.alerts
+    alerts.raise_alert("disk_low", "low", severity="critical")
+    (first,) = alerts.claim_due()
+    alerts.finish_toast(first.id, ok=True)
+    alerts.finish_mail(first.id, ok=True)
+    clock.tick(10 * 60)
+    alerts.raise_alert("disk_low", "still low", severity="critical")  # held back
+    assert alerts.resend_due("disk_low") is not None
+    clock.tick(25 * 3600)
+    assert alerts.claim_due() == []
+    assert alerts.resend_due("disk_low") is None
+    held = views(alerts)[-1]
+    assert held.suppressed and (held.toast_state, held.mail_state) == ("none", "none")

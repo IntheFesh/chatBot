@@ -459,19 +459,16 @@ class AlertService:
         """Send, once per category, an alert that was held back and still holds (D-893).
 
         Run where the notices are claimed, so the moment is the end of the hour as the delivery
-        sees it.  A category recovered meanwhile has its rows closed and is not selected; one
-        whose last notice went out later than reckoned (a mail sent on a retry) waits for the
-        end of that notice's hour; one told by a newer alert already needs nothing more.
+        sees it.  A category recovered meanwhile has its rows closed, and one told by a newer
+        alert has its moments cleared (:meth:`raise_alert`): neither is selected.  One whose last
+        notice went out later than reckoned (a mail sent on a retry) waits for the end of that
+        notice's hour; one nobody could send for a day is dropped, like any stale notice.
         """
         groups: dict[str, list[Alert]] = {}
         for row in self._held_back_rows(session):
             groups.setdefault(row.category, []).append(row)
         for category, rows in groups.items():
             if not any(row.mail_next_at is not None and row.mail_next_at <= now for row in rows):
-                continue
-            gone = self._gone_notices(session, category)
-            if any(n.kind == "alert" and n.created_at > rows[-1].created_at for n in gone):
-                self._forget_held_back(session, category, now)  # a newer alert told it
                 continue
             fresh = [row for row in rows if now - row.created_at <= STALE_AFTER - CLAIM_LEASE]
             if not fresh:
