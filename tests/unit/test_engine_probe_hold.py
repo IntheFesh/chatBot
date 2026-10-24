@@ -109,8 +109,11 @@ async def test_a_message_is_stored_not_answered_and_answered_soon_after_the_prob
     harness, _ = rig
     await harness.message("在吗")
     await held(harness)
-    for _ in range(3):  # an hour and more goes by: the round keeps waiting, one look a minute
-        await harness.clock.advance(1200)
+    # an hour goes by: the round keeps waiting, one look a minute.  The clock moves one look at
+    # a time, each after the engine is waiting again (``waiting_for``): a jump over many looks
+    # left a look that was still in a thread on a loaded machine with a wake-up in the past
+    for _ in range(int(3600 // PROBE_RECHECK_S)):
+        await harness.clock.advance(PROBE_RECHECK_S)
         await waiting_for(
             harness.engine, harness.clock.now_utc() + timedelta(seconds=PROBE_RECHECK_S)
         )

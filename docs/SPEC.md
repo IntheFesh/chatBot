@@ -231,7 +231,7 @@ safety:
 - **R-IMP-011** 导入完成后自动排队：画像重算（R-PROF）、作息模型（R-ACT）、人设卡（立即生成新版本以刷新 `[自动-统计规则]`；她的新消息自上次 `[自动-描述]` 生成以来增加 ≥ 10% 时，排队非高峰的 `[自动-描述]` 重生成；live 与 pre_holdout 两个范围同理，R-TRN-013）、新表情包打标签（R-STK）、检索库增量更新（R-RET）、新日期范围的记忆回放（R-MEM-010）、重训提醒检查（R-TRN-012）、新图片描述（R-IMP-012）。每个导入后钩子都有可单独执行的回填命令（如 `twin profile rebuild`、`twin persona regenerate`、`twin stickers tag-all`、`twin retrieval rebuild`、`twin memory replay`、`twin images caption-backfill`）；注册钩子的轮次在验收中对已导入的数据执行一次回填。
 - **R-IMP-012** 图片描述：默认只为最近 90 天的图片与被检索命中的图片生成一句描述（DeepSeek 视觉，非高峰），其余在首次被用到时按需生成并缓存；描述文本先经 R-LLM-009 脱敏再存储与使用（照片里可能有电话、地址）；在线回复路径从不等待描述生成：检索例子里的图片尚无描述时以 `[图片]` 呈现并排队描述任务（R-RET-005）；用户发来的图片按 R-ENG-013 同步描述（带超时）。
 - **R-IMP-013** 性能：100 万条消息的结构化导入（不含下载与 LLM 任务）在普通 PC 上 < 30 分钟；有基准测试脚本（合成数据生成器 + 计时）。
-- **R-IMP-014** 结构探查 `twin import inspect <目录>`：只输出结构（文件树、每个 JSON 的键名、类型与出现次数、`renderType`/`type` 取值计数、`_integrity/` 的文件清单与键名），不输出任何值；用于核对合成数据生成器与 `_integrity` 解析是否与真实导出一致；结果写 `data/reports/inspect-<UTC>.md`。
+- **R-IMP-014** 结构探查 `twin import inspect <目录>`：只输出结构（文件树、每个 JSON 的键名、类型与出现次数、`renderType`/`type` 取值计数、`_integrity/` 的文件清单与键名），不输出任何值（另显示由 createTime 与 createTimeText 推断出的导出文字所用时区，推断不出时列出时差分布——只有时区名、时差与条数，不含导出字段的值；第 18 轮用户决定，D-903）；用于核对合成数据生成器与 `_integrity` 解析是否与真实导出一致；结果写 `data/reports/inspect-<UTC>.md`。
 
 ## 8. 统计画像（R-PROF）
 
