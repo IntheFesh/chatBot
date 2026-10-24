@@ -585,7 +585,7 @@ async def test_a_damaged_database_or_index_is_a_critical_alert_until_clean(
     assert not report.ok and "twin memory reindex" in "\n".join(report.problems())
     (alert,) = alerts_of(services)
     assert (alert.category, alert.severity) == ("integrity_failed", "critical")
-    assert alert.detail == {"database_ok": False, "orphans": 2}
+    assert alert.detail == {"database_ok": False, "orphans": 2, "missing": 0}
     monitor.run_integrity_now()
     assert [a.kind for a in alerts_of(services)] == ["alert", "recovery"]
 

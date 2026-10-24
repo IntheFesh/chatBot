@@ -30,6 +30,26 @@ def test_search_ranks_by_the_share_of_the_query_weight() -> None:
     assert index.search("完全无关的话题xyz", 5) == []
 
 
+def test_the_weights_are_counted_over_the_allowed_documents_only() -> None:
+    """R18-C5 (D-783): what a filter hides does not change the scores of what it lets through.
+
+    The as-of view filters out the documents of the future; their words used to count in the
+    inverse document frequencies all the same.
+    """
+    index = KeywordIndex()
+    index.add("a", "她喜欢吃火锅")
+    index.add("b", "她在学校附近租房")
+    past = {"a", "b"}
+    first = index.search("周末去吃火锅吗", 8, allowed=past.__contains__)
+    for number in range(24):
+        index.add(f"later-{number}", f"他们第{number}次一起吃火锅")
+    second = index.search("周末去吃火锅吗", 8, allowed=past.__contains__)
+    assert second == first and [h.doc_id for h in first] == ["a"]
+    everything = index.search("周末去吃火锅吗", 30)
+    assert len(everything) == 25 and everything[0].score < first[0].score  # 火锅 is common now
+    assert index.search("周末去吃火锅吗", 8, allowed=lambda doc_id: False) == []
+
+
 def test_documents_can_be_replaced_removed_and_filtered() -> None:
     index = KeywordIndex()
     index.add("a", "养了一只猫")

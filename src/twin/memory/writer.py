@@ -190,6 +190,8 @@ class MemoryWriter:
         if decision.action == "merge" and decision.target_id is not None:
             target = store.fact(decision.target_id)
             if target is not None:
+                # decide() merges an earlier draft only into the very same words, so this never
+                # moves other words back in time (D-780)
                 store.update_fact(
                     target.id,
                     evidence=_joined_evidence(target, draft),

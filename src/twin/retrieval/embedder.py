@@ -160,6 +160,17 @@ def read_manifest(embeddings_dir: Path, model: str) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
+def weights_unchanged(embeddings_dir: Path, model: str, weights_sha256: str) -> bool:
+    """False if the version record of ``model`` names other weights than ``weights_sha256``.
+
+    It tells, without loading the model, whether an index made with ``weights_sha256`` still
+    matches the files on disk.  No record (the model was never loaded here) counts as unchanged:
+    loading the model rewrites the record whenever its files change, so the next check sees it.
+    """
+    record = read_manifest(embeddings_dir, model)
+    return record is None or record.get("weights_sha256") == weights_sha256
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:

@@ -60,7 +60,7 @@ EXTRACT_PRIORITY = 75
 REINDEX_PRIORITY = 50  # somebody asked for it by hand and the recall is worse until it is done
 REINDEX_STATE_KEY = "memory.reindex.state"
 OPEN_FOLLOWUPS_SHOWN = 10
-MAX_TURNS_PER_JOB = 400
+MAX_TURNS_PER_JOB = 400  # turns one extraction job carries; a longer stretch is split (D-785)
 
 
 # ----------------------------------------------------------------------- queueing
@@ -106,19 +106,26 @@ def queue_bot_extraction(services: Services, turns: Sequence[BotMessage]) -> str
     """Queue the extraction of facts and follow-ups from a stretch of the bot's conversation.
 
     ``turns`` are the messages of the conversation since the last extraction, oldest first
-    (round 09 calls this after ``memory.quiet_minutes`` of silence).  Returns the job id, or
-    ``None`` when fact extraction is switched off or there is nothing to extract from.
+    (round 09 calls this after ``memory.quiet_minutes`` of silence).  Every turn is carried: the
+    engine moves its mark past the newest turn once this returns, so a turn left out would never
+    be extracted (D-785).  A long stretch becomes several jobs of at most
+    :data:`MAX_TURNS_PER_JOB` turns, oldest first, so that a payload (sealed in the jobs table)
+    stays small and a failed part is retried alone.  Returns the id of the last job, or ``None``
+    when fact extraction is switched off or there is nothing to extract from.
     """
     if not services.settings.memory.fact_extraction or not turns:
         return None
-    payload = {
-        "turns": [
-            {"id": t.id, "role": t.role, "text": t.text, "at": t.at.isoformat()}
-            for t in turns[-MAX_TURNS_PER_JOB:]
-        ]
-    }
     queue = JobQueue(services.db, services.clock)
-    return queue.enqueue(EXTRACT_JOB, payload, priority=EXTRACT_PRIORITY, max_attempts=3)
+    job_id: str | None = None
+    for start in range(0, len(turns), MAX_TURNS_PER_JOB):
+        payload = {
+            "turns": [
+                {"id": t.id, "role": t.role, "text": t.text, "at": t.at.isoformat()}
+                for t in turns[start : start + MAX_TURNS_PER_JOB]
+            ]
+        }
+        job_id = queue.enqueue(EXTRACT_JOB, payload, priority=EXTRACT_PRIORITY, max_attempts=3)
+    return job_id
 
 
 def is_quiet(last_message_at: datetime, now: datetime, quiet_minutes: int) -> bool:

@@ -13,7 +13,7 @@ the same way.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
@@ -77,12 +77,13 @@ class MemoryClock:
         return self._source.zone_for(moment)
 
     def real_date(self, moment: datetime) -> date:
+        """Her local day that holds ``moment`` (D-782: the same days :meth:`real_bounds` cuts)."""
         return self._source.local_date(moment)
 
     def real_bounds(self, day: date) -> tuple[datetime, datetime]:
-        """``[start, end)`` of her local ``day`` (in the zone that applies to that date)."""
-        zone = self._source.zone_on(day)
-        return _bounds(day, zone)
+        """``[start, end)`` of her local ``day``: from its midnight in the zone of its date to the
+        next date's midnight in the zone of that one, so the days fit together (D-782)."""
+        return self._source.day_bounds(day)
 
     # -------------------------------------------------------------------- bot
 
@@ -116,10 +117,3 @@ class MemoryClock:
         return (
             self._source.zone_on(day).key if scope == REAL else self._bot_zones().zone_on(day).key
         )
-
-
-def _bounds(day: date, zone: ZoneInfo) -> tuple[datetime, datetime]:
-    start = datetime(day.year, day.month, day.day, tzinfo=zone).astimezone(UTC)
-    following = day + timedelta(days=1)
-    end = datetime(following.year, following.month, following.day, tzinfo=zone).astimezone(UTC)
-    return start, end

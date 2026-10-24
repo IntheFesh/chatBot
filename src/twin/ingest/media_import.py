@@ -340,17 +340,21 @@ class MediaImporter:
         return None
 
     def recount_sticker_uses(self) -> None:
-        """Recompute use counts and first / last use of every sticker from ``sticker_uses``."""
+        """Recompute use counts and first / last use of every sticker from ``sticker_uses``.
+
+        The first and last use are *hers* (R-STK-002; D-786): a sticker only the user sent has
+        none, and the user's later use does not move her last one.
+        """
         her = _uses_subquery(StickerUse.by_her.is_(True))
         user = _uses_subquery(StickerUse.by_her.is_(False))
         first = (
             select(func.min(StickerUse.used_at))
-            .where(StickerUse.sticker_md5 == Sticker.md5)
+            .where(StickerUse.sticker_md5 == Sticker.md5, StickerUse.by_her.is_(True))
             .scalar_subquery()
         )
         last = (
             select(func.max(StickerUse.used_at))
-            .where(StickerUse.sticker_md5 == Sticker.md5)
+            .where(StickerUse.sticker_md5 == Sticker.md5, StickerUse.by_her.is_(True))
             .scalar_subquery()
         )
         with self._db.transaction(bump_state=False) as session:

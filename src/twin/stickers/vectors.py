@@ -22,7 +22,13 @@ from sqlalchemy import select
 
 from twin.clock import to_epoch
 from twin.ops.logging import get_logger
-from twin.retrieval.embedder import EmbedderInfo, EmbeddingService, EncodeKind, embedding_service
+from twin.retrieval.embedder import (
+    EmbedderInfo,
+    EmbeddingService,
+    EncodeKind,
+    embedding_service,
+    weights_unchanged,
+)
 from twin.retrieval.vector_store import IndexMeta, VectorStore, VectorTable
 from twin.services import Services
 from twin.stickers.catalog import StickerRecord, record_of
@@ -90,11 +96,13 @@ class StickerVectors:
         """Encode the stickers whose vector is missing or made with another encoding.
 
         The embedding model is only loaded when there is something to encode or the table
-        was made with another model than the configured one.
+        was made with another encoding than the configured model's: another model, other
+        weights under the same name (the version record on disk says so without loading the
+        model, D-781) or another text scheme.
         """
         table = self.table()
         meta = table.read_meta()
-        if meta is not None and meta.model == self._services.settings.retrieval.model:
+        if meta is not None and self._made_by_configured_model(meta):
             pending = [r for r in self._candidates(md5s) if r.desc_encoding is None]
             if not pending:
                 return VectorSync(0, self._drop_stale(table, md5s), False)
@@ -149,6 +157,15 @@ class StickerVectors:
                         found.desc_encoding = current
             encoded += len(chunk)
         return VectorSync(encoded, removed, reset)
+
+    def _made_by_configured_model(self, meta: IndexMeta) -> bool:
+        """True if the table's encoding is the configured model's, as far as the disk tells."""
+        model = self._services.settings.retrieval.model
+        return (
+            meta.model == model
+            and meta.encoding.endswith(f"|{SCHEME}")
+            and weights_unchanged(self._services.paths.embeddings_dir, model, meta.weights_sha256)
+        )
 
     def _drop_stale(self, table: VectorTable, md5s: Sequence[str] | None) -> int:
         """Remove the vectors of stickers that no longer have a description."""

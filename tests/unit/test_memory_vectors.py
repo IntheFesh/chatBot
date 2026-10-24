@@ -9,12 +9,15 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
 from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
 from tests.support.memory import add_fact, add_summary, make_memory, utc
 from twin.clock import to_epoch
-from twin.memory.vectors import MemoryVectors, VectorSync, encoding_of
-from twin.retrieval.embedder import embedding_service
+from twin.memory.vectors import MemoryVectors, StaleVectorsError, VectorSync, encoding_of
+from twin.retrieval import embedder as embedder_module
+from twin.retrieval.embedder import EmbedderError, embedding_service, reset_embedding_services
 from twin.services import Services
 from twin.storage.vector_schema import VectorKind
 
@@ -110,3 +113,67 @@ def test_removed_records_leave_the_index_and_a_reset_forgets_everything(
     vectors.rebuild_reset()
     assert not vectors.usable(VectorKind.FACT) and not vectors.usable(VectorKind.SUMMARY)
     assert not vectors.table(VectorKind.FACT).exists()
+
+
+# ------------------------------------------------- another embedding model (R18-C2, D-781)
+
+
+def switch_model(monkeypatch: pytest.MonkeyPatch, backend: HashingBackend) -> None:
+    """What changing ``retrieval.model`` (or its weights) and restarting does to the memory."""
+    monkeypatch.setattr(embedder_module, "backend_factory", lambda config, paths: backend)
+    reset_embedding_services()
+
+
+def test_a_model_switch_re_encodes_every_old_record_on_the_next_write(
+    services: Services, embedder: HashingBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C2 (D-781): the first write after the switch encodes the old facts and summaries too.
+
+    Only the new fact used to be encoded: the table of the old model was dropped and the old
+    records, which still carried a vector id, never got a vector again.
+    """
+    memory = make_memory(services)
+    exam = add_fact(memory, "她下周三有期末考试", utc(2026, 10, 1))
+    food = add_fact(memory, "她最喜欢吃火锅", utc(2026, 10, 2))
+    day = add_summary(memory, "real", date(2026, 10, 1), "两个人聊了期末考试")
+    other = HashingBackend(model="test/other-model", weights="w2")
+    switch_model(monkeypatch, other)
+    after = make_memory(services)
+    cat = add_fact(after, "她养了一只猫", utc(2026, 10, 3))
+    facts = after.vectors.table(VectorKind.FACT)
+    summaries = after.vectors.table(VectorKind.SUMMARY)
+    assert {row["id"] for row in facts.rows()} == {exam.id, food.id, cat.id}
+    assert {row["id"] for row in summaries.rows()} == {day.id}
+    current = encoding_of(other.info)
+    assert {f.embed_version for f in after.store.all_facts()} == {current}
+    assert {s.embed_version for s in after.store.current_summaries()} == {current}
+    assert exam.id in {hit.id for hit in after.vectors.search(VectorKind.FACT, "期末考试", 5)}
+
+
+def test_a_lost_table_is_written_again_by_the_next_write(
+    services: Services, embedder: HashingBackend
+) -> None:
+    """R18-C2 (D-781): records that say they have a vector get one when the table is gone."""
+    memory = make_memory(services)
+    first = add_fact(memory, "她喜欢咖啡", utc(2026, 10, 1))
+    vectors = memory.vectors
+    vectors.rebuild_reset()  # e.g. a restore without the vector folder
+    second = add_fact(memory, "她喜欢茶", utc(2026, 10, 2))
+    rows = {row["id"] for row in vectors.table(VectorKind.FACT).rows()}
+    assert rows == {first.id, second.id}
+
+
+def test_a_search_on_vectors_of_another_model_raises_instead_of_finding_nothing(
+    services: Services, embedder: HashingBackend, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C2 (D-781): until the next write, the table is of the old model: say so, loudly."""
+    memory = make_memory(services)
+    add_fact(memory, "她下周三有期末考试", utc(2026, 10, 1))
+    switch_model(monkeypatch, HashingBackend(model="test/other-model", weights="w2"))
+    after = make_memory(services)
+    assert not after.vectors.usable(VectorKind.FACT)
+    with pytest.raises(StaleVectorsError, match="twin memory reindex"):
+        after.vectors.search(VectorKind.FACT, "考试", 5)
+    with pytest.raises(EmbedderError):  # what the callers that can go on without vectors catch
+        after.vectors.search(VectorKind.FACT, "考试", 5)
+    assert after.vectors.search(VectorKind.SUMMARY, "考试", 5) == []  # no table: nothing to find

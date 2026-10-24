@@ -168,6 +168,34 @@ def test_the_limit_counts_visible_facts_only(memory: Memory) -> None:
     assert [h.fact.id for h in hits] == [visible.id]
 
 
+def test_facts_of_the_future_do_not_change_the_block_of_a_past_moment(
+    services: Services, memory: Memory
+) -> None:
+    """R18-C5 (D-783, iron rule 13): the keyword weights are counted over the visible facts.
+
+    Facts known only after ``t`` used to lower the weight of the words they share with the query
+    (their document frequency counted), so the block of ``t`` changed - and a fact of ``t`` fell
+    under the keyword threshold - when facts of the future were added.
+    """
+    from twin.memory.assemble import MemoryAssembler
+
+    services.settings.memory.recall_min_similarity = 1.1  # only the keyword side decides here
+    hotpot = add_fact(memory, "她喜欢吃火锅", utc(2026, 3, 1), importance=2, embed=False)
+    add_fact(memory, "她在学校附近租房", utc(2026, 3, 2), importance=2, embed=False)
+    moment = utc(2026, 4, 1)
+    query = MemoryQuery(text="周末去吃火锅吗")
+    assembler = MemoryAssembler(memory)
+    first = assembler.view(moment).search_facts(query.text, 8)
+    before = assembler.render_view(assembler.view(moment), query).text
+    for day in range(1, 25):  # known only after the moment
+        add_fact(memory, f"他们第{day}次一起吃火锅", utc(2026, 5, day), importance=1, embed=False)
+    second = assembler.view(moment).search_facts(query.text, 8)
+    after = assembler.render_view(assembler.view(moment), query).text
+    assert hotpot.id in {hit.fact.id for hit in first}
+    assert [(h.fact.id, h.keyword) for h in second] == [(h.fact.id, h.keyword) for h in first]
+    assert after == before
+
+
 def test_summaries_are_searched_the_same_way(memory: Memory) -> None:
     past = add_summary(memory, "real", date(2026, 3, 5), "那天他们聊了潜水课的事")
     add_summary(memory, "real", date(2026, 3, 20), "那天他们也聊了潜水课的事")  # the future

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from tests.support.embedding import HashingBackend
 from tests.support.persona import sticker_scenario
 from twin.retrieval import embedder as embedder_module
-from twin.retrieval.embedder import reset_embedding_services
+from twin.retrieval.embedder import manifest_path, reset_embedding_services
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog, StickerRecord
 from twin.stickers.vectors import StickerVectors, description_text, encoding_of, sticker_table
@@ -195,3 +196,53 @@ def test_the_model_is_not_loaded_when_every_vector_is_current(
     runs = embedder.runs
     assert fresh.sync().encoded == 0 and embedder.runs == runs
     assert fresh._embedder is None
+
+
+def record_weights(services: Services, backend: HashingBackend) -> None:
+    """The version record the real backend keeps next to the model's files."""
+    path = manifest_path(services.paths.embeddings_dir, backend.info.model)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "model": backend.info.model,
+        "dimension": backend.info.dimension,
+        "weights_sha256": backend.info.weights_sha256,
+    }
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def test_the_same_model_with_other_weights_is_encoded_again(
+    library: tuple[Services, StickerCatalog],
+    embedder: HashingBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R18-C2 (D-781): the shortcut compared only the model's name.
+
+    New weights under the same name (another revision downloaded) left every vector of the old
+    weights in place, and ``similarities`` answered ``{}`` for good.  The version record on disk
+    names the weights, so the check stays without loading the model.
+    """
+    services, catalog = library
+    model = embedder.info.model
+    services.settings.retrieval.model = model  # the configured model made the table
+    assert StickerVectors(services).sync().encoded == 3
+    newer = HashingBackend(model=model, weights="the-next-revision")
+    monkeypatch.setattr(embedder_module, "backend_factory", lambda config, paths: newer)
+    reset_embedding_services()
+    record_weights(services, newer)  # what loading the new files records
+    result = StickerVectors(services).sync()
+    assert result.reset and result.encoded == 3
+    assert all(r.desc_encoding == encoding_of(newer.info) for r in catalog.records()[:3])
+    assert StickerVectors(services).similarities("好消息", md5s_by_use(catalog)) != {}
+
+
+def test_the_model_is_not_loaded_when_the_recorded_weights_made_the_table(
+    library: tuple[Services, StickerCatalog], embedder: HashingBackend
+) -> None:
+    """R18-C2 (D-781): with the version record on disk the shortcut still loads nothing."""
+    services, _ = library
+    services.settings.retrieval.model = embedder.info.model
+    assert StickerVectors(services).sync().encoded == 3
+    record_weights(services, embedder)
+    reset_embedding_services()
+    fresh = StickerVectors(services)
+    assert fresh.sync().encoded == 0 and fresh._embedder is None

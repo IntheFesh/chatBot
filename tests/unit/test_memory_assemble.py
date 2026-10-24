@@ -477,3 +477,28 @@ async def test_the_degraded_block_comes_through_the_data_source_of_the_running_b
         assert block.degraded and ids["followup"] in block.ids("followup")
     finally:
         await source.aclose()
+
+
+def test_vectors_of_another_model_degrade_the_live_block_and_stop_a_past_view(
+    services: Services, memory: Memory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-C2 (D-781, D-731): after a model switch the search no longer quietly finds nothing.
+
+    The live block is built without vectors and says so (the reply notes
+    ``memory_vectors_unavailable``); a view of a past moment - the training export, the
+    evaluation - raises, because a block without what the vectors find is not that moment's.
+    """
+    from twin.memory.vectors import StaleVectorsError
+    from twin.retrieval import embedder as embedder_module
+    from twin.retrieval.embedder import reset_embedding_services
+
+    ids = lived_memory(memory)
+    other = HashingBackend(model="test/other-model", weights="w2")
+    monkeypatch.setattr(embedder_module, "backend_factory", lambda config, paths: other)
+    reset_embedding_services()
+    switched = make_memory(services)
+    live = MemoryAssembler(switched).build(MemoryQuery("火锅 潜水课"), NOW)
+    assert live.degraded
+    assert ids["keyword"] in live.ids("fact") and live.ids("followup") == [ids["followup"]]
+    with pytest.raises(StaleVectorsError):
+        MemoryAssembler(switched).view(NOW).search_facts("想吃火锅", 5)

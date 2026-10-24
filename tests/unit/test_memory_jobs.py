@@ -40,6 +40,7 @@ from twin.memory.extract import DialogueLine
 from twin.memory.hook import describe_plan, queue_memory_replay
 from twin.memory.jobs import (
     EXTRACT_JOB,
+    MAX_TURNS_PER_JOB,
     SUMMARY_JOB,
     handle_memory_extract,
     handle_memory_replay,
@@ -158,6 +159,26 @@ def test_bot_extraction_is_queued_with_the_turns_inside_the_job(services: Servic
     services.settings.memory.fact_extraction = False
     assert queue_bot_extraction(services, turns) is None
     assert len(jobs_of(services, EXTRACT_JOB)) == 1
+
+
+def test_a_long_stretch_is_queued_whole_in_jobs_of_at_most_400_turns(services: Services) -> None:
+    """R18-C8 (D-785): only the last 400 turns used to travel; the earlier ones were skipped.
+
+    The engine moves ``extracted_through`` to the newest message once the extraction is queued,
+    so whatever the job does not carry is never extracted.  A long stretch is queued as several
+    jobs, oldest first, that together carry every turn exactly once (each an encrypted payload of
+    bounded size, retried on its own).
+    """
+    turns = [
+        BotMessage(f"t{n}", "user" if n % 2 else "bot", f"第{n}句", FIRST + timedelta(seconds=n))
+        for n in range(450)
+    ]
+    last = queue_bot_extraction(services, turns)
+    jobs = sorted(jobs_of(services, EXTRACT_JOB), key=lambda j: j.payload["turns"][0]["at"])
+    assert [len(j.payload["turns"]) for j in jobs] == [MAX_TURNS_PER_JOB, 50]
+    carried = [t["id"] for job in jobs for t in job.payload["turns"]]
+    assert carried == [t.id for t in turns]  # all of them, in order, none twice
+    assert last == jobs[-1].id
 
 
 def test_a_conversation_is_quiet_after_the_configured_minutes() -> None:
