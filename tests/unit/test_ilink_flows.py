@@ -29,7 +29,13 @@ from twin.channel.base import AuthState
 from twin.channel.ilink import flows as flows_module
 from twin.channel.ilink.flows import ConsoleLoginUI, run_binding, run_login
 from twin.channel.ilink.login import LoginError
-from twin.channel.ilink.store import BatchCommit, Credentials, IlinkStore, PendingBinding
+from twin.channel.ilink.store import (
+    KEY_CREDENTIALS,
+    BatchCommit,
+    Credentials,
+    IlinkStore,
+    PendingBinding,
+)
 from twin.channel.state import ChannelStateStore
 from twin.services import Services
 
@@ -274,6 +280,66 @@ async def test_a_candidate_found_earlier_is_confirmed_without_waiting(
     assert await run_binding(services, prompter, app_running=True, wait_s=5)
     assert "Now send any message" not in prompter.transcript
     assert store.bound_user() is not None
+
+
+async def test_r18_a3_a_new_login_by_another_account_drops_the_candidate_of_the_old_one(
+    api: respx.MockRouter, services: Services
+) -> None:
+    """R18-A3 (D-767): account A logged in and wrote to the bot, the question was never answered;
+    then account B scans.  The candidate A - "matches the scanner" by A's login - used to be
+    offered with a plain yes/no, the strong D-012 warning gone.  Now the new login drops it and
+    the next message is compared with B."""
+    store = seed_login(services)  # scanned by USER
+    store.commit_batch(
+        BatchCommit(candidate=PendingBinding(USER, services.clock.now_utc(), CTX, True))
+    )
+    scan_succeeds(api, token=NEW_TOKEN, scanner=OTHER)
+    assert store.pending_binding() is not None
+    user_writes(api, services, sender=USER)  # USER writes again, but OTHER scanned this time
+    prompter = ScriptedPrompter("no")
+    outcome = await drive(
+        run_login(services, prompter, force=True, open_viewer=False, bind_wait_s=60),
+        services.clock,  # type: ignore[arg-type]
+        step_s=1.0,
+    )
+    assert outcome.logged_in_now and not outcome.bound
+    assert "NOT the account that scanned" in prompter.transcript
+    assert "Now send any message" in prompter.transcript  # the old candidate was not reused
+    assert store.bound_user() is None and store.pending_binding() is None
+
+
+def test_r18_a3_a_candidate_is_compared_with_the_login_of_now(services: Services) -> None:
+    """R18-A3 (D-767): the verdict shown by ``status`` and asked about by the binding question
+    is worked out against the stored login when it is read, not frozen when the message came."""
+    store = seed_login(services)  # scanned by USER
+    store.commit_batch(
+        BatchCommit(candidate=PendingBinding(USER, services.clock.now_utc(), CTX, True))
+    )
+    pending = store.pending_binding()
+    assert pending is not None and pending.matches_expected is True
+    login = store.credentials()
+    assert login is not None
+    store.state.put(KEY_CREDENTIALS, {**login.to_dict(), "ilink_user_id": OTHER})
+    pending = store.pending_binding()
+    assert pending is not None and pending.matches_expected is False
+    store.state.put(KEY_CREDENTIALS, {**login.to_dict(), "ilink_user_id": None})
+    pending = store.pending_binding()
+    assert pending is not None and pending.matches_expected is None
+
+
+async def test_r18_a3_the_same_account_logging_in_again_also_starts_the_binding_afresh(
+    api: respx.MockRouter, services: Services
+) -> None:
+    """R18-A3 (D-767): the candidate's context token belongs to the old login, which a new login
+    resets (protocol document section 8.3); binding it would bring that token back."""
+    store = seed_login(services)
+    store.commit_batch(
+        BatchCommit(candidate=PendingBinding(USER, services.clock.now_utc(), "CTX-OLD", True))
+    )
+    store.save_credentials(
+        Credentials(NEW_TOKEN, BOT, USER, API, services.clock.now_utc().isoformat())
+    )
+    assert store.pending_binding() is None and store.context_token() is None
 
 
 async def test_declining_the_confirmation_leaves_nobody_bound(services: Services) -> None:

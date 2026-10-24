@@ -36,7 +36,7 @@ from twin.channel.ilink.http import (
     base_info,
     random_uin,
 )
-from twin.channel.ilink.poller import system_jitter
+from twin.channel.ilink.poller import PollOutcome, system_jitter
 from twin.channel.ilink.wire import WireMessage, as_text
 from twin.ops.logging import JsonFormatter, configure_logging, shutdown_logging
 from twin.storage.db import Database
@@ -206,6 +206,71 @@ async def test_http_errors_and_unreadable_answers_are_distinct_exceptions(
     api.post(URL).respond(200, content=b"  \n")
     answer = await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
     assert answer.data == {} and answer.ok
+
+
+class CountingJsonBody:
+    """A JSON answer of unbounded size (one long string) that counts the chunks pulled."""
+
+    def __init__(self, chunks: int = 10_000) -> None:
+        self.chunks = chunks
+        self.pulled = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.pulled += 1
+        yield b'{"ret": 0, "errmsg": "'
+        for _ in range(self.chunks):
+            self.pulled += 1
+            yield b"x" * 1024
+        yield b'"}'
+
+
+async def test_r18_a6_an_answer_larger_than_the_limit_is_unreadable_not_swallowed(
+    api: respx.MockRouter, http: IlinkHttp, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-A6 (D-768): an API answer was read and parsed whatever its size; now reading stops one
+    chunk past the limit and the answer counts as unreadable (the poller backs off on that)."""
+    monkeypatch.setattr("twin.channel.ilink.http.MAX_RESPONSE_BYTES", 16 * 1024)
+    body = CountingJsonBody()
+    api.post(URL).mock(return_value=httpx.Response(200, content=body))
+    with pytest.raises(IlinkProtocolError, match="too large"):
+        await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
+    assert body.pulled <= 1 + 16 + 1
+
+    declared = CountingJsonBody(chunks=2)
+    api.post(URL).mock(
+        return_value=httpx.Response(200, headers={"content-length": "999999999"}, content=declared)
+    )
+    with pytest.raises(IlinkProtocolError, match="too large"):
+        await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
+    assert declared.pulled == 0
+
+    small = CountingJsonBody(chunks=3)
+    api.post(URL).mock(return_value=httpx.Response(200, content=small))
+    answer = await http.post("getupdates", {}, base_url=API, token=TOKEN, timeout_s=5)
+    assert answer.ok and answer.errmsg == "x" * 3 * 1024
+
+
+async def test_r18_a6_a_huge_poll_answer_takes_the_bad_response_back_off_path(
+    api: respx.MockRouter,
+    db: Database,
+    clock: ManualClock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R18-A6 (D-768): ``getupdates`` over the limit is a failed poll of kind ``bad_response``."""
+    monkeypatch.setattr("twin.channel.ilink.http.MAX_RESPONSE_BYTES", 4 * 1024)
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts())
+    harness.login()
+    harness.bind()
+    api.post(URL).mock(return_value=httpx.Response(200, content=CountingJsonBody()))
+    try:
+        assert await harness.channel.poll_once() is PollOutcome.ERROR
+    finally:
+        await harness.channel.stop()
+    status = harness.store.poll_status()
+    assert status.consecutive_failures == 1
+    assert status.last_error is not None and status.last_error["kind"] == "bad_response"
+    assert harness.store.cursor() == ""
 
 
 async def test_a_client_passed_in_is_not_closed_by_the_wrapper() -> None:

@@ -281,6 +281,83 @@ async def test_unbinding_forgets_the_conversation_and_the_login(
     assert h.store.unbind() is False
 
 
+async def test_r18_a3_a_poll_in_flight_during_unbind_writes_nothing_back(
+    api: respx.MockRouter, h: Harness, clock: ManualClock
+) -> None:
+    """R18-A3 (D-767): ``twin channel unbind`` while a long poll waits (up to 35 s); the batch
+    that poll brings back used to be committed anyway - inbox, cursor, context token, window
+    and poll record written again for an account nobody is bound to any more."""
+    batch = [message(text_item("解绑时在路上"), mid=61, created_ms=now_ms(clock))]
+
+    def unbind_while_waiting(request: httpx.Request) -> httpx.Response:
+        assert h.store.unbind() is True
+        return httpx.Response(200, json=updates(batch, cursor="C-IN-FLIGHT"))
+
+    api.post(GET_UPDATES).mock(side_effect=unbind_while_waiting)
+    await h.channel.poll_once()
+    assert h.store.credentials() is None and h.store.bound_user() is None
+    assert h.store.inbox() == [] and h.store.cursor() == ""
+    assert h.store.context_token() is None and h.store.window_state().last_inbound_at is None
+    assert h.store.seen_ids() == [] and h.store.pending_binding() is None
+    assert h.store.state.get("ilink.poll_status") is None
+
+
+async def test_r18_a3_the_poll_record_is_not_written_without_a_login(h: Harness) -> None:
+    """R18-A3 (D-767): the poll record belongs to the login; a poll that ends after ``unbind``
+    - successful or failed - does not write it back."""
+    h.store.record_poll_failure("network", None, "down")
+    assert h.store.poll_status().consecutive_failures == 1
+    h.store.unbind()
+    assert h.store.record_poll_failure("network", None, "down") == 0
+    h.store.record_poll_success()
+    assert h.store.state.get("ilink.poll_status") is None
+
+
+async def test_r18_a3_a_candidate_in_flight_during_unbind_is_not_brought_back(
+    api: respx.MockRouter, db: Database, clock: ManualClock, tmp_path: Path
+) -> None:
+    """R18-A3 (D-767): the same for a first message seen while nobody is bound."""
+    harness = make_harness(db, clock, tmp_path, RecordingAlerts())
+    harness.login()
+    first = [message(text_item("我是谁"), mid=62, created_ms=now_ms(clock))]
+
+    def unbind_while_waiting(request: httpx.Request) -> httpx.Response:
+        harness.store.unbind()
+        return httpx.Response(200, json=updates(first, cursor="C-IN-FLIGHT"))
+
+    api.post(GET_UPDATES).mock(side_effect=unbind_while_waiting)
+    try:
+        await harness.channel.poll_once()
+    finally:
+        await harness.channel.stop()
+    assert harness.store.pending_binding() is None and harness.store.cursor() == ""
+
+
+async def test_r18_a3_a_poll_in_flight_during_a_new_login_keeps_the_fresh_start(
+    api: respx.MockRouter, h: Harness, clock: ManualClock
+) -> None:
+    """R18-A3 (D-767): a new login resets the cursor and the context token (protocol document
+    section 8.3); the batch fetched with the old token must not write the old ones back."""
+    batch = [message(text_item("换登录时在路上"), mid=63, created_ms=now_ms(clock))]
+
+    def new_login_while_waiting(request: httpx.Request) -> httpx.Response:
+        h.store.save_credentials(
+            Credentials("TOKEN-OF-THE-NEW-LOGIN", BOT, USER, API, clock.now_utc().isoformat())
+        )
+        return httpx.Response(200, json=updates(batch, cursor="C-OLD-LOGIN"))
+
+    route = api.post(GET_UPDATES).mock(side_effect=new_login_while_waiting)
+    await h.channel.poll_once()
+    assert h.store.cursor() == "" and h.store.context_token() is None
+    assert h.store.seen_ids() == []  # not seen: the new login may get it again and deliver it
+    assert h.store.inbox() == []
+    route.side_effect = None
+    route.respond(200, json=updates(batch, cursor="C-NEW-LOGIN"))
+    await h.channel.poll_once()  # the next poll, with the new token, delivers it
+    assert [m.text for m in h.store.inbox()] == ["换登录时在路上"]
+    assert h.store.cursor() == "C-NEW-LOGIN"
+
+
 async def test_the_quote_index_is_bounded_and_replaces_repeated_ids(h: Harness) -> None:
     for number in range(QUOTE_INDEX_MAX + 20):
         h.store.add_quote(f"id-{number}", f"text {number}")

@@ -199,7 +199,7 @@ def test_export_fragments_are_recognised() -> None:
     assert scan.scan_text("one.json", '{"isSent": true, "other": 1}') == []
 
 
-def test_scan_files_skips_binary_large_and_lock_files(tmp_path: Path) -> None:
+def test_scan_files_skips_binary_and_lock_files(tmp_path: Path) -> None:
     bad = "wxid_" + "abcdef12345"
     (tmp_path / "text.txt").write_text(bad, encoding="utf-8")
     (tmp_path / "binary.bin").write_bytes(b"\x00" + bad.encode())
@@ -207,6 +207,60 @@ def test_scan_files_skips_binary_large_and_lock_files(tmp_path: Path) -> None:
     (tmp_path / "pic.png").write_bytes(bad.encode())
     findings = list(scan.scan_files(sorted(tmp_path.iterdir()), tmp_path))
     assert [f.path for f in findings] == ["text.txt"]
+
+
+def synthetic_export(path: Path, *, size: int, one_line: bool) -> None:
+    """A synthetic ``messages.json`` of ``size`` bytes with a WeChat id at its very end."""
+    # the export's keys are put together here so that this file itself does not look like one
+    keys = ["local" + "Id", "sort" + "Seq", "render" + "Type", "sender" + "Username"]
+    record = f'{{"{keys[0]}": 1, "{keys[1]}": 1, "{keys[2]}": "text", "content": "{"嗯" * 40}"}}'
+    separator = ", " if one_line else ",\n"
+    head = '{"messages": [' + ("" if one_line else "\n")
+    tail = separator + f'{{"{keys[3]}": "' + "wxid_" + "abcdef12345" + '"}]}\n'
+    body = []
+    total = len(head.encode()) + len(tail.encode())
+    while total < size:
+        body.append(record)
+        total += len(record.encode()) + len(separator)
+    path.write_text(head + separator.join(body) + tail, encoding="utf-8")
+
+
+@pytest.mark.parametrize("one_line", [False, True])
+def test_f9_a_file_over_5_mb_is_scanned_to_its_end(tmp_path: Path, one_line: bool) -> None:
+    """F9 (D-770): files over 5 MB were skipped without a word - and a real export is that big.
+    Now every file is read in pieces (a 6 MB single-line JSON too) and nothing is skipped."""
+    big = tmp_path / "messages.json"
+    synthetic_export(big, size=6 * 1024 * 1024, one_line=one_line)
+    assert big.stat().st_size > 6 * 1024 * 1024
+    findings = list(scan.scan_files([big], tmp_path))
+    kinds = {f.kind for f in findings}
+    assert kinds == {"wxid", "WeChat export (messages.json) fragment"}, kinds
+    lines = big.read_text(encoding="utf-8").count("\n")
+    wxid_line = next(f.line for f in findings if f.kind == "wxid")
+    assert wxid_line == (1 if one_line else lines)
+    assert "abcdef12345" not in "\n".join(f.render() for f in findings)
+
+
+def test_f9_a_match_split_between_two_pieces_of_a_long_line_is_still_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F9 (D-770): a line longer than one read is scanned in overlapping pieces."""
+    monkeypatch.setattr(scan, "PIECE_BYTES", 24)
+    secret = "wxid_" + "abcdef12345"
+
+    def found_at(offset: int) -> list[tuple[int, str]]:
+        path = tmp_path / f"line-{offset}.txt"
+        path.write_text("x" * offset + " " + secret + " " + "y" * 200 + "\nclean\n", "utf-8")
+        return [(f.line, f.kind) for f in scan.scan_files([path], tmp_path)]
+
+    monkeypatch.setattr(scan, "OVERLAP_CHARS", 20)
+    for offset in range(120):  # the id sits across every possible boundary of the pieces
+        assert found_at(offset) == [(1, "wxid")], offset
+    monkeypatch.setattr(scan, "OVERLAP_CHARS", 0)  # proof that the pieces were really cut
+    assert any(found_at(offset) == [] for offset in range(120))
+    binary = tmp_path / "late-binary.bin"
+    binary.write_bytes(b"x " + secret.encode() + b" " + b"y" * 300 + b"\x00")
+    assert list(scan.scan_files([binary], tmp_path)) == []  # a NUL anywhere: a binary file
 
 
 def test_main_scans_named_files_and_reports_failure(

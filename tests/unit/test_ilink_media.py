@@ -313,6 +313,59 @@ async def test_a_download_larger_than_the_limit_is_refused(
         await cdn.download(f"{CDN}/big")
 
 
+class CountingBody:
+    """An endless response body that counts the chunks the client actually pulled."""
+
+    def __init__(self, chunk: int = 1024, chunks: int = 10_000) -> None:
+        self.chunk = chunk
+        self.chunks = chunks
+        self.pulled = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for _ in range(self.chunks):
+            self.pulled += 1
+            yield b"x" * self.chunk
+
+
+async def test_r18_a6_a_download_stops_reading_as_soon_as_it_passes_the_limit(
+    router: respx.MockRouter, cdn: CdnClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-A6 (D-768): the body used to be read whole into memory and measured afterwards; the
+    server decides how big it is.  Now reading stops one chunk past the limit."""
+    monkeypatch.setattr("twin.channel.ilink.media.MAX_DOWNLOAD_BYTES", 10 * 1024)
+    body = CountingBody()
+    router.get(f"{CDN}/endless").mock(return_value=httpx.Response(200, content=body))
+    with pytest.raises(MediaTransferError, match="too large") as raised:
+        await cdn.download(f"{CDN}/endless")
+    assert not raised.value.retryable
+    assert body.pulled <= 10 + 1
+
+
+async def test_r18_a6_a_declared_size_over_the_limit_is_refused_without_reading(
+    router: respx.MockRouter, cdn: CdnClient
+) -> None:
+    """R18-A6 (D-768): ``Content-Length`` above 100 MiB: refused before the first byte."""
+    body = CountingBody(chunks=4)
+    router.get(f"{CDN}/huge").mock(
+        return_value=httpx.Response(
+            200, headers={"content-length": str(200 * 1024 * 1024)}, content=body
+        )
+    )
+    with pytest.raises(MediaTransferError, match="too large"):
+        await cdn.download(f"{CDN}/huge")
+    assert body.pulled == 0
+
+
+async def test_r18_a6_a_download_within_the_limit_still_arrives_whole(
+    router: respx.MockRouter, cdn: CdnClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-A6 (D-768): exactly at the limit is fine, in many chunks."""
+    monkeypatch.setattr("twin.channel.ilink.media.MAX_DOWNLOAD_BYTES", 8 * 1024)
+    body = CountingBody(chunk=1024, chunks=8)
+    router.get(f"{CDN}/exact").mock(return_value=httpx.Response(200, content=body))
+    assert await cdn.download(f"{CDN}/exact") == b"x" * 8 * 1024
+
+
 async def test_an_upload_retries_after_a_dropped_connection(
     router: respx.MockRouter, cdn: CdnClient, clock: ManualClock
 ) -> None:

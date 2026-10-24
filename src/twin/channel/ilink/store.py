@@ -22,6 +22,7 @@ delivered again) or already handled, never lost and never repeated.
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -84,6 +85,15 @@ class Credentials:
             saved_at=str(data["saved_at"]),
         )
 
+    def fingerprint(self) -> str:
+        """Which login this is, without the token itself (R18-A3, D-767).
+
+        A poll batch carries the fingerprint of the login it was fetched with;
+        :meth:`IlinkStore.commit_batch` drops a batch whose login is no longer the stored one.
+        """
+        material = f"{self.bot_token}\x1f{self.saved_at}".encode()
+        return hashlib.sha256(material).hexdigest()[:16]
+
 
 @dataclass(frozen=True)
 class AuthRecord:
@@ -128,6 +138,8 @@ class BatchCommit:
     failures: Counter[str] = field(default_factory=Counter)
     quote_entries: list[tuple[str, str]] = field(default_factory=list)
     candidate: PendingBinding | None = None
+    login: str | None = None
+    """:meth:`Credentials.fingerprint` of the login the batch was fetched with (D-767)."""
 
 
 @dataclass(frozen=True)
@@ -168,7 +180,12 @@ class IlinkStore:
         return Credentials.from_dict(data) if data else None
 
     def save_credentials(self, credentials: Credentials) -> None:
-        """Store a fresh login: auth ok, cursor and context token reset (section 8.3)."""
+        """Store a fresh login: auth ok, cursor and context token reset (section 8.3).
+
+        A first sender still waiting for confirmation goes too (R18-A3, D-767): it was seen and
+        compared with the account that scanned the *previous* code, and its context token belongs
+        to the previous login.  The next message is compared with this login's account.
+        """
         with self._state.transaction() as tx:
             tx.put(KEY_CREDENTIALS, credentials.to_dict())
             tx.put(KEY_AUTH, {"state": "ok", "since": credentials.saved_at})
@@ -176,6 +193,7 @@ class IlinkStore:
             tx.delete(KEY_CONTEXT)
             tx.delete(KEY_WINDOW)
             tx.delete(KEY_POLL)
+            tx.delete(KEY_PENDING_BIND)
 
     def auth_record(self) -> AuthRecord:
         creds = self._state.get(KEY_CREDENTIALS)
@@ -222,14 +240,23 @@ class IlinkStore:
         )
 
     def pending_binding(self) -> PendingBinding | None:
+        """The first sender awaiting confirmation, compared with the login stored *now* (D-767).
+
+        ``matches_expected`` is worked out when the candidate is read, against the account that
+        scanned the code of the current login (``None`` when that login did not say who scanned):
+        the strong D-012 warning must not rest on a comparison with an earlier login.
+        """
         data = self._state.get(KEY_PENDING_BIND)
         if not data:
             return None
+        login = self._state.get(KEY_CREDENTIALS)
+        user_id = str(data["user_id"])
+        expected = Credentials.from_dict(login).ilink_user_id if login else None
         return PendingBinding(
-            user_id=str(data["user_id"]),
+            user_id=user_id,
             seen_at=ensure_aware(datetime.fromisoformat(data["seen_at"])),
             context_token=data.get("context_token"),
-            matches_expected=data.get("matches_expected"),
+            matches_expected=None if not expected else user_id == expected,
         )
 
     def bind(self, user_id: str, *, context_token: str | None = None) -> BoundUser:
@@ -364,9 +391,15 @@ class IlinkStore:
         )
 
     def record_poll_failure(self, kind: str, code: int | None, errmsg: str | None) -> int:
-        """Count one failed poll; returns the number of failures in a row."""
+        """Count one failed poll; returns the number of failures in a row.
+
+        Nothing is written (and 0 returned) once the login is gone: the poll record belongs to
+        the login, and ``unbind`` removed both while the poll was on its way (D-767).
+        """
         now = self._clock.now_utc()
         with self._state.transaction() as tx:
+            if tx.get(KEY_CREDENTIALS) is None:
+                return 0
             data = dict(tx.get(KEY_POLL) or {})
             failures = int(data.get("consecutive_failures", 0)) + 1
             data["consecutive_failures"] = failures
@@ -388,6 +421,8 @@ class IlinkStore:
         """
         now = self._clock.now_utc()
         with self._state.transaction() as tx:
+            if tx.get(KEY_CREDENTIALS) is None:  # unbound while the poll was on its way (D-767)
+                return
             data = dict(tx.get(KEY_POLL) or {})
             last_ok = _parse(data.get("last_ok_at"))
             recovering = int(data.get("consecutive_failures", 0)) > 0
@@ -400,9 +435,25 @@ class IlinkStore:
 
     # ------------------------------------------------------------- commit
 
-    def commit_batch(self, batch: BatchCommit) -> None:
-        """Apply one poll batch atomically (section 10.5 of the protocol document)."""
+    def commit_batch(self, batch: BatchCommit) -> bool:
+        """Apply one poll batch atomically (section 10.5 of the protocol document).
+
+        Returns ``False`` - and writes nothing - when the login the batch was fetched with is no
+        longer the stored one (R18-A3, D-767): ``unbind`` or a new login happened while the long
+        poll waited.  After an unbind nothing of that conversation may come back; after a new
+        login the cursor and the context token start afresh (section 8.3), and the old batch's
+        cursor, token and candidate would undo that.  Its ids are not marked as seen, so whatever
+        the new login is sent again is delivered then.
+        """
         with self._state.transaction() as tx:
+            login = tx.get(KEY_CREDENTIALS)
+            if not login:
+                return False
+            if (
+                batch.login is not None
+                and Credentials.from_dict(login).fingerprint() != batch.login
+            ):
+                return False
             if batch.seen_ids:
                 seen = [str(item) for item in tx.get(KEY_SEEN, [])]
                 known = set(seen)
@@ -446,3 +497,4 @@ class IlinkStore:
                 )
             if batch.new_cursor:
                 tx.put(KEY_CURSOR, batch.new_cursor)
+            return True

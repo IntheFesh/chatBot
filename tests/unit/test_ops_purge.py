@@ -17,10 +17,11 @@ from tests.support.cli_runner import invoke
 from tests.support.embedding import HashingBackend
 from tests.support.training_history import MOMENT, record_training
 from twin.cli import app
+from twin.config.loader import DataPaths
 from twin.config.secrets import SecretStore
 from twin.ops import purge_cli
 from twin.ops.backup.archive import read_manifest
-from twin.ops.backup.layout import POOL_DIRNAME
+from twin.ops.backup.layout import POOL_DIRNAME, moved_aside, replaced_path, restore_targets
 from twin.ops.backup.sealed import BackupDecryptionError
 from twin.ops.instance_lock import ALL_LOCKS, LOCK_RUN, InstanceLock
 from twin.ops.process_model import ExitCode
@@ -205,6 +206,59 @@ def test_a_damaged_key_index_does_not_keep_a_key_alive(installed: Installation) 
     assert not services.secrets.exists(key_secret_name(2))
     assert not services.secrets.exists(INDEX_NAME)
     assert services.secrets.get(DEEPSEEK_KEY) == "synthetic-key-keep-me"
+
+
+def plant_restore_leftovers(paths: DataPaths) -> list[Path]:
+    """What a restore leaves when it cannot delete the data it moved aside (R18-A5)."""
+    tag = "20261023T101500"
+    database = paths.data_dir / f"twin.db.replaced-{tag}"
+    database.write_bytes(f"{MARKER}-旧数据库".encode())
+    journal = paths.data_dir / f"twin.db-wal.replaced-{tag}"
+    journal.write_bytes(b"old journal")
+    vectors = paths.data_dir / f"vectors.replaced-{tag}"
+    (vectors / "messages.lance").mkdir(parents=True)
+    (vectors / "messages.lance" / "data.bin").write_bytes(b"her embedding vectors")
+    return [database, journal, vectors]
+
+
+def test_r18_a5_the_data_a_restore_moved_aside_is_counted_and_deleted(
+    installed: Installation,
+) -> None:
+    """R18-A5 (D-769): ``data/twin.db.replaced-*`` and ``data/vectors.replaced-*`` - the old
+    database and vector index a restore could not delete (Windows: a file held open) - were not
+    touched by ``purge --all``; the vectors are not encrypted (R-STO-005)."""
+    paths = installed.paths
+    leftovers = plant_restore_leftovers(paths)
+    installed.services.db.dispose()
+    report = purge_all(paths, installed.mirror, installed.services.keystore, close_logs=False)
+    assert [path.name for path in leftovers if path.exists()] == []
+    assert not list(paths.data_dir.glob("*.replaced-*"))
+    assert report.failed == [] and MARKER not in "\n".join(report.lines())
+
+
+def test_r18_a5_the_leftovers_are_found_by_the_one_naming_rule(tmp_path: Path) -> None:
+    """R18-A5 (D-769): restore and purge share ``replaced_path``/``moved_aside``; other names
+    that merely look alike are not touched, and a folder that is not there has nothing."""
+    data = tmp_path / "data"
+    data.mkdir()
+    targets = restore_targets(data / "twin.db", data / "vectors")
+    made = [replaced_path(target, "20261023T101500") for target in targets]
+    for path in made[:3]:
+        path.write_bytes(b"x")
+    made[3].mkdir()
+    (data / "twin.db.bak").write_bytes(b"not a leftover")
+    (data / "other.replaced-20261023T101500").write_bytes(b"not ours")
+    assert moved_aside(targets) == made
+    assert moved_aside(restore_targets(tmp_path / "nowhere" / "twin.db", tmp_path / "v")) == []
+
+
+def test_r18_a5_the_plan_lists_the_data_a_restore_moved_aside(installed: Installation) -> None:
+    """R18-A5 (D-769): the list shown before the phrase is asked names them too (a count)."""
+    plant_restore_leftovers(installed.paths)
+    plan = plan_all(installed.paths, installed.mirror, keys=1)
+    by_name = {item.category: item for item in plan.items}
+    assert by_name["恢复时替换下的旧数据"].count == 3
+    assert MARKER not in "\n".join(plan.lines())
 
 
 def test_a_purge_of_an_installation_without_a_mirror_or_backups_works(

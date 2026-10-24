@@ -6,6 +6,10 @@ fragments of a WeChat ``messages.json`` export, and API-key / private-key
 shapes.  Findings are reported as ``file:line: kind`` - the matched text is never
 printed.
 
+Every file is read in pieces of at most :data:`PIECE_BYTES` (a longer line in pieces that
+overlap), so a file of any size is scanned to its end with bounded memory.  Files over 5 MB used
+to be skipped without a word - and a real ``messages.json`` export is that big (F9, D-770).
+
 Usage::
 
     uv run python scripts/privacy_scan.py              # all files tracked by git
@@ -18,15 +22,20 @@ pattern-shaped string build it from parts so that this scan stays clean.
 from __future__ import annotations
 
 import argparse
+import codecs
 import re
 import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 ROOT = Path(__file__).resolve().parent.parent
-MAX_BYTES = 5 * 1024 * 1024
+PIECE_BYTES = 1024 * 1024
+"""The most of one line held at a time; a longer line is scanned in overlapping pieces."""
+OVERLAP_CHARS = 256
+"""How much of the previous piece of a long line is scanned again with the next one."""
 SKIP_NAMES = {"uv.lock"}
 SKIP_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".enc", ".db", ".lock"}
 
@@ -41,6 +50,7 @@ BANK_CARD = re.compile(_B + r"\d{16,19}" + _E)
 SECRET_KEY = re.compile(r"\bsk-[A-Za-z0-9]{20,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----")
 EXPORT_KEYS = ("createTimeText", "senderUsername", "isSent", "localId", "sortSeq", "renderType")
 EXPORT_KEY_RE = {key: re.compile(rf'"{key}"\s*:') for key in EXPORT_KEYS}
+EXPORT_ANY_KEY = re.compile(r'"(?:' + "|".join(EXPORT_KEYS) + r')"\s*:')
 EXPORT_THRESHOLD = 3
 
 _ID_WEIGHTS = (7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2)
@@ -74,32 +84,83 @@ def luhn(digits: str) -> bool:
     return total % 10 == 0
 
 
+class BinaryFile(Exception):
+    """The file holds a NUL byte: not text, not scanned (as before)."""
+
+
+def line_kinds(line: str) -> list[str]:
+    """The kinds of sensitive data in one line (or one piece of a long line)."""
+    kinds: list[str] = []
+    if WXID.search(line):
+        kinds.append("wxid")
+    if CN_MOBILE.search(line):
+        kinds.append("mobile number")
+    if any(valid_id_card(m.group(0)) for m in ID_CARD.finditer(line)):
+        kinds.append("ID card number")
+    if any(luhn(m.group(0)) for m in BANK_CARD.finditer(line)):
+        kinds.append("bank card number (Luhn)")
+    if SECRET_KEY.search(line):
+        kinds.append("API key / private key")
+    return kinds
+
+
+def scan_lines(path: str, lines: Iterable[tuple[int, str]]) -> list[Finding]:
+    """Findings for numbered lines; several pieces of one line may share its number."""
+    findings: list[Finding] = []
+    reported: set[tuple[int, str]] = set()
+    export_keys: set[str] = set()
+    first_export_line: int | None = None
+    for number, line in lines:
+        for kind in line_kinds(line):
+            if (number, kind) not in reported:
+                reported.add((number, kind))
+                findings.append(Finding(path, number, kind))
+        if not EXPORT_ANY_KEY.search(line):
+            continue
+        keys = {key for key, pattern in EXPORT_KEY_RE.items() if pattern.search(line)}
+        if keys:
+            export_keys |= keys
+            if first_export_line is None:
+                first_export_line = number
+    if len(export_keys) >= EXPORT_THRESHOLD:
+        findings.append(
+            Finding(path, first_export_line or 1, "WeChat export (messages.json) fragment")
+        )
+    return findings
+
+
 def scan_text(path: str, text: str) -> list[Finding]:
     """Findings for one file's text."""
-    findings: list[Finding] = []
-    for number, line in enumerate(text.splitlines(), start=1):
-        if WXID.search(line):
-            findings.append(Finding(path, number, "wxid"))
-        if CN_MOBILE.search(line):
-            findings.append(Finding(path, number, "mobile number"))
-        if any(valid_id_card(m.group(0)) for m in ID_CARD.finditer(line)):
-            findings.append(Finding(path, number, "ID card number"))
-        if any(luhn(m.group(0)) for m in BANK_CARD.finditer(line)):
-            findings.append(Finding(path, number, "bank card number (Luhn)"))
-        if SECRET_KEY.search(line):
-            findings.append(Finding(path, number, "API key / private key"))
-    present = [key for key, pattern in EXPORT_KEY_RE.items() if pattern.search(text)]
-    if len(present) >= EXPORT_THRESHOLD:
-        first = next(
-            (
-                number
-                for number, line in enumerate(text.splitlines(), start=1)
-                if any(EXPORT_KEY_RE[key].search(line) for key in present)
-            ),
-            1,
-        )
-        findings.append(Finding(path, first, "WeChat export (messages.json) fragment"))
-    return findings
+    return scan_lines(path, enumerate(text.splitlines(), start=1))
+
+
+def numbered_pieces(handle: BinaryIO) -> Iterator[tuple[int, str]]:
+    """The lines of a file as ``(number, text)``, a very long line as several pieces.
+
+    The file is read :data:`PIECE_BYTES` at a time.  A line that grows past that without ending
+    is handed on in pieces, each further piece together with the last :data:`OVERLAP_CHARS`
+    characters of the one before, so a match that straddles two reads is still seen and memory
+    stays bounded.  Raises :class:`BinaryFile` at a NUL byte.
+    """
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
+    number = 1
+    pending = ""  # the start of the current line, not handed on yet
+    overlap = ""  # the end of the part of the current line that was handed on
+    while block := handle.read(PIECE_BYTES):
+        if b"\0" in block:
+            raise BinaryFile
+        *complete, pending = (pending + decoder.decode(block)).split("\n")
+        for line in complete:
+            yield number, overlap + line
+            number += 1
+            overlap = ""
+        if len(pending) > PIECE_BYTES:  # a long line: scan what there is, keep its tail
+            piece = overlap + pending
+            yield number, piece
+            overlap, pending = piece[max(len(piece) - OVERLAP_CHARS, 0) :], ""
+    pending += decoder.decode(b"", final=True)
+    if pending or overlap:
+        yield number, overlap + pending
 
 
 def tracked_files(root: Path) -> list[Path]:
@@ -121,18 +182,15 @@ def scan_files(paths: Iterable[Path], root: Path) -> Iterator[Finding]:
         if path.name in SKIP_NAMES or path.suffix.lower() in SKIP_SUFFIXES or not path.is_file():
             continue
         try:
-            if path.stat().st_size > MAX_BYTES:
-                continue
-            data = path.read_bytes()
-        except OSError:
-            continue
-        if b"\0" in data:
-            continue
-        try:
             display = str(path.relative_to(root))
         except ValueError:
             display = str(path)
-        yield from scan_text(display, data.decode("utf-8", errors="ignore"))
+        try:
+            with path.open("rb") as handle:
+                findings = scan_lines(display, numbered_pieces(handle))
+        except (OSError, BinaryFile):
+            continue
+        yield from findings
 
 
 def main(argv: list[str] | None = None) -> int:

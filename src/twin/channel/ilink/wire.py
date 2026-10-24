@@ -8,9 +8,10 @@ as JSON integers; Python reads them exactly and :func:`as_text` turns them into 
 from __future__ import annotations
 
 import hashlib
+import math
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 DEFAULT_API_BASE = "https://ilinkai.weixin.qq.com"
 CDN_BASE = "https://novac2c.cdn.weixin.qq.com/c2c"
@@ -48,6 +49,31 @@ def as_text(value: Any) -> str | None:
     if value is None or value == "":
         return None
     return str(value)
+
+
+def lenient_number(value: Any) -> float | None:
+    """A number field read the tolerant way: what is not a number is missing (R18-A1, D-765).
+
+    An integer too large for a float becomes infinity (the caller treats it as out of range);
+    a numeric string is read as its number; anything else - text, a list, ``true`` - is ``None``.
+    A field that failed validation used to make the whole message invalid, and an invalid
+    message is dropped.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf if value > 0 else -math.inf
+    if isinstance(value, float):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 class _Wire(BaseModel):
@@ -135,6 +161,11 @@ class WireMessage(_Wire):
     context_token: str | None = None
     session_id: str | None = None
     group_id: str | None = None
+
+    @field_validator("create_time_ms", mode="before")
+    @classmethod
+    def _tolerant_time(cls, value: Any) -> float | None:
+        return lenient_number(value)
 
     def items(self) -> list[WireItem]:
         return list(self.item_list or [])

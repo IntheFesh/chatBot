@@ -172,10 +172,17 @@ def test_login_scans_binds_and_stores_the_credentials(svc: Services, api: respx.
             "ilink_user_id": USER,
         },
     )
-    store = store_of(svc)
-    store.commit_batch(
-        BatchCommit(candidate=PendingBinding(USER, svc.clock.now_utc(), CTX, matches_expected=True))
+    # R18-A3 (D-767): the first message arrives after the login, through the command's own poll.
+    # (This test used to plant a candidate before any login existed and expect the new login to
+    # keep it - the stale-candidate behaviour that a new login now clears.)
+    api.post(f"{API}/ilink/bot/msg/notifystart").respond(200, json={})
+    api.post(f"{API}/ilink/bot/msg/notifystop").respond(200, json={})
+    first = message(text_item("第一条消息"), mid=1, sender=USER, context_token=CTX)
+    api.post(f"{API}/ilink/bot/getupdates").mock(
+        side_effect=[httpx.Response(200, json=updates([first], cursor="C1"))]
+        + [httpx.Response(200, json=updates(cursor="C1"))] * 200
     )
+    store = store_of(svc)
     result = runner.invoke(app, ["channel", "login", "--no-open"], input="y\n")
     assert result.exit_code == 0, result.output
     assert "Scan this code with WeChat" in result.output

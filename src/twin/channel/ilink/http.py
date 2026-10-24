@@ -8,6 +8,7 @@ the endpoint name and numbers, never URLs with query strings and never bodies.
 from __future__ import annotations
 
 import base64
+import json
 import secrets
 from dataclasses import dataclass
 from typing import Any
@@ -31,6 +32,10 @@ TIMEOUT_QR = httpx.Timeout(None, connect=TIMEOUT_QUICK_S)
 """``get_bot_qrcode``: no read timeout (the official client has none, protocol document section
 2.4; a slow answer is not an error, the login has its own deadline), but a host that cannot be
 reached at all still fails after the connect timeout (D-680)."""
+
+MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+"""The largest API answer read (R18-A6, D-768).  The server decides how big an answer is; a
+``getupdates`` batch is a few kilobytes, so anything near this is not a protocol answer."""
 
 TimeoutSpec = float | httpx.Timeout | None
 
@@ -234,14 +239,17 @@ class IlinkHttp:
         json_body: dict[str, Any] | None,
     ) -> IlinkResponse:
         try:
-            response = await self._client.request(
+            async with self._client.stream(
                 method,
                 url,
                 headers=headers,
                 params=params,
                 json=json_body,
                 timeout=timeout_s,
-            )
+            ) as response:
+                if not 200 <= response.status_code < 300:
+                    raise IlinkHttpError(endpoint, response.status_code)
+                body = await read_limited(response, MAX_RESPONSE_BYTES)
         except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
             raise IlinkTransportError(
                 endpoint, type(exc).__name__, request_sent=False, timeout=_is_timeout(exc)
@@ -254,22 +262,45 @@ class IlinkHttp:
             raise IlinkTransportError(
                 endpoint, type(exc).__name__, request_sent=True, timeout=False
             ) from None
-        if not 200 <= response.status_code < 300:
-            raise IlinkHttpError(endpoint, response.status_code)
-        return IlinkResponse(
-            response.status_code, _parse_object(endpoint, response), response.headers
-        )
+        except BodyTooLarge:
+            raise IlinkProtocolError(endpoint, "the answer is too large") from None
+        return IlinkResponse(response.status_code, _parse_object(endpoint, body), response.headers)
+
+
+class BodyTooLarge(Exception):
+    """A response body is larger than the caller accepts (see :func:`read_limited`)."""
+
+
+async def read_limited(response: httpx.Response, limit: int) -> bytes:
+    """The body of a streamed ``response``, refusing more than ``limit`` bytes (R18-A6, D-768).
+
+    A declared ``Content-Length`` above the limit is refused before the first byte; otherwise
+    reading stops - and :class:`BodyTooLarge` is raised - as soon as the bytes read pass the
+    limit, so at most one chunk more than the limit is ever held.  The limit counts the decoded
+    bytes (a compressed answer cannot inflate past it).
+    """
+    declared = response.headers.get("content-length", "")
+    if declared.strip().isdigit() and int(declared) > limit:
+        raise BodyTooLarge
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > limit:
+            raise BodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _is_timeout(exc: Exception) -> bool:
     return isinstance(exc, httpx.TimeoutException)
 
 
-def _parse_object(endpoint: str, response: httpx.Response) -> dict[str, Any]:
-    if not response.content.strip():
+def _parse_object(endpoint: str, body: bytes) -> dict[str, Any]:
+    if not body.strip():
         return {}
     try:
-        data = response.json()
+        data = json.loads(body)
     except ValueError:
         raise IlinkProtocolError(endpoint, "the answer is not JSON") from None
     if not isinstance(data, dict):

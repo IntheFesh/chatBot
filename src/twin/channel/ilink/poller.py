@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
 import random
 from collections import Counter
 from collections.abc import Callable
@@ -65,6 +66,9 @@ LOGIN_WATCH_INTERVAL_S = 5.0
 RECOVERY_PROBE_INTERVAL = timedelta(hours=1)
 FAILURES_BEFORE_ALERT = 3
 POLL_ALERT_CATEGORY = "channel.poll_failing"
+POLL_HINT_MIN_S = 5.0
+POLL_HINT_MAX_S = 120.0
+"""The server's ``longpolling_timeout_ms`` is used within these bounds (R18-A1, D-765)."""
 
 
 class PollOutcome(StrEnum):
@@ -83,6 +87,25 @@ def backoff_delay(failures: int, jitter: float) -> float:
         raise ValueError("failures counts errors in a row and starts at 1")
     base = min(BACKOFF_CAP_S, BACKOFF_BASE_S * 2.0 ** min(failures - 1, 16))
     return min(BACKOFF_CAP_S, base * jitter)
+
+
+def suggested_poll_timeout(hint: Any) -> float | None:
+    """Seconds for the next long poll from ``longpolling_timeout_ms``, or ``None`` to keep the old.
+
+    Kept between :data:`POLL_HINT_MIN_S` and :data:`POLL_HINT_MAX_S`: the value comes from the
+    server and was used as it came - ``Infinity`` or ``1e12`` made a poll that never times out,
+    and an integer too large for a float raised out of the poll (D-765).  Not a positive finite
+    number: ignored.
+    """
+    if isinstance(hint, bool) or not isinstance(hint, int | float):
+        return None
+    if isinstance(hint, float) and not math.isfinite(hint):
+        return None
+    if hint <= 0:
+        return None
+    if hint >= POLL_HINT_MAX_S * 1000.0:  # compared before dividing: a huge int has no float
+        return POLL_HINT_MAX_S
+    return max(POLL_HINT_MIN_S, float(hint) / 1000.0)
 
 
 def system_jitter() -> float:
@@ -185,9 +208,9 @@ class IlinkPoller:
             return await self._failed("api", code, response.errmsg)
         if probing:
             await self._guard.on_recovered()
-        hint = response.data.get("longpolling_timeout_ms")
-        if isinstance(hint, int | float) and not isinstance(hint, bool) and hint > 0:
-            self._poll_timeout_s = float(hint) / 1000.0
+        suggested = suggested_poll_timeout(response.data.get("longpolling_timeout_ms"))
+        if suggested is not None:
+            self._poll_timeout_s = suggested
         return await self._handle(response.data, credentials, cursor)
 
     def _probe_due(self, since: datetime | None) -> bool:
@@ -223,7 +246,8 @@ class IlinkPoller:
         batch = BatchCommit(
             new_cursor=new_cursor
             if isinstance(new_cursor, str) and new_cursor and new_cursor != cursor
-            else None
+            else None,
+            login=credentials.fingerprint(),
         )
         if messages:
             await self._collect(messages, credentials, batch)
@@ -249,7 +273,10 @@ class IlinkPoller:
 
     async def _commit_and_wake(self, batch: BatchCommit, has_messages: bool) -> None:
         if has_messages or batch.new_cursor:
-            await asyncio.to_thread(self._store.commit_batch, batch)
+            applied = await asyncio.to_thread(self._store.commit_batch, batch)
+            if applied is False:  # unbound or logged in anew while the poll waited (D-767)
+                log.warning("poll_batch_dropped_login_changed", messages=len(batch.deliver))
+                return
         await asyncio.to_thread(self._store.record_poll_success)
         if batch.deliver and self._on_inbox is not None:
             self._on_inbox()

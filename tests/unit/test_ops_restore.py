@@ -253,6 +253,38 @@ def test_a_file_that_another_program_holds_open_ends_the_restore_with_the_data_b
     assert not list(services.paths.data_dir.glob("**/*.replaced-*"))
 
 
+def test_r18_a5_old_data_that_cannot_be_deleted_afterwards_does_not_fail_the_restore(
+    world: BackupWorld, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R18-A5 (D-769): the restore is complete once the restored data is in place and checked;
+    deleting the moved-aside old database is clean-up.  On Windows a file another program holds
+    open cannot be deleted: that used to raise out of a finished restore (the command reported a
+    failure).  Now the restore reports success and names what is left (no content)."""
+    services = world.services
+    counts = table_counts(services.paths.db_path)
+    view = world.backup.create("manual")
+    archive = world.backup.backups_dir / str(view.file_name)
+    mutate(world)
+    real_unlink = os.unlink
+    refused: list[str] = []
+
+    def held_open(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        name = Path(os.fsdecode(path)).name
+        if name.startswith("twin.db.replaced-"):
+            refused.append(name)
+            raise PermissionError(13, "The process cannot access the file: it is in use")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", held_open)
+    report = do_restore(world, archive)
+    monkeypatch.undo()
+
+    assert refused and table_counts(services.paths.db_path) == counts  # restored all the same
+    left = sorted(p.name for p in services.paths.data_dir.glob("*.replaced-*"))
+    assert report.leftovers == left and len(left) == 1 and left[0].startswith("twin.db.replaced-")
+    assert report.problems == []
+
+
 def test_media_the_pool_lacks_is_reported_not_fatal(world: BackupWorld) -> None:
     services = world.services
     view = world.backup.create("manual")

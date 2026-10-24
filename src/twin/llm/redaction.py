@@ -3,19 +3,25 @@
 What is replaced, and how false positives are kept down:
 
 * **phone numbers** - mainland China (``1[3-9]`` + 9 digits, optional ``+86``/``0086``, optional
-  separators) and North American (NANP) numbers; the area code and the exchange must not start
-  with 0 or 1, so ordinary 10 digit numbers such as timestamps are left alone;
+  separators: hyphens, spaces or dots, ``138.1234.5678``) and North American (NANP) numbers; the
+  area code and the exchange must not start with 0 or 1, so ordinary 10 digit numbers such as
+  timestamps are left alone;
 * **e-mail addresses**;
-* **mainland ID card numbers** - 18 characters, a real birth date and a correct ISO 7064
-  check digit; a number with a wrong check digit is not an ID card and stays;
+* **mainland ID card numbers** - 18 characters (also in groups of 6, 8 and 4 separated by spaces
+  or hyphens), a real birth date and a correct ISO 7064 check digit; a number with a wrong check
+  digit is not an ID card and stays;
 * **bank card numbers** - 16 to 19 digits (single spaces or hyphens allowed between digits)
   that pass the Luhn check;
 * **detailed addresses** - Chinese street addresses (a street name with a house number and
-  ``号``, optionally with a leading province/city/district and a trailing building/unit/room),
+  ``号``, optionally with a leading province/city/district, a section or lane between street and
+  number - ``人民南路四段27号``, ``愚园路1088弄5号`` - and a trailing building/unit/room),
   stand-alone building addresses (at least two of ``栋/幢/号楼``, ``单元``, ``室``) and North
   American street addresses.  A bare ``路`` or ``号`` never counts;
-* **WeChat ids** - ``wxid_...``, ``...@chatroom`` and an id that follows a label such as
-  ``微信号：``.
+* **WeChat ids** - ``wxid_...``, ``...@chatroom`` and an id that follows a label, as people
+  write it: ``微信号：abc``, ``我的微信是abc``, ``我微信 abc``, ``加我vx abc``, ``加我微信吧 abc``.
+  The id must have WeChat's shape (a letter, then 5 to 19 letters, digits, ``_`` or ``-``); the
+  price of catching ``我微信 zhangsan`` is that an English word of six letters or more right
+  after such a label is masked too (D-766).
 
 Matching happens on a copy of the text in which full-width digits and a few full-width
 symbols are mapped one-to-one to ASCII, so offsets stay valid and ``１３８...`` is caught.
@@ -114,14 +120,30 @@ _EMAIL = re.compile(
     r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}"
 )
 _WXID = re.compile(r"(?<![A-Za-z0-9_\-])wxid_[A-Za-z0-9_\-]{6,}|[A-Za-z0-9_\-]{6,}@chatroom\b")
+# A WeChat id after a label, in the ways people write it (R18-A4, D-766): ``微信号：abc``,
+# ``我的微信是abc``, ``我微信 abc``, ``加我vx abc``, ``加我微信吧 abc``.  The id has the shape
+# WeChat allows (a letter, then 5 to 19 letters, digits, ``_`` or ``-``), so ``我微信 好的`` and
+# ``微信上说`` stay.  A label that ends in a Chinese character may touch the id (``微信abc_123``);
+# one that ends in a Latin letter needs a separator, so ``vxlan12345`` is a word, not ``vx`` + id.
+# The English ``WeChat`` needs a colon: ``WeChat channel``, ``WeChat polling`` are prose.
+_WX_ID = r"([A-Za-z][A-Za-z0-9_\-]{5,19})(?![A-Za-z0-9_\-])"
+_WX_SEPARATOR = r"(?:\s|[:：,，]|是|为|叫|[吧呀啊哦哈嘛呢啦])"
 _WXID_LABELLED = re.compile(
-    r"(?:微信号|微信ID|vx号|wx号)\s*[:：是为]?\s*([A-Za-z][A-Za-z0-9_\-]{5,19})(?![A-Za-z0-9_\-])"
-    r"|(?:微信|vx|wx|wechat(?:\s*id)?)\s*[:：]\s*([A-Za-z][A-Za-z0-9_\-]{5,19})(?![A-Za-z0-9_\-])",
+    rf"(?:微信|威信|(?<![A-Za-z0-9])[vVwW](?:信|[xX]\s*号))号?{_WX_SEPARATOR}{{0,4}}{_WX_ID}"
+    rf"|(?:微信\s*id|(?<![A-Za-z0-9])(?:vx|wx)){_WX_SEPARATOR}{{1,4}}{_WX_ID}"
+    rf"|(?<![A-Za-z0-9])wechat(?:\s*id)?\s*[:：]\s*{_WX_ID}",
     re.IGNORECASE,
 )
-_ID_CARD = re.compile(r"(?<![0-9A-Za-z])[1-9]\d{16}[\dXx](?![0-9A-Za-z])")
+_ID_CARD = re.compile(
+    r"(?<![0-9A-Za-z])(?:[1-9]\d{16}[\dXx]|[1-9]\d{5}([ -])\d{8}\1\d{3}[\dXx])(?![0-9A-Za-z])"
+)
 _BANK_CARD = re.compile(r"(?<!\d)\d(?:[ -]?\d){15,18}(?!\d)")
-_CN_PHONE = re.compile(r"(?<![\d])(?:(?:\+|00)?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?![\d])")
+# A dot may separate the groups too (``138.1234.5678``); then, as for North American numbers, a
+# dot with a digit on its other side is a decimal point and the number is something else.
+_CN_PHONE = re.compile(
+    r"(?<![\d])(?:(?:\+|00)?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?![\d])"
+    r"|(?<![\d.])(?:(?:\+|00)?86[-.\s]?)?1[3-9]\d\.\d{4}\.\d{4}(?![\d])(?!\.\d)"
+)
 # A dot next to the number is only a decimal point when a digit is on its other side
 # (``3.14159``, ``192.168.100.1234``, ``312-555-0123.5``); a dot that ends a sentence
 # (``call me at 312-555-0123.``) is not (R17-9, D-640).
@@ -137,12 +159,19 @@ _PROVINCE = (
 )
 _CJK = r"[一-鿿]"
 _STREET = rf"{_CJK}{{1,6}}(?:大街|大道|街道|路|街|巷|弄|胡同)"
+# Between the street and the house number a section (``人民南路四段``, ``天府大道北段``) and a lane
+# (``张江路88弄``) may stand (R18-A4, D-766).
+_STREET_SECTION = r"(?:\s?(?:[一二三四五六七八九十]{1,3}|\d{1,2}|[东南西北中])段)?"
+_LANE = r"(?:\s?\d{1,4}\s?[弄巷])?"
 _HOUSE_NUMBER = r"\d{1,5}(?:[-－]\d{1,4})?\s?号"
+# A room number written straight after ``号`` (``愚园路1088弄5号601``); not a year or an amount
+# (``88号2026年``) - those have a unit after them.
+_BARE_ROOM = r"(?<=号)\d{3,4}(?![\d年月日时点分秒元块岁个次号楼层栋幢座单人天周])"
 _CN_STREET_ADDRESS = re.compile(
     rf"(?:{_PROVINCE})?(?:{_CJK}{{2,3}}(?:市|州|盟))?(?:{_CJK}{{1,4}}(?:区|县|旗))?"
-    rf"(?:{_CJK}{{1,4}}(?:镇|乡|街道))?{_STREET}\s?{_HOUSE_NUMBER}"
+    rf"(?:{_CJK}{{1,4}}(?:镇|乡|街道))?{_STREET}{_STREET_SECTION}{_LANE}\s?{_HOUSE_NUMBER}"
     rf"(?:\s?\d{{1,3}}\s?(?:栋|幢|座|号楼))?(?:\s?\d{{1,2}}\s?单元)?(?:\s?\d{{1,2}}\s?层)?"
-    rf"(?:\s?\d{{1,4}}\s?(?:室|房))?"
+    rf"(?:\s?\d{{1,4}}\s?(?:室|房)|{_BARE_ROOM})?"
 )
 _CN_BUILDING_ADDRESS = re.compile(
     r"(?:(?:\d{1,3}\s?(?:栋|幢|号楼)\s?\d{0,2}\s?单元\s?\d{1,4}\s?(?:室|房|号)?)"
@@ -197,14 +226,15 @@ def _detect_wxid(text: str) -> Iterable[_Hit]:
     for match in _WXID.finditer(text):
         yield _Hit("wxid", match.start(), match.end(), match.group(0))
     for match in _WXID_LABELLED.finditer(text):
-        group = 1 if match.group(1) else 2
+        group = next(index for index in (1, 2, 3) if match.group(index))
         yield _Hit("wxid", match.start(group), match.end(group), match.group(group))
 
 
 def _detect_id_card(text: str) -> Iterable[_Hit]:
     for match in _ID_CARD.finditer(text):
-        if is_valid_id_card(match.group(0)):
-            yield _Hit("id_card", match.start(), match.end(), match.group(0).upper())
+        number = re.sub(r"[ -]", "", match.group(0))  # written in groups of 6, 8 and 4 (R18-A4)
+        if is_valid_id_card(number):
+            yield _Hit("id_card", match.start(), match.end(), number.upper())
 
 
 def _detect_bank_card(text: str) -> Iterable[_Hit]:
