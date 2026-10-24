@@ -312,24 +312,33 @@ def format_dpo_state(state: dict[str, Any]) -> list[str]:
         return lines
     if kind != "done":
         return lines
+    held = int(state.get("held_out") or 0)
+    trained = state.get("trained", state.get("pairs"))
     lines.append(
-        f"  dataset {state.get('dataset_version')}: {state.get('pairs')} preference pair(s) "
-        "in dpo_train.jsonl"
+        f"  dataset {state.get('dataset_version')}: {trained} preference pair(s) "
+        f"in dpo_train.jsonl, {held} held out in dpo_holdout.jsonl for the stack choice"
     )
     lines.append(f"  in {state.get('directory')}")
     if state.get("regenerated"):
         lines.append(
-            f"  {state.get('regenerated')} system segment(s) made again for the card "
-            f"{state.get('persona_version')} and the template {state.get('template_version')} "
-            "the adapter is locked to"
+            f"  every system segment made again as of its pair's moment ({state.get('regenerated')}"
+            f"), with the card {state.get('persona_version')} and the template "
+            f"{state.get('template_version')} the adapter is locked to"
         )
     skipped = state.get("skipped") or {}
     if skipped:
         lines.append("  left out: " + ", ".join(f"{why} {n}" for why, n in sorted(skipped.items())))
+    later = int(state.get("after_cutoff") or 0)
+    if later:
+        cutoff = str(state.get("cutoff") or "?")
+        lines.append(
+            f"  {later} pair(s) were made after the hold-out cut-off {cutoff} of the dataset: "
+            "they wait for an export with a later cut-off (D-860)"
+        )
     if not state.get("enough"):
         lines.append(
-            f"  DPO needs at least {state.get('minimum')} pairs; with fewer, dpo.sh skips the step "
-            "(more come with /不像 <正确说法>)"
+            f"  DPO needs at least {state.get('minimum')} pairs made before the hold-out cut-off; "
+            "with fewer, dpo.sh skips the step (more come with /不像 <正确说法>)"
         )
     lines.append("  next: twin train bundle --profile <profile> --dataset <that directory>")
     return lines

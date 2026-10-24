@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import ast
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from tests.support.clock import ManualClock
 from tests.support.embedding import HashingBackend
 from tests.support.export_plans import run_with_plans
 from tests.support.export_world import World, build_world
@@ -28,7 +29,7 @@ from twin.training import lf_template
 from twin.training.dpo_export import export_dpo
 from twin.training.export import ExportOptions, TrainingSetExporter
 from twin.training.export_blocks import MessageLoader, block_from_rows, iter_block_refs
-from twin.training.layout import FILE_DPO
+from twin.training.layout import FILE_DPO, FILE_DPO_HOLDOUT
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "twin"
 MARKER = "只在偏好对里被拒绝的那句话"
@@ -186,7 +187,9 @@ def test_a_rejected_reply_is_in_the_dpo_file_and_never_in_the_sft_set(
     world: World, tmp_path: Path
 ) -> None:
     services = world.services
-    store = PreferencePairStore(services.db, services.clock)
+    # the correction is stored before the hold-out cut-off: DPO only trains on such pairs (D-860)
+    moment = world.cutoff - timedelta(hours=2)
+    store = PreferencePairStore(services.db, ManualClock(moment + timedelta(hours=1)))
     reply_id = new_id()
     with services.db.transaction(bump_state=False) as session:  # the reply, in the bot's table
         now = services.clock.now_utc()
@@ -206,7 +209,7 @@ def test_a_rejected_reply_is_in_the_dpo_file_and_never_in_the_sft_set(
             )
     store.add(
         reply_id=reply_id,
-        sample=PromptSample("系统", (lf_template.Turn("user", "在吗"),), NOW_FOR_PAIR),
+        sample=PromptSample("系统", (lf_template.Turn("user", "在吗"),), moment),
         chosen=WORDING,
         rejected=MARKER,
         template_version=lf_template.TEMPLATE_VERSION,
@@ -227,8 +230,8 @@ def test_a_rejected_reply_is_in_the_dpo_file_and_never_in_the_sft_set(
     )
     file = dpo.dataset.path / FILE_DPO
     assert MARKER in file.read_text(encoding="utf-8")  # the negative of the pair, here only
-    for path in dpo.dataset.path.iterdir():
-        if path.name != FILE_DPO:
+    for path in dpo.dataset.path.iterdir():  # the held-out pairs are DPO's as well (D-861)
+        if path.name not in (FILE_DPO, FILE_DPO_HOLDOUT):
             assert MARKER not in path.read_text(encoding="utf-8"), path.name
 
 
