@@ -177,7 +177,10 @@ class HealthMonitor:
                         detail=_check_facts(check),
                         dedup_key=f"health:{check.name}",
                     )
-                    self._open[check.name] = _Open(check.category, report.at)
+                    # held back by the hourly limit, the notice goes out when the hour is over:
+                    # the reminders count from then (D-893, "之后照常按提醒周期")
+                    told_at = alerts.resend_due(check.category) or report.at
+                    self._open[check.name] = _Open(check.category, told_at)
             elif known is not None:
                 alerts.recover(known.category, f"{check.name} is back to normal")
                 del self._open[check.name]

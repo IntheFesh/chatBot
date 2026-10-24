@@ -13,7 +13,9 @@ behind it - the only code that writes the ``alerts`` table:
   per category goes out per ``ops.alert_cooldown_min`` (an hour), counted from the newest
   notice of the category that went out, an alert or a recovery; a repeat is stored as
   ``suppressed``, whatever its severity (D-700, round 17: the SPEC's "同类 1 小时最多 1 封" has
-  no exception);
+  no exception).  A held-back alert is not forgotten (round 18, user decision, D-893): when the
+  hour is over and the category is still open (nobody reported it gone), it is sent once - the
+  worst of the held-back ones, the newest among equals - and the usual reminders follow;
 * when the cause is gone, :meth:`AlertService.recover` closes the open alerts of the category and
   queues **one** "recovered" notice - only if the user's last news of the category was an alert.
   Inside the cooldown that notice is put off until the hour is over (``mail_next_at``) and a new
@@ -47,6 +49,7 @@ ALERT_KEEP_DAYS = 90
 STALE_AFTER = timedelta(hours=24)  # a notice that was never delivered is not sent a day later
 CLAIM_LEASE = timedelta(minutes=2)  # a delivery attempt that did not report back is retried
 NOTICE_LOOKBACK = 8  # newest announced rows read to find the last notice of a category
+SEVERITY_RANK = {name: rank for rank, name in enumerate(ALERT_SEVERITIES)}
 
 
 class AlertSink(Protocol):
@@ -335,11 +338,16 @@ class AlertService:
         announce = is_announced(canonical, severity)
         now = self._clock.now_utc()
         suppressed = False
+        resend_at: datetime | None = None
         with self._db.transaction(bump_state=False) as session:
             if announce:
                 suppressed = self._held_back(session, canonical, now)
                 # the problem is back: a "recovered" notice that is still waiting would lie
                 self._withdraw_waiting_recovery(session, canonical, now)
+                if suppressed:  # told when the hour is over, if it still holds then (D-893)
+                    resend_at = self._end_of_hour(session, canonical, now)
+                else:  # this notice tells the news the held-back ones would have told
+                    self._forget_held_back(session, canonical, now)
             wanted = announce and not suppressed
             session.add(
                 Alert(
@@ -352,6 +360,7 @@ class AlertService:
                     suppressed=suppressed,
                     toast_state="pending" if wanted else "none",
                     mail_state="pending" if wanted else "none",
+                    mail_next_at=resend_at,
                     created_at=now,
                     updated_at=now,
                 )
@@ -409,6 +418,87 @@ class AlertService:
             return False
         return now - max(self._noticed_at(row) for row in gone) < self._cooldown
 
+    def _hour_over(self, session: Any, category: str) -> datetime | None:
+        """When the cooldown of the category's last notice that went out ends (``None``: none)."""
+        gone = self._gone_notices(session, category)
+        return max(self._noticed_at(row) for row in gone) + self._cooldown if gone else None
+
+    def _end_of_hour(self, session: Any, category: str, now: datetime) -> datetime:
+        """The moment a held-back alert raised ``now`` is to be sent (D-893).
+
+        The end of the cooldown of the category's last notice, but never later than a notice may
+        wait before it counts as expired (``STALE_AFTER``), so a very long cooldown does not drop
+        it quietly (as for a put-off recovery, D-700).
+        """
+        expires = now + STALE_AFTER - CLAIM_LEASE
+        over = self._hour_over(session, category)
+        return expires if over is None else min(over, expires)
+
+    @staticmethod
+    def _held_back_rows(session: Any, category: str | None = None) -> list[Alert]:
+        """Held-back alerts still waiting for the end of their hour (open, not shown), oldest
+        first; of one category or of all."""
+        stmt = select(Alert).where(
+            Alert.kind == "alert",
+            Alert.suppressed.is_(True),
+            Alert.resolved_at.is_(None),
+            Alert.mail_next_at.is_not(None),
+            Alert.toast_state == "none",
+            Alert.mail_state == "none",
+        )
+        if category is not None:
+            stmt = stmt.where(Alert.category == category)
+        return list(session.scalars(stmt.order_by(Alert.created_at, Alert.id)))
+
+    def _forget_held_back(self, session: Any, category: str, now: datetime) -> None:
+        for row in self._held_back_rows(session, category):
+            row.mail_next_at = None
+            row.updated_at = now
+
+    def _resend_held_back(self, session: Any, now: datetime) -> None:
+        """Send, once per category, an alert that was held back and still holds (D-893).
+
+        Run where the notices are claimed, so the moment is the end of the hour as the delivery
+        sees it.  A category recovered meanwhile has its rows closed and is not selected; one
+        whose last notice went out later than reckoned (a mail sent on a retry) waits for the
+        end of that notice's hour; one told by a newer alert already needs nothing more.
+        """
+        groups: dict[str, list[Alert]] = {}
+        for row in self._held_back_rows(session):
+            groups.setdefault(row.category, []).append(row)
+        for category, rows in groups.items():
+            if not any(row.mail_next_at is not None and row.mail_next_at <= now for row in rows):
+                continue
+            gone = self._gone_notices(session, category)
+            if any(n.kind == "alert" and n.created_at > rows[-1].created_at for n in gone):
+                self._forget_held_back(session, category, now)  # a newer alert told it
+                continue
+            fresh = [row for row in rows if now - row.created_at <= STALE_AFTER - CLAIM_LEASE]
+            if not fresh:
+                self._forget_held_back(session, category, now)  # too old to be news
+                continue
+            chosen = max(fresh, key=lambda row: (SEVERITY_RANK[row.severity], row.created_at))
+            over = self._hour_over(session, category)
+            if over is not None and now < over <= chosen.created_at + STALE_AFTER - CLAIM_LEASE:
+                for row in rows:  # the last notice went out later than reckoned: its hour
+                    row.mail_next_at = over
+                    row.updated_at = now
+                continue
+            for row in rows:
+                row.mail_next_at = None
+                row.updated_at = now
+            chosen.suppressed = False
+            chosen.toast_state = "pending"
+            chosen.mail_state = "pending"
+            log.info("alert_resent_after_cooldown", category=category, severity=chosen.severity)
+
+    def resend_due(self, category: str) -> datetime | None:
+        """When a held-back alert of ``category`` is to be sent (D-893), or ``None``."""
+        canonical = canonical_category(category)
+        with self._db.session() as session:
+            moments = [row.mail_next_at for row in self._held_back_rows(session, canonical)]
+        return min((moment for moment in moments if moment is not None), default=None)
+
     def _withdraw_waiting_recovery(self, session: Any, category: str, now: datetime) -> None:
         """A new alert of the category takes the waiting "recovered" notice back (D-700)."""
         for row in self._notices(session, category):
@@ -444,6 +534,8 @@ class AlertService:
                 return False
             for row in open_rows:
                 row.resolved_at = now
+                if row.suppressed:  # held back and now gone: nothing to send at the hour (D-893)
+                    row.mail_next_at = None
             notices = self._notices(session, canonical)
             gone = [row for row in notices if not self._is_waiting(row)]
             told = any(
@@ -492,6 +584,7 @@ class AlertService:
         """Alerts with a channel still to deliver, leased to the caller for two minutes."""
         now = self._clock.now_utc()
         with self._db.transaction(bump_state=False) as session:
+            self._resend_held_back(session, now)
             rows = list(
                 session.scalars(
                     select(Alert)

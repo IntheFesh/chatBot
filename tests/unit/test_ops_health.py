@@ -7,6 +7,7 @@ import gc
 import shutil
 from collections import namedtuple
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -692,3 +693,60 @@ async def test_r18_d1_failed_jobs_are_announced_once_and_retrying_them_sends_the
         ("recovery", False),
     ]
     assert rows[1].toast_state == "pending" and rows[1].mail_state == "pending"
+
+
+async def test_r18_d8_a_held_back_failure_is_told_when_the_hour_ends_and_reminded_from_then(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8-② (D-893): the failed-jobs warning flaps - announced, recovered, failing again
+    within the hour (held back).  It is told once when the hour is over, and the reminder comes
+    ``remind_h`` after that notice ("之后照常按提醒周期")."""
+    from tests.support.ops import RecordingMailer, RecordingNotifier
+    from twin.ops.alert_delivery import AlertDelivery
+
+    mailer = RecordingMailer()
+    delivery = AlertDelivery(
+        services.alerts,
+        clock,
+        notifier=RecordingNotifier(),
+        mailer=mailer,
+        recipient=lambda: "me@example.org",
+        zone=lambda: ZoneInfo("America/Chicago"),
+    )
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    channel = log_in(services)
+
+    async def look() -> None:
+        channel.record_poll_success()  # the channel is fine all along
+        await monitor.tick()
+        await delivery.deliver_once()
+
+    told = "[wechat-twin] 有后台任务处于失败状态"
+    queue = JobQueue(services.db, clock)
+    failed_job(queue, "memory_extract")
+    await look()
+    assert [m.subject for m in mailer.sent] == [told]
+    clock.tick(2 * 60)
+    queue.retry_failed()
+    finish_all(queue, "memory_extract")
+    await look()  # good again: "recovered", put off to the end of the hour
+    clock.tick(2 * 60)
+    failed_job(queue, "image_caption")
+    await look()  # failing again four minutes after the first notice: held back
+    assert len(mailer.sent) == 1
+
+    clock.tick(56 * 60)  # the hour of the first notice is over
+    await look()
+    assert [m.subject for m in mailer.sent] == [told, told]
+    resent_at = clock.now_utc()
+
+    clock.tick(6 * 3600 - 60)  # remind_h after the notice, less a minute
+    await look()
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs" and a.kind == "alert"]
+    assert len(rows) == 2 and len(mailer.sent) == 2  # no reminder yet
+    clock.tick(60)
+    await look()
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs" and a.kind == "alert"]
+    assert len(rows) == 3 and not rows[-1].suppressed
+    assert [m.subject for m in mailer.sent] == [told] * 3
+    assert rows[-1].created_at - resent_at == timedelta(hours=6)
