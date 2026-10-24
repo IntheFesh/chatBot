@@ -343,6 +343,24 @@ async def test_an_evaluation_with_both_stacks_compares_them_and_tells_the_instan
     assert json.loads(written[f"{ARTIFACTS}/{STACK_CHOICE_JSON}"][0])["keep"] == "dpo"
     assert record(rig, "eval")["stack_kept"] == "dpo"
     assert "stack kept: dpo" in rig.echoed
+    assert files.pair_scores == {} and files.reference is None  # an old package: nothing scored
+
+
+async def test_the_held_out_pairs_and_the_dpo_reference_reach_the_judge(rig: Rig) -> None:
+    """R18-E6 (D-862, D-863): the scores of the held-out pairs under both stacks and how DPO's
+    reference model was chosen (it decides which statistic the main criterion uses)."""
+    base = f"{ARTIFACTS}/eval"
+    texts = rig.session.handle.texts
+    texts[f"{base}/dpo/eval_metrics.json"] = json.dumps({"eval_loss": 1.1})
+    for stack in ("sft", "dpo"):
+        texts[f"{base}/{stack}/eval_generations.jsonl"] = f"{stack}-lines"
+        texts[f"{base}/{stack}/pair_logps.jsonl"] = f"{stack}-pair-scores"
+    texts[f"{ARTIFACTS}/dpo/dpo_reference.json"] = json.dumps({"reference": "base"})
+    assert (await rig.steps.evaluate(RUN)).ok
+    [files] = rig.judged
+    assert files.pair_scores == {"sft": "sft-pair-scores", "dpo": "dpo-pair-scores"}
+    assert files.reference == {"reference": "base"}
+    assert any("paired bootstrap" in line for line in rig.echoed)
 
 
 async def test_a_comparison_that_cannot_be_made_fails_the_evaluation_without_a_verdict(

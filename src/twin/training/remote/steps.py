@@ -13,9 +13,9 @@ Each public method of :class:`RemoteSteps` is one command of ``twin train remote
     one script each, as a background job that survives a dropped connection.  ``dpo`` copies how
     the reference model was chosen (``artifacts/dpo/dpo_reference.json``: the SFT model, or - for
     the 4-bit profile only - the base after a fall-back) into the run record (D-651); ``evaluate``
-    runs both adapter stacks on the same test contexts when a DPO adapter exists, compares them
-    on this machine (:mod:`twin.training.stack_choice`) and writes the winner back to the
-    instance, where ``export.sh`` reads it (D-655);
+    runs both adapter stacks on the same test contexts and held-out preference pairs when a DPO
+    adapter exists, compares them on this machine (:mod:`twin.training.stack_choice`) and writes
+    the winner back to the instance, where ``export.sh`` reads it (D-655, D-862);
 ``download``
     the files named by ``artifacts/manifest.json`` into ``data/models/<run_id>/``, every one
     checked against its sha256;
@@ -46,6 +46,7 @@ from twin.training.remote.jobs import JobOutcome, RemoteJobs
 from twin.training.remote.session import RemoteSession
 from twin.training.runs import RunStore, RunView
 from twin.training.stack_choice import (
+    RESAMPLES,
     STACKS,
     StackChoiceError,
     StackFiles,
@@ -55,6 +56,7 @@ from twin.training.stack_choice import (
 
 PROGRESS_STEP_PERCENT = 10
 DPO_REFERENCE_FILE = "dpo/dpo_reference.json"
+PAIR_SCORES_FILE = "pair_logps.jsonl"  # eval.sh: the held-out pairs scored per stack (D-862)
 STACK_CHOICE_JSON = "eval/stack_choice.json"
 STACK_CHOICE_STATE = "state/stack_choice"
 
@@ -427,12 +429,17 @@ class RemoteSteps:
         if self._stack_judge is None:
             raise RemoteError("no judge for the adapter stacks was given")
         texts: dict[str, str] = {}
+        pair_scores: dict[str, str] = {}
         metrics: dict[str, dict[str, Any]] = {"dpo": dpo_metrics}
         for stack in STACKS:
             remote = f"{base}/{stack}/eval_generations.jsonl"
+            scored = f"{base}/{stack}/{PAIR_SCORES_FILE}"
 
             async def read(remote: str = remote) -> str | None:
                 return await self._read_text(remote)
+
+            async def read_scores(scored: str = scored) -> str | None:
+                return await self._read_text(scored)
 
             text = await self._session.retrying(
                 read, what=f"reading the generations of the {stack} stack"
@@ -440,9 +447,21 @@ class RemoteSteps:
             if text is None:
                 raise RemoteError(f"the instance has no {remote}")
             texts[stack] = text
+            # the held-out preference pairs scored under the stack: none in an older package
+            scores = await self._session.retrying(
+                read_scores, what=f"reading the held-out pair scores of the {stack} stack"
+            )
+            if scores is not None:
+                pair_scores[stack] = scores
         sft_metrics = await self._read_json(f"{base}/sft/eval_metrics.json")
         metrics["sft"] = sft_metrics or {}
-        verdict = self._stack_judge(StackFiles(texts, metrics))
+        reference = await self._read_json(f"{self._layout.artifacts}/{DPO_REFERENCE_FILE}")
+        self._echo(
+            "comparing the sft and the dpo stack: the held-out preference pairs and a paired "
+            f"bootstrap over the test contexts ({RESAMPLES} draws; a few minutes for thousands "
+            "of contexts)"
+        )
+        verdict = self._stack_judge(StackFiles(texts, metrics, pair_scores, reference))
 
         async def write() -> None:
             handle = await self._session.files()
