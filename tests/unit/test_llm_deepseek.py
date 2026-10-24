@@ -165,14 +165,20 @@ class Rig:
             ]
 
     async def drive(self, awaitable: Awaitable[T], *, step: float = 10.0) -> T:
-        """Run ``awaitable`` while the manual clock is advanced to release backoff sleeps."""
+        """Run ``awaitable`` while the manual clock is advanced to release backoff sleeps.
+
+        The clock moves only while the client sleeps, and to that sleep's end at most: time that
+        passes while an attempt is still being booked (a thread, slow on a loaded machine) would
+        otherwise eat a live call's 30 s retry window (D-890) and change what is tested.
+        """
         task = asyncio.ensure_future(awaitable)
         for _ in range(500):
             if task.done():
                 break
             await asyncio.wait({task}, timeout=0.01)
-            if not task.done():
-                await self.clock.advance(step)
+            pause = self.clock.next_wake_in()
+            if not task.done() and pause is not None:
+                await self.clock.advance(min(step, pause))
         return await task
 
 

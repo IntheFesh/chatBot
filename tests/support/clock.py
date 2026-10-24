@@ -66,6 +66,16 @@ class ManualClock:
     def pending_sleepers(self) -> int:
         return sum(1 for _, _, fut in self._waiters if not fut.done())
 
+    def next_wake_in(self) -> float | None:
+        """Seconds until the earliest sleeper wakes; ``None`` while nobody sleeps.
+
+        A test that drives code pausing between attempts advances by exactly this, so the time
+        that passes is the code's own pauses - not the test's step size (a retry window counted
+        on this clock then sees what it would see in real life).
+        """
+        pending = [wake for wake, _, fut in self._waiters if not fut.done()]
+        return max(0.0, min(pending) - self._mono) if pending else None
+
     async def settle(self, rounds: int = 25) -> None:
         """Let every runnable task, and work handed to threads, reach its next await.
 

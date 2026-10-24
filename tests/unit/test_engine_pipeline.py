@@ -299,14 +299,15 @@ async def test_a_reply_the_service_cut_off_never_becomes_a_bubble(
     """
     route = route_of(api, *[ok(content="我今天去", finish=reason) for _ in range(5)])
     task = asyncio.ensure_future(pipeline.run(context(), view()))
-    for _ in range(500):  # the retries pause on the manual clock
-        if task.done():
+    for _ in range(500):  # the retries pause on the manual clock: it moves by exactly those
+        if task.done():  # pauses, so a reply's 30 s retry window (D-890) counts only them
             break
         await asyncio.wait({task}, timeout=0.01)
-        if not task.done():
-            await clock.advance(10)
+        pause = clock.next_wake_in()
+        if not task.done() and pause is not None:
+            await clock.advance(pause)
     draft = await task
-    assert route.call_count == 5
+    assert route.call_count == 5  # four pauses of at most 1.5 + 3 + 6 + 12 s fit in 30 s
     assert draft.needs_fallback and draft.fallback_reason == "backend_error"
     assert draft.bubbles == () and "我今天去" not in json.dumps(
         [a.detail for a in draft.actions], ensure_ascii=False
