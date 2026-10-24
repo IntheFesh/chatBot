@@ -56,17 +56,12 @@ from twin.eval.sandbox import (
 )
 from twin.eval.store import EvalStore, ItemView, NewItem, RunView
 from twin.eval.ui import KeySource, ask
-from twin.llm.errors import (
-    BudgetDeniedError,
-    CircuitOpenError,
-    InvalidRequestError,
-    StructuredOutputError,
-)
+from twin.llm.errors import InvalidRequestError, StructuredOutputError
 from twin.llm.runtime import LlmRuntime
 from twin.llm.types import ChatMessage, LedgerTag, Purpose
 from twin.memory.api import memory_view
 from twin.memory.records import FactRecord
-from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, job_handler
+from twin.ops.jobs import BatchTooLargeError, JobContext, job_handler
 from twin.ops.logging import get_logger
 from twin.stickers.catalog import StickerCatalog
 
@@ -495,17 +490,12 @@ async def handle_eval_memory(ctx: JobContext) -> None:
         raise RuntimeError("eval_memory needs the services container")
     payload = ctx.job.payload
     batch_id = payload.get("batch_id")
-    try:
-        summary = await ask_items(
-            services,
-            str(payload["run_id"]),
-            [str(i) for i in payload.get("item_ids", [])],
-            str(batch_id) if batch_id else None,
-        )
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    summary = await ask_items(
+        services,
+        str(payload["run_id"]),
+        [str(i) for i in payload.get("item_ids", [])],
+        str(batch_id) if batch_id else None,
+    )
     log.info(
         "eval_questions_asked",
         asked=summary.asked,

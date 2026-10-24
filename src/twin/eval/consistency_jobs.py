@@ -19,9 +19,8 @@ from __future__ import annotations
 from datetime import timedelta
 
 from twin.eval.consistency_audit import run_audit
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import build_llm_runtime
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.ops.recurring import Weekly
 from twin.services import Services
@@ -67,12 +66,7 @@ async def handle_consistency(ctx: JobContext) -> None:
         raise RuntimeError("the consistency audit needs the services container")
     days = int(ctx.job.payload.get("days") or services.settings.eval.consistency_days)
     runtime = build_llm_runtime(services)
-    try:
-        outcome = await run_audit(services, runtime.client, days=days)
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    outcome = await run_audit(services, runtime.client, days=days)
     if outcome.findings:
         services.alerts.raise_alert(
             REVIEW_ALERT,

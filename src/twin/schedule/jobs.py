@@ -14,12 +14,11 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
 from twin.llm.runtime import build_llm_runtime
 from twin.llm.types import DAILY
 from twin.memory.lifeline_gen import LifelineGenerator
 from twin.memory.memory import Memory
-from twin.ops.jobs import JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.schedule.plan_model import DailyPlan
 from twin.schedule.service import schedule_kit
@@ -61,12 +60,7 @@ async def handle_lifeline_generate(ctx: JobContext) -> None:
         return
     runtime = build_llm_runtime(services)
     generator = LifelineGenerator(Memory(services), runtime.client, kit.time)
-    try:
-        result = await generator.generate(plan, DAILY)
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    result = await generator.generate(plan, DAILY)
     await asyncio.to_thread(store.mark_lifeline_done, plan.id, services.clock.now_utc())
     log.info(
         "lifeline_job_done",

@@ -20,8 +20,13 @@ level   effect (cumulative)
 Replying to the user is never refused (``allow("reply")`` is always true).  The SPEC's third
 step pauses *proactive messages* and nothing else, so from level 3 on :meth:`BudgetManager.allow`
 refuses :attr:`~twin.llm.types.Purpose.PROACTIVE` and no other purpose (D-115, revised in
-round 17): the daily life line (``plan``), summaries, extraction and captions keep going, only
-with their thinking switched off by the client.  A hybrid backend's planning step therefore no
+round 17): the daily life line (``plan``), summaries, extraction and captions keep going.  The
+client switches thinking off for the chat (``reply``) from level 1 and for the planner (``plan``,
+``proactive``) from level 3 (:attr:`BudgetLimits.chat_thinking_allowed`,
+:attr:`BudgetLimits.planner_thinking_allowed`); every other purpose - summaries, extraction,
+captions, the consistency audit - keeps the thinking its caller asks for at every level: the
+SPEC's steps name only the chat's thinking (R-LLM-008; corrected in round 18, D-804).  A hybrid
+backend's planning step therefore no
 longer needs to be booked as ``reply`` to escape a refusal (D-275 kept the label, but the
 refusal it worked around is gone).  An alert is raised
 once when a period reaches ``budget.alert_ratio`` and once for every level entered; the "already
@@ -241,7 +246,16 @@ class BudgetManager:
         return True
 
     def limits(self) -> BudgetLimits:
-        level = self.current_level()
+        """The limits of the current level; a level change is announced (alert, setting)."""
+        return self.limits_of(self.status())
+
+    def limits_of(self, status: BudgetStatus) -> BudgetLimits:
+        """The limits ``status`` allows - no side effects.
+
+        A read-only command passes :meth:`compute` here (``limits_of(compute())``, D-798): it may
+        not write the ``budget.level`` setting or raise the alerts :meth:`status` announces.
+        """
+        level = status.level
         style_ready = level >= BudgetLevel.STYLE_OR_MINIMAL and self._style.available()
         minimal = level >= BudgetLevel.STYLE_OR_MINIMAL and not style_ready
         if level >= BudgetLevel.STYLE_OR_MINIMAL:

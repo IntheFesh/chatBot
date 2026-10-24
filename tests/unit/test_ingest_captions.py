@@ -267,15 +267,69 @@ async def test_the_picture_that_was_sent_is_the_stored_one(
 async def test_a_failed_description_is_retried_and_finished_ones_are_kept(
     services: Services, imported: SynthExport, api: respx.MockRouter
 ) -> None:
+    """A picture the model could not describe makes the job retry; the finished ones stay.
+
+    R18-D1 (D-795): the failure used to be a 401.  A rejected key is no longer this picture's
+    failure - the job goes back to the queue without an attempt (next test) - so the failure
+    here is one that is about the request: a 400.
+    """
     plan = plan_caption_batches(services, days=90)
     runtime = build_llm_runtime(services)
     runtime.batches.approve(plan.batches[0].batch_id)
     route = api.post(API)
-    route.side_effect = [caption_reply("第一张")] + [error(401, "bad key")] * 100
+    route.side_effect = [caption_reply("第一张")] + [error(400, "invalid image input")] * 100
     summary = await run_queue(services)
     assert summary.retried >= 1 and summary.failed == 0
     stored = [c for c in captions(services).values() if c]
     assert stored == ["第一张"]
+
+
+@pytest.mark.parametrize(("status", "message"), [(401, "bad key"), (402, "Insufficient Balance")])
+async def test_a_rejected_key_or_an_empty_account_hands_the_job_back(
+    services: Services, imported: SynthExport, api: respx.MockRouter, status: int, message: str
+) -> None:
+    """R18-D1 (D-795): before, every picture of the job counted as failed, the job was retried
+    twice and then failed for good; now the job waits an hour, keeps what it already finished,
+    and costs no attempt."""
+    plan = plan_caption_batches(services, days=90)
+    runtime = build_llm_runtime(services)
+    runtime.batches.approve(plan.batches[0].batch_id)
+    route = api.post(API)
+    route.side_effect = [caption_reply("第一张")] + [error(status, message)] * 100
+    summary = await run_queue(services)
+    assert summary.deferred >= 1 and summary.retried == 0 and summary.failed == 0
+    assert [c for c in captions(services).values() if c] == ["第一张"]
+    queue = JobQueue(services.db, services.clock)
+    waiting = queue.list_jobs(job_type=CAPTION_JOB, status="pending")
+    assert waiting and all(job.attempts == 0 for job in waiting)
+    assert queue.list_jobs(job_type=CAPTION_JOB, status="failed") == []
+
+
+async def test_a_description_the_service_cut_off_is_never_stored(
+    services: Services, imported: SynthExport, api: respx.MockRouter, clock: ManualClock
+) -> None:
+    """R18-D2 (D-796): "一只猫趴在" with ``finish_reason=insufficient_system_resource`` is not a
+    description.  Before, it was stored for good; now the client asks again, the job retries
+    when the service keeps stopping half-way, and only a whole sentence is kept."""
+    asset_id = image_assets(services)[0]
+    CaptionService(services).queue_caption(asset_id)
+    route = api.post(API)
+    route.side_effect = [
+        ok(content="一只猫趴在", finish="insufficient_system_resource") for _ in range(5)
+    ] + [caption_reply("一只猫趴在窗台上")]
+    task = asyncio.ensure_future(run_queue(services))
+    for _ in range(500):  # the client's pauses between attempts are on the manual clock
+        if task.done():
+            break
+        await asyncio.wait({task}, timeout=0.01)
+        if not task.done():
+            await clock.advance(10)
+    first = await task
+    assert route.call_count == 5 and first.retried == 1
+    assert captions(services)[asset_id] is None  # the fragment was never stored
+    clock.tick(31)
+    second = await run_queue(services)
+    assert second.done == 1 and captions(services)[asset_id] == "一只猫趴在窗台上"
 
 
 async def test_when_the_daily_budget_is_exhausted_a_single_request_is_still_described(

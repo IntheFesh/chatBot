@@ -122,12 +122,32 @@ def jobs_show(
 
 @jobs_app.command("retry")
 @command(CommandKind.LIGHT)
-def jobs_retry(job_id: Annotated[str, typer.Argument(help="Job id")]) -> None:
-    """Re-queue a failed or cancelled job with a fresh attempt budget."""
+def jobs_retry(
+    job_id: Annotated[str | None, typer.Argument(help="Job id")] = None,
+    failed: Annotated[
+        bool,
+        typer.Option("--failed", help="Re-queue every failed job instead of one (after an outage)"),
+    ] = False,
+    job_type: Annotated[
+        str | None, typer.Option("--type", help="With --failed: only jobs of this type")
+    ] = None,
+) -> None:
+    """Re-queue a failed or cancelled job (or every failed one) with a fresh attempt budget."""
+    if (job_id is None) == (not failed):
+        raise CliError("give a job id, or --failed for every failed job", ExitCode.USAGE)
+    if job_type is not None and not failed:
+        raise CliError("--type goes with --failed", ExitCode.USAGE)
     services = get_cli_context().services()
-    if not _queue(services).retry(job_id):
-        raise CliError(f"job {job_id} does not exist or is not failed/cancelled")
-    typer.echo(f"job {job_id} queued again")
+    if job_id is not None:
+        if not _queue(services).retry(job_id):
+            raise CliError(f"job {job_id} does not exist or is not failed/cancelled")
+        typer.echo(f"job {job_id} queued again")
+        return
+    requeued = _queue(services).retry_failed(job_type=job_type)
+    if not requeued:
+        typer.echo("no failed job" + (f" of type {job_type}" if job_type else ""))
+        return
+    typer.echo(f"{len(requeued)} failed job(s) queued again")
 
 
 @jobs_app.command("cancel")
@@ -185,7 +205,8 @@ def jobs_run(
             await close_llm_runtime(services)
         typer.echo(
             f"done={summary.done} retried={summary.retried} "
-            f"failed={summary.failed} discarded={summary.discarded}"
+            f"failed={summary.failed} discarded={summary.discarded} "
+            f"deferred={summary.deferred}"  # handed back: DeepSeek cannot do them now (D-795)
         )
 
     if force:  # a second worker beside the application cannot hold the lock the application has

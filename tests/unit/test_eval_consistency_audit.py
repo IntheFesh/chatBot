@@ -38,7 +38,13 @@ from twin.eval.consistency_model import DROPPED_UNKNOWN_REF
 from twin.eval.consistency_store import ConsistencyStore, NewFix
 from twin.eval.isolation import IsolationViolation, changes, isolated_writes, snapshot
 from twin.eval.store import EvalStore
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError, StructuredOutputError
+from twin.llm.errors import (
+    AuthenticationFailedError,
+    BudgetDeniedError,
+    CircuitOpenError,
+    InsufficientBalanceError,
+    StructuredOutputError,
+)
 from twin.llm.runtime import build_llm_runtime
 from twin.profile.prompt_templates import TemplateStore
 from twin.services import Services
@@ -270,12 +276,19 @@ class _HeldBack:
 
 @pytest.mark.parametrize(
     "error",
-    [BudgetDeniedError("consistency", 4), CircuitOpenError(300.0)],
-    ids=["budget", "circuit"],
+    [
+        BudgetDeniedError("consistency", 4),
+        CircuitOpenError(300.0),
+        InsufficientBalanceError("DeepSeek balance exhausted", status=402),
+        AuthenticationFailedError("DeepSeek rejected the API key", status=401),
+    ],
+    ids=["budget", "circuit", "balance", "key"],
 )
 async def test_a_call_that_is_held_back_cancels_the_run_and_lets_the_caller_wait(
     services: Services, error: Exception
 ) -> None:
+    """R18-D1 (D-795) added the empty account and the rejected key: DeepSeek cannot do it now,
+    so the run is cancelled (held back), not failed, and the job asks again later."""
     build_week(services)
     with pytest.raises(type(error)):
         await run_audit(services, _HeldBack(error), days=7)  # type: ignore[arg-type]

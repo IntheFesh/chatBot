@@ -35,8 +35,8 @@ from twin.config.secrets import (
 )
 from twin.config.settings import Settings
 from twin.ingest.conversations import MANY_FOUND, MANY_HINT, count_conversations_in_file
-from twin.llm.official import VISION_MODELS
-from twin.llm.pricing import PeakCalendar
+from twin.llm.official import can_read_images
+from twin.llm.pricing import PeakCalendar, Pricing
 from twin.ops.instance_lock import ALL_LOCKS, locks_held_elsewhere
 from twin.ops.power import describe_power_strategy
 from twin.ops.taskscheduler import (
@@ -424,17 +424,18 @@ def check_llm_config(ctx: DoctorContext) -> CheckResult:
     if ctx.settings is None:
         return CheckResult("llm-config", CheckStatus.WARN, "skipped (configuration did not load)")
     config = ctx.settings.deepseek
-    prices = ctx.settings.pricing_usd_per_mtok
+    # the client's own answers (rule 8, D-802): its price table with the retired aliases, and the
+    # one function that says whether a model can see
+    pricing = Pricing.from_settings(ctx.settings)
     problems: list[str] = []
     for role, model in (
         ("chat_model", config.chat_model),
         ("offline_model", config.offline_model),
         ("vision_model", config.vision_model),
     ):
-        canonical = {"deepseek-v4-flash": "deepseek-flash"}.get(model, model)
-        if canonical not in prices:
+        if not pricing.has_model(model):
             problems.append(f"deepseek.{role} {model!r} has no entry in pricing_usd_per_mtok")
-    if config.vision_model not in VISION_MODELS and config.vision_model != "deepseek-v4-flash":
+    if not can_read_images(config.vision_model):
         problems.append(f"deepseek.vision_model {config.vision_model!r} cannot read images")
     if problems:
         return CheckResult(
@@ -511,6 +512,20 @@ NVIDIA_QUERY = [
     "--format=csv,noheader",
 ]
 POWERCFG_QUERY = ["powercfg", "/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"]
+POWERCFG_LID_QUERY = ["powercfg", "/query", "SCHEME_CURRENT", "SUB_BUTTONS", "LIDACTION"]
+# the values of LIDACTION that stop the bot (0 is "do nothing"), D-803
+LID_ACTIONS = {
+    1: "puts the computer to sleep",
+    2: "hibernates the computer",
+    3: "shuts the computer down",
+}
+IDLE_HINT = (
+    "Settings > System > Power: set 'sleep' to Never (the bot also asks Windows to stay awake)"
+)
+LID_HINT = (
+    "Control Panel > Power Options > 'Choose what closing the lid does': set it to 'Do nothing' "
+    "(asking Windows to stay awake does not cover the lid)"
+)
 _HEX = re.compile(r"0x[0-9a-fA-F]{8}")
 
 
@@ -727,11 +742,11 @@ def check_scheduled_task(ctx: DoctorContext) -> CheckResult:
     return CheckResult("scheduled-task", CheckStatus.OK, "registered, InteractiveToken, no limit")
 
 
-def sleep_timeouts(output: str) -> tuple[int, int] | None:
-    """``(AC, DC)`` idle sleep timeout in seconds from ``powercfg /query``; 0 means never.
+def powercfg_ac_dc(output: str) -> tuple[int, int] | None:
+    """``(AC, DC)``: the current values of the one setting ``powercfg /query`` was asked for.
 
     The labels of the output are in the language of Windows, the two hexadecimal numbers at its
-    end (the current AC and DC setting) are not.
+    end (the current AC and DC setting) are not.  ``None`` if they are not there.
     """
     found = _HEX.findall(output)
     if len(found) < 2:
@@ -739,9 +754,39 @@ def sleep_timeouts(output: str) -> tuple[int, int] | None:
     return int(found[-2], 16), int(found[-1], 16)
 
 
+def sleep_timeouts(output: str) -> tuple[int, int] | None:
+    """``(AC, DC)`` idle sleep timeout in seconds from ``powercfg /query``; 0 means never."""
+    return powercfg_ac_dc(output)
+
+
+def lid_problem(ctx: DoctorContext) -> str | None:
+    """What closing the lid does, if it stops the bot; ``None`` if it does not or cannot be read.
+
+    A desktop has no lid: ``powercfg`` then refuses the setting or prints no values, and that is
+    not reported (D-803).
+    """
+    result = ctx.run(POWERCFG_LID_QUERY)
+    if result is None or result.returncode != 0:
+        return None
+    actions = powercfg_ac_dc(decode_output(result.stdout))
+    if actions is None:
+        return None
+    ac, dc = (action if action in LID_ACTIONS else 0 for action in actions)
+    if ac and ac == dc:
+        return f"closing the lid {LID_ACTIONS[ac]}"
+    found = []
+    if ac:
+        found.append(f"on mains power closing the lid {LID_ACTIONS[ac]}")
+    if dc:
+        found.append(f"on battery closing the lid {LID_ACTIONS[dc]}")
+    return "; ".join(found) or None
+
+
 @doctor_check
 def check_power_plan(ctx: DoctorContext) -> CheckResult:
-    """The power plan must not put the computer to sleep while the bot runs (R-OPS-002)."""
+    """The power plan must not put the computer to sleep while the bot runs (R-OPS-002): not
+    when it is idle, and not when its lid is closed (``SetThreadExecutionState`` does not cover
+    the lid, D-803)."""
     if ctx.platform != "win32":
         return CheckResult("power-plan", CheckStatus.OK, "not applicable (Windows only)")
     result = ctx.run(POWERCFG_QUERY)
@@ -751,23 +796,20 @@ def check_power_plan(ctx: DoctorContext) -> CheckResult:
             "power-plan", CheckStatus.WARN, "the sleep setting cannot be read (powercfg)"
         )
     ac, dc = timeouts
-    hint = (
-        "Settings > System > Power: set 'sleep' to Never (the bot also asks Windows to stay awake)"
-    )
+    problems: list[str] = []
+    hints: list[str] = []
     if ac:
-        return CheckResult(
-            "power-plan",
-            CheckStatus.WARN,
-            f"on mains power the computer sleeps after {ac // 60} min idle",
-            hint,
-        )
-    if dc:
-        return CheckResult(
-            "power-plan",
-            CheckStatus.WARN,
-            f"on battery the computer sleeps after {dc // 60} min idle (mains: never)",
-            hint,
-        )
+        problems.append(f"on mains power the computer sleeps after {ac // 60} min idle")
+    elif dc:
+        problems.append(f"on battery the computer sleeps after {dc // 60} min idle (mains: never)")
+    if problems:
+        hints.append(IDLE_HINT)
+    lid = lid_problem(ctx)
+    if lid is not None:
+        problems.append(lid)
+        hints.append(LID_HINT)
+    if problems:
+        return CheckResult("power-plan", CheckStatus.WARN, "; ".join(problems), "; ".join(hints))
     return CheckResult("power-plan", CheckStatus.OK, "sleep is set to never")
 
 

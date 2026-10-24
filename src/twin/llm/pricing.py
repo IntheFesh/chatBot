@@ -21,7 +21,7 @@ import chinese_calendar
 from twin.clock import ensure_aware
 from twin.config.settings import ModelPrice, Settings
 from twin.llm.errors import UnknownModelError
-from twin.llm.official import LEGACY_MODEL_ALIASES, PEAK_HOURS_UTC
+from twin.llm.official import PEAK_HOURS_UTC, canonical_model
 from twin.llm.types import CostBreakdown, Usage
 from twin.ops.jobs import OffPeakPolicy, set_offpeak_policy
 from twin.ops.logging import get_logger
@@ -204,7 +204,7 @@ class Pricing:
 
     def resolve(self, model: str) -> str:
         """Canonical model name: retired aliases are billed as ``deepseek-flash``."""
-        return LEGACY_MODEL_ALIASES.get(model, model)
+        return canonical_model(model)
 
     def price_for(self, model: str) -> ModelPrice:
         try:

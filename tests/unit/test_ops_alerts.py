@@ -530,6 +530,44 @@ async def test_a_second_process_does_not_send_what_the_first_holds(
     assert len(services.alerts.claim_due()) == 1  # the lease ran out: it is tried again
 
 
+async def test_a_process_that_starts_leaves_the_notice_the_other_one_is_sending(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D5 (D-799): ``twin run`` starting while ``twin supervise`` sends a notice.
+
+    Before: ``AlertDelivery.start`` cleared every lease, so the new process claimed the notice the
+    supervisor was still sending and the user got it twice.  Now the lease stands; a lease left
+    behind by a process that died runs out after two minutes and the notice is sent then.
+    """
+    from tests.support.waiting import wait_until
+
+    supervisor_side = AlertService(services.db, clock)
+    supervisor_side.raise_alert("process_restarted", "twin run ended", severity="warning")
+    (held,) = supervisor_side.claim_due()  # the supervisor is sending it (SMTP in flight)
+    clock.tick(6)  # twin run starts again five seconds later
+    notifier, mailer = RecordingNotifier(), RecordingMailer()
+    run_side = AlertDelivery(
+        AlertService(services.db, clock),
+        clock,
+        notifier=notifier,
+        mailer=mailer,
+        recipient=lambda: "me@example.org",
+        zone=lambda: CHICAGO,
+    )
+    await run_side.start()
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)  # its first pass is over
+        assert notifier.shown == [] and mailer.sent == []
+        assert await run_side.deliver_once() == 0
+        clock.tick(121)  # the supervisor died with the lease: it runs out, the notice goes out
+        assert await run_side.deliver_once() == 1
+    finally:
+        await run_side.stop()
+    assert len(notifier.shown) == 1 and len(mailer.sent) == 1
+    (view,) = [v for v in views(services.alerts) if v.id == held.id]
+    assert (view.toast_state, view.mail_state) == ("sent", "sent")
+
+
 async def test_the_component_delivers_when_woken(services: Services, clock: ManualClock) -> None:
     notifier = RecordingNotifier()
     delivery = make_delivery(services, clock, notifier=notifier, mailer=RecordingMailer())

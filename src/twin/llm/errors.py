@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 
 class LlmError(Exception):
     """Base class of everything the LLM layer raises on purpose."""
@@ -117,3 +120,34 @@ class StyleModelError(LlmError):
         super().__init__(message)
         self.status = status
         self.kind = kind  # "timeout" | "unavailable" | "status" | "malformed" | "error"
+
+
+# R18-D1 (D-795): the errors that say "DeepSeek cannot do this now" rather than "this work is
+# wrong", with how long background work waits before it asks again.  A rejected key and an empty
+# account are fixed by the user (``twin secrets set``, a top-up) and the budget by the next period,
+# so an hour; the breaker probes again after five minutes.  The job worker hands a job that meets
+# one of them back to the queue without counting an attempt (``twin.ops.jobs.Worker``); code that
+# works through a list of items lets them through instead of counting them as failed items.
+UNAVAILABLE_RETRY_S: Mapping[type[LlmError], float] = MappingProxyType(
+    {
+        BudgetDeniedError: 3600.0,
+        CircuitOpenError: 300.0,
+        AuthenticationFailedError: 3600.0,
+        InsufficientBalanceError: 3600.0,
+    }
+)
+SERVICE_UNAVAILABLE: tuple[type[LlmError], ...] = tuple(UNAVAILABLE_RETRY_S)
+
+
+def unavailable_retry_s(exc: BaseException) -> float | None:
+    """Seconds to wait before asking again if ``exc`` (or what it was raised from) says that
+    DeepSeek cannot do the work now; ``None`` for any other failure."""
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for kind, wait in UNAVAILABLE_RETRY_S.items():
+            if isinstance(current, kind):
+                return wait
+        current = current.__cause__
+    return None

@@ -48,7 +48,7 @@ from twin.eval.isolation import (
 from twin.eval.store import EvalStore, RunView
 from twin.llm.budget import LEVEL_KEY, NOTIFIED_KEY
 from twin.llm.deepseek import DeepSeekClient
-from twin.llm.errors import BudgetDeniedError, CircuitOpenError
+from twin.llm.errors import SERVICE_UNAVAILABLE
 from twin.llm.types import DAILY, JsonResult, Purpose
 from twin.memory.api import Memory
 from twin.ops.logging import get_logger
@@ -174,7 +174,7 @@ async def run_audit(
                 thinking=True,
                 tag=DAILY,
             )
-        except (BudgetDeniedError, CircuitOpenError) as exc:
+        except SERVICE_UNAVAILABLE as exc:  # held back, not failed; the job asks again
             await asyncio.to_thread(
                 estore.update_run,
                 run.id,

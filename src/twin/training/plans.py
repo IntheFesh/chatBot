@@ -38,17 +38,12 @@ from sqlalchemy import select
 
 from twin.engine.refusal import FILTER_FINISHES
 from twin.engine.style_prompt import PlanFields
-from twin.llm.errors import (
-    BudgetDeniedError,
-    CircuitOpenError,
-    InvalidRequestError,
-    StructuredOutputError,
-)
+from twin.llm.errors import InvalidRequestError, StructuredOutputError
 from twin.llm.redaction import redact_text
 from twin.llm.runtime import LlmRuntime, build_llm_runtime
 from twin.llm.types import DAILY, ChatMessage, LedgerTag, Purpose
 from twin.memory.render import SECTION_FACTS, SECTION_TODAY, heading
-from twin.ops.jobs import BatchTooLargeError, JobContext, JobDeferred, JobQueue, job_handler
+from twin.ops.jobs import BatchTooLargeError, JobContext, JobQueue, job_handler
 from twin.ops.logging import get_logger
 from twin.profile.prompt_templates import TRAIN_PLAN, PromptText, TemplateStore
 from twin.storage.db import Database
@@ -541,12 +536,7 @@ async def handle_training_plan(ctx: JobContext) -> None:
     tag = LedgerTag("one_time", str(batch_id)) if batch_id else DAILY
     ids = [str(i) for i in payload.get("ids", [])]
     runtime = build_llm_runtime(services)
-    try:
-        written, refused = await write_plans(services, runtime, ids, tag)
-    except BudgetDeniedError as exc:
-        raise JobDeferred(str(exc), retry_in_s=3600.0) from exc
-    except CircuitOpenError as exc:
-        raise JobDeferred("DeepSeek circuit breaker is open", retry_in_s=300.0) from exc
+    written, refused = await write_plans(services, runtime, ids, tag)
     log.info("training_plans_written", written=written, refused=refused, samples=len(ids))
 
 
