@@ -23,6 +23,7 @@ from twin.memory.asof import AsOfSource
 from twin.retrieval.records import NotHerMessageError
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
 from twin.storage.chat_models import Message
 from twin.storage.crypto import KeyRing
 from twin.storage.engine_models import BotTurn
@@ -321,9 +322,11 @@ def test_the_registry_locks_the_versions_the_export_used_and_renders_with_them(
     ref = next(r for r in iter_block_refs(services) if r.sample_id == row["id"])
     (block,) = MessageLoader(services).load([ref])
     label = StickerCatalog(services).tag_lookup()
+    users = user_sticker_lines(StickerCatalog(services))  # as the exporter (D-840)
     turns = [
         StyleTurn(
-            "user" if t[0].data.is_sent else "assistant", context_text([m.data for m in t], label)
+            "user" if t[0].data.is_sent else "assistant",
+            context_text([m.data for m in t], label, users),
         )
         for t in block.context
     ]

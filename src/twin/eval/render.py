@@ -10,7 +10,9 @@ sticker) and the fragment that is quoted - and only then shown, by one function,
   with two lines and two bubbles with one line each look the same;
 * a sticker is always ``[表情包：<描述>]``, the description of the sticker library for its MD5
   (the bot's sticker is looked up the same way as hers);
-* a quote is always one first line ``[引用：<被引用的话>]`` of at most 30 characters;
+* a quote is always one first line ``[引用：<被引用的话>]``; the words are cut and escaped by
+  :func:`twin.ingest.events.quote_fragment` - at most 30 characters, ``]`` as ``)`` - the one
+  rule the model reads a quote by, online, in training and in the sandbox (D-840);
 * emoji codes (``[拥抱]``) stay as they are.
 
 The messages of the conversation before the reply are shown with the same rules
@@ -26,10 +28,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from twin.ingest.events import Kind, default_detector, render_event_text
+from twin.ingest.events import (
+    Kind,
+    default_detector,
+    quote_fragment,
+    quoted_source,
+    render_event_text,
+)
 from twin.retrieval.records import MessageData
 
-QUOTE_CHARS = 30
 STICKER_UNLABELLED = "未标注"
 STICKER_LABEL_CHARS = 40
 HER_LABEL = "她"
@@ -111,19 +118,11 @@ def text_lines(text: str | None) -> list[str]:
     ]
 
 
-def quote_fragment(source: str | None) -> str | None:
-    """The quoted words as shown: one line, at most 30 characters, ``]`` written as ``)``."""
-    fragment = clean(source)[:QUOTE_CHARS].rstrip().replace("]", ")")
-    return fragment or None
-
-
 def quote_of(message: MessageData) -> str | None:
     """What a quoting message quotes, as shown; ``None`` for any other message."""
     if message.kind != Kind.QUOTE.value:
         return None
-    quote = message.quote or {}
-    source = quote.get("quoteContent") or quote.get("quoteTitle")
-    return quote_fragment(source) if isinstance(source, str) else None
+    return quote_fragment(quoted_source(message.quote))
 
 
 def sticker_text(md5: str, label: StickerLabel) -> str:

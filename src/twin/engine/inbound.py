@@ -5,7 +5,7 @@ made once when the message arrives and stored as it is in ``bot_turns`` (the sam
 appears in every later prompt, which keeps the cache prefix unchanged, R-LLM-010):
 
 =============  =====================================================================
-text           the words; a quote reply is preceded by ``[引用:<被引用的内容>]``
+text           the words; a quote reply is preceded by ``[引用:<被引用的话，至多 30 字>]``
 picture        ``[图片：<描述>]`` - described now by the vision model within
                ``ingest.caption_wait_timeout_s``; ``[图片]`` if that does not work out
 voice          ``[语音：<转写>]`` from the transcript WeChat made, ``[语音，未转写]`` without
@@ -21,8 +21,12 @@ as a sticker, with the library's description and no API call; any other image is
 (R17-5, D-690).
 
 The bracket forms are the event-text templates of :mod:`twin.ingest.events` - the same text the
-real history uses - so the model sees one notation everywhere.  The renderer never raises for a
-picture it cannot describe: the reply goes on without the description.
+real history uses - so the model sees one notation everywhere.  The sticker line
+(:attr:`~twin.stickers.incoming.StickerDescription.text`) and the quote line
+(:func:`~twin.ingest.events.quote_line`) are the very functions the training export and the
+evaluation sandbox write the user's stickers and quotes with (iron rule 8, R-TRN-011, D-840), so
+the style model reads in the running bot what it was trained and gated on.  The renderer never
+raises for a picture it cannot describe: the reply goes on without the description.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ from twin.channel.base import InboundMessage, MediaRef, MessageKind, QuoteInfo
 from twin.engine.types import InboundItem
 from twin.ingest.captions import CaptionService
 from twin.ingest.events import Kind, render_event_text
+from twin.ingest.events import quote_line as shared_quote_line
 from twin.llm.deepseek import DeepSeekClient
 from twin.ops.logging import get_logger
 from twin.stickers.incoming import describe_incoming_sticker, recognise_library_sticker
@@ -70,11 +75,15 @@ class _EventView:
 
 
 def quote_line(quote: QuoteInfo | None) -> str | None:
-    """``[引用:<内容>]`` for a quote reply that carries something to show, else ``None``."""
+    """``[引用:<内容>]`` for a quote reply that carries something to show, else ``None``.
+
+    The quoted text (its title when the channel has no text) goes through the one quote line of
+    :func:`twin.ingest.events.quote_line` - the training set and the evaluation write a quote of
+    her history with it too (D-840).
+    """
     if quote is None:
         return None
-    shown = " ".join((quote.text or quote.title or "").split())
-    return f"[引用:{shown}]" if shown else None
+    return shared_quote_line(quote.text or quote.title)
 
 
 def media_record(message: InboundMessage) -> dict[str, Any] | None:

@@ -49,6 +49,7 @@ from twin.profile.persona import compose
 from twin.retrieval.windows import window_id_of
 from twin.services import Services
 from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
 from twin.storage.chat_models import Message
 from twin.storage.engine_models import BotTurn
 from twin.storage.ids import new_id
@@ -250,6 +251,7 @@ def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Pa
     builder = StylePromptBuilder.from_services(services)
     loader = MessageLoader(services)
     label = StickerCatalog(services).tag_lookup()
+    users = user_sticker_lines(StickerCatalog(services))  # as the exporter (D-840)
     by_id = {row["id"]: row for row in all_rows(dataset)}
     checked = proactive = 0
     for ref in iter_block_refs(services, across_gaps=True):
@@ -260,7 +262,7 @@ def test_the_prompt_is_the_one_the_running_bot_builds(world: World, tmp_path: Pa
         turns = [
             StyleTurn(
                 "user" if turn[0].data.is_sent else "assistant",
-                context_text([m.data for m in turn], label),
+                context_text([m.data for m in turn], label, users),
             )
             for turn in block.context
         ]

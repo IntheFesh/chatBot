@@ -12,6 +12,11 @@
    answer is the plain ``[表情包]`` and nothing is cached: the reply goes on without a
    description rather than waiting.
 
+The line of a sticker the user sent is :attr:`StickerDescription.text` and nothing else: the
+training export and the evaluation sandbox write the user's stickers of her real history with it
+too, from what the library alone says (:func:`library_description`, :func:`user_sticker_lines`),
+so the style model is trained, gated and served on one notation (iron rule 8, D-840).
+
 A channel delivers every picture as an image (iLink has no item type for stickers, D-010), so
 the engine asks :func:`recognise_library_sticker` first: a picture whose bytes - the SHA-256 of
 the stored file, or failing that its MD5 - are in the library is a sticker; any other is a photo
@@ -23,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -113,6 +119,46 @@ def _from_record(record: StickerRecord, source: str) -> StickerDescription:
     return StickerDescription(record.md5, record.tags, record.description, source)
 
 
+def library_description(record: StickerRecord | None, md5: str | None = None) -> StickerDescription:
+    """What the library alone says about a sticker the user sent - no picture is looked at.
+
+    A row with a description and tags answers (``source="library"``); anything else is not known
+    (``"none"``, whose line is the plain ``[表情包]``).  The reply path asks this first and only
+    then looks at the picture; the training export and the sandbox can only ask this.
+    """
+    if record is not None and record.description and record.tags:
+        return _from_record(record, "library")
+    return StickerDescription(
+        md5 or (record.md5 if record is not None else None),
+        record.tags if record is not None else (),
+        None,
+        "none",
+    )
+
+
+def user_sticker_lines(catalog: StickerCatalog) -> Callable[[str | None], str]:
+    """``md5 -> the line of a sticker the user sent``, read from the library once (D-840).
+
+    For the training export and the evaluation sandbox, which write the user's stickers of her
+    real history: the line is :attr:`StickerDescription.text` of :func:`library_description` -
+    exactly what the reply path writes for a sticker the library knows.  What the library holds is
+    the same at every moment of the history (R-TRN-013): the description is of the picture alone,
+    the tags are the ones the training labels come from (picture, hand tags, and her uses before
+    the hold-out cutoff only, D-691).  A sticker the library does not describe is ``[表情包]``.
+    """
+    table = {
+        record.md5: described.text
+        for record in catalog.records()
+        if (described := library_description(record)).known
+    }
+
+    def line(md5: str | None) -> str:
+        key = md5.strip().lower() if md5 else ""
+        return table.get(key, FALLBACK_TEXT)
+
+    return line
+
+
 def _cache(
     services: Services, catalog: StickerCatalog, md5: str, data: bytes | None, seen: Vision
 ) -> StickerRecord:
@@ -157,8 +203,9 @@ async def describe_incoming_sticker(
         return NOTHING
     catalog = StickerCatalog(services)
     record = await asyncio.to_thread(catalog.get, key)
-    if record is not None and record.description and record.tags:
-        return _from_record(record, "library")
+    known = library_description(record, key)
+    if known.known:
+        return known
     source = (
         ImageInput.from_bytes(image, detail=DETAIL_STICKER)
         if image is not None
@@ -169,7 +216,7 @@ async def describe_incoming_sticker(
         )
     )
     if source is None:
-        return StickerDescription(key, record.tags if record else (), None, "none")
+        return known
     # the process's one client (D-701): a caller that passes its own keeps closing it itself
     runtime = build_llm_runtime(services) if client is None else None
     active = client if client is not None else (runtime.client if runtime else None)

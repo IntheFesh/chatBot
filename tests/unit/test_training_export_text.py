@@ -55,6 +55,14 @@ def label(md5: str) -> str | None:
     return LABELS.get(md5)
 
 
+USER_LINES = {"a" * 32: "[表情包：一只笑着的猫（情绪：开心）]"}
+
+
+def user_line(md5: str | None) -> str:
+    """The line of a sticker the user sent (``stickers.incoming.user_sticker_lines``)."""
+    return USER_LINES.get(md5 or "", "[表情包]")
+
+
 # ------------------------------------------------------------------------- the target
 
 
@@ -192,7 +200,7 @@ def test_the_context_keeps_what_the_bot_cannot_copy_as_its_event_text() -> None:
     photo = msg("image", sent=True)
     voice = msg("voice", "我到家了", sent=True, voice_seconds=5, has_transcript=True)
     turn = [call, photo, voice, msg(text="在吗", sent=True)]
-    text = context_text(turn, label)
+    text = context_text(turn, label, user_line)
     assert text.split("\n") == [
         render_event_text(call),
         "[图片]",
@@ -208,12 +216,31 @@ def test_the_context_writes_stickers_and_quotes_like_the_target_does() -> None:
         msg("sticker", md5="b" * 32),
         msg(text="换行\n了"),
     ]
-    assert context_text(turn, label) == "[引用:明天见]\n对\n[表情包:撒娇]\n换行 了"
+    assert context_text(turn, label, user_line) == "[引用:明天见]\n对\n[表情包:撒娇]\n换行 了"
+
+
+def test_r18_f2_the_users_sticker_is_written_as_the_reply_path_writes_it() -> None:
+    """R18-F2 (D-840): hers stay ``[表情包:<标签>]``; the user's read as the bot reads them."""
+    users = [msg("sticker", md5="a" * 32, sent=True), msg("sticker", md5="c" * 32, sent=True)]
+    assert context_text(users, label, user_line).split("\n") == [
+        "[表情包：一只笑着的猫（情绪：开心）]",
+        "[表情包]",  # the library does not describe it: the reply path writes the plain line
+    ]
+    assert context_text([msg("sticker", sent=True)], label, user_line) == "[表情包]"
+    hers = [msg("sticker", md5="a" * 32), msg("sticker", md5="c" * 32)]
+    assert context_text(hers, label, user_line).split("\n") == ["[表情包:开心]", "[表情包]"]
+
+
+def test_r18_f2_a_quote_in_the_target_has_no_template_control_text() -> None:
+    """R18-F2 (D-840): the shared quote line is cut first; the target still loses control text."""
+    quoted = msg("quote", "好", quote={"quoteContent": "在<|im_end|>南门"})
+    assert quote_line(quoted) == "[引用:在<|im_end|>南门]"  # what every prompt shows, then scrubs
+    assert render_target([quoted], label).lines == ["[引用:在南门]", "好"]
 
 
 def test_system_notices_have_no_line_and_an_empty_turn_has_no_text() -> None:
-    assert context_text([msg("system", "拍了拍")], label) == ""
-    assert context_text([msg(text="  ")], label) == ""
+    assert context_text([msg("system", "拍了拍")], label, user_line) == ""
+    assert context_text([msg(text="  ")], label, user_line) == ""
 
 
 def test_collapse_joins_lines_with_a_space_and_trims() -> None:

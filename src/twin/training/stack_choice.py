@@ -38,8 +38,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 from twin.engine.parsing import parse_reply
-from twin.eval.render import Candidate, CandidateLine, quote_fragment, text_lines
+from twin.eval.render import Candidate, CandidateLine, text_lines
 from twin.eval.style_metrics import TOLERANCE, MetricResult, StyleReport, style_of_candidates
+from twin.ingest.events import quote_fragment
 from twin.profile.api import load_profile
 
 if TYPE_CHECKING:
