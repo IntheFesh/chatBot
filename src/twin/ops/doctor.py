@@ -130,6 +130,8 @@ def _store_as_it_is() -> SecretStore:
     is wrong with it and to point to ``twin secrets migrate``.
     """
     return SecretStore.default(allow_weak_file_store=True)
+
+
 _CHECKS: list[DoctorCheck] = []
 
 
