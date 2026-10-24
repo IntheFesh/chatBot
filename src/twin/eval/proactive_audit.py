@@ -5,22 +5,25 @@
 
 * **deep sleep** - no message went out while she was in deep sleep (the core of the night): zero;
 * **the range** - the number of messages that went out is inside the range the day was planned
-  with (``[daily_min, daily_max]``; ``[0, 0]`` when proactive messages were off).  A day *below* its
-  minimum is excused when the log shows why the platform or the user stopped it: the window was
-  over or the count used up, nobody was logged in, a pause, the switch, the budget (the
-  messages "suppressed by the window" of R-PRO-003); a day *above* its maximum never is;
+  with (``[daily_min, daily_max]``; ``[0, 0]`` when proactive messages were off).  Above the
+  maximum is a violation on every day.  Below the minimum it depends on the kind of day (round
+  18, user decision, D-850):
+
+  - an **excused day** (免责日) is a day she could write on whose count stayed *below* its minimum
+    while the log shows a refusal from outside the schedule - the platform window or count, the
+    login, the budget, a running channel probe, a user who does not answer (the chase limit); it
+    is neither a violation nor a day of observation, and the reasons are kept for the report;
+  - a **day of observation** (观察日) is every other day she could write on (watched, the switch
+    on, not paused, the range above ``0``): its count must be strictly inside the range, below the
+    minimum included - a day inside its range is one even if something was refused that day;
+  - a day the user switched off (``/主动 关``), paused (``/暂停``) or planned for ``0-0``, and a day
+    the scheduler did not run, is neither: it shows nothing of "会主动" and is not counted (R17-14,
+    D-663; a pause is a user's decision, so it does not excuse - it takes the day out);
+
 * **spacing and chase** - two messages are at least ``min_spacing_min`` apart, and a message
   that nobody answered is followed by at most ``max_chase`` more;
 * **the edge of sleep** - at most ``edge_of_sleep_weekly_max`` messages sent at the edge of her
-  sleep in any seven days;
-* **observed** - the scheduler opened the day (it was running): a day without a mark was not
-  watched, so it counts for nothing and ends the streak of observed days;
-* **active** (R17-14, D-663) - the day was one on which she could write: no row of the day says
-  the switch was off and the upper end of the range is above zero.  A quiet day with proactive
-  messages off, or planned for ``0-0``, breaks no rule and is ``compliant``, but it shows nothing
-  of what the gate is about, so only **active** days count in the streak: a week with the switch
-  off is "not enough yet", never "passed".  Sending on such a day is still a violation (its range
-  is ``0-0``).
+  sleep in any seven days.
 
 Besides the verdict it keeps the distribution of the local hours the messages went out, the number
 of messages the window suppressed, the reasons of the other refusals and the ratings of the period.
@@ -30,7 +33,7 @@ The M3 gate (:mod:`twin.eval.proactive_gate`) is made of exactly these numbers.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -44,13 +47,27 @@ from twin.schedule.proactive.store import (
     RatingStore,
     average,
 )
-from twin.schedule.proactive.types import OUTSIDE_REASONS, WINDOW_REASONS
+from twin.schedule.proactive.types import (
+    OUTSIDE_REASONS,
+    REASON_LABELS,
+    WINDOW_REASONS,
+    Reason,
+)
 from twin.schedule.time_service import TimeService
 
 WEEK = timedelta(days=7)
-INACTIVE_NOTE = "当天主动消息关闭/范围 0-0，不计入观察"
+INACTIVE_NOTE = "当天主动消息关闭、暂停或范围 0-0，不计入观察"
+UNOBSERVED_NOTE = "程序没有运行（当天没有记录），不计入观察"
 OUTSIDE = frozenset(reason.value for reason in OUTSIDE_REASONS)
 WINDOW = frozenset(reason.value for reason in WINDOW_REASONS)
+USER_OFF = frozenset({Reason.PAUSED.value, Reason.DISABLED.value})  # /暂停 and /主动 关
+EXTERNAL = OUTSIDE - USER_OFF  # what excuses a day below its minimum (D-850)
+
+
+def describe_reasons(reasons: Mapping[str, int]) -> str:
+    """``被窗口抑制 2、平台条数用完 1``: the most frequent first (ties by the code)."""
+    ordered = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))
+    return "、".join(f"{REASON_LABELS.get(key, key)} {count}" for key, count in ordered)
 
 
 @dataclass(frozen=True)
@@ -69,9 +86,10 @@ class DayAudit:
     chase_violations: int
     suppressed_window: int
     refused: dict[str, int]
-    excused: bool
+    excused: bool  # the log shows a refusal from outside the schedule (:data:`EXTERNAL`)
     hours: dict[int, int]
-    switched_off: bool = False  # a row of the day says the switch was off (``enabled`` False)
+    switched_off: bool = False  # a row of the day says the switch was off (``/主动 关``)
+    paused: bool = False  # a candidate of the day was refused because of ``/暂停``
 
     @property
     def effective_range(self) -> tuple[int, int] | None:
@@ -81,25 +99,46 @@ class DayAudit:
         return (0, 0) if self.enabled is False else (self.low, self.high)
 
     @property
+    def user_off(self) -> bool:
+        """The user took the day out: proactive messages switched off or paused."""
+        return self.switched_off or self.paused
+
+    @property
     def active(self) -> bool:
         """A watched day on which she could write (see the module description)."""
-        return self.observed and not self.switched_off and self.high is not None and self.high > 0
+        return self.observed and not self.user_off and self.high is not None and self.high > 0
+
+    @property
+    def exempt(self) -> bool:
+        """An excused day: below the minimum because of a refusal from outside (D-850)."""
+        return self.active and self.low is not None and self.sent < self.low and self.excused
+
+    @property
+    def observation(self) -> bool:
+        """A day of observation: one she could write on that is not excused (D-850)."""
+        return self.active and not self.exempt
+
+    @property
+    def exempt_reasons(self) -> dict[str, int]:
+        """The refusals from outside that excused the day (empty unless it is excused)."""
+        if not self.exempt:
+            return {}
+        return {key: count for key, count in self.refused.items() if key in EXTERNAL}
 
     @property
     def count_ok(self) -> bool:
+        """Never above the maximum; below the minimum only on a day that is not observed."""
         bounds = self.effective_range
         if bounds is None:
-            return False
+            return True  # no range was planned (the scheduler did not run): nothing to hold to
         low, high = bounds
         if self.sent > high:
             return False
-        return self.sent >= low or self.excused
+        return self.sent >= low or not self.observation
 
     @property
     def problems(self) -> list[str]:
         found: list[str] = []
-        if not self.observed:
-            return ["程序没有运行（当天没有记录）"]
         if self.deep_sleep:
             found.append(f"深睡时段发了 {self.deep_sleep} 条")
         if not self.count_ok:
@@ -114,18 +153,31 @@ class DayAudit:
 
     @property
     def notes(self) -> list[str]:
-        """What is worth saying about a day that breaks no rule: it is watched but idle."""
-        return [INACTIVE_NOTE] if self.observed and not self.active else []
+        """Why a day that breaks no rule is not a day of observation."""
+        if not self.observed:
+            return [UNOBSERVED_NOTE]
+        if not self.active:
+            return [INACTIVE_NOTE]
+        if self.exempt:
+            return [
+                f"免责日：发了 {self.sent} 条，少于下限 {self.low}，当天有外部拒绝"
+                f"（{describe_reasons(self.exempt_reasons)}），不计入观察"
+            ]
+        return []
 
     @property
     def compliant(self) -> bool:
-        return self.observed and not self.problems
+        """No rule broken (a day that is not observed breaks none by not being observed)."""
+        return not self.problems
 
     def to_json(self) -> dict[str, Any]:
         return {
             "day": self.day.isoformat(),
             "observed": self.observed,
             "active": self.active,
+            "user_off": self.user_off,
+            "exempt": self.exempt,
+            "observation": self.observation,
             "low": self.low,
             "high": self.high,
             "enabled": self.enabled,
@@ -149,7 +201,6 @@ class Audit:
     first_day: date
     last_day: date
     days: tuple[DayAudit, ...]
-    streak: int  # active days in a row (watched, switch on, range above 0), ending the last day
     edge_max_week: int
     edge_weekly_max: int
     ratings: tuple[RatingRow, ...]
@@ -182,7 +233,7 @@ class Audit:
 
     @property
     def count_ok(self) -> bool:
-        return all(day.observed and day.count_ok for day in self.days)
+        return all(day.count_ok for day in self.days)
 
     @property
     def compliant(self) -> bool:
@@ -190,26 +241,43 @@ class Audit:
         return all(day.compliant for day in self.days) and self.edge_ok
 
     @property
-    def complete(self) -> bool:
-        """The whole run was watched (a streak as long as the run)."""
-        return self.streak >= len(self.days)
+    def observation_days(self) -> int:
+        """Days of observation (D-850): she could write, and the day is not excused."""
+        return sum(1 for day in self.days if day.observation)
 
     @property
-    def missing_days(self) -> int:
-        return max(0, len(self.days) - self.streak)
+    def exempt_days(self) -> int:
+        """Excused days: below the minimum because of a refusal from outside (D-850)."""
+        return sum(1 for day in self.days if day.exempt)
+
+    @property
+    def exempt_reasons(self) -> Counter[str]:
+        """The refusals from outside on the excused days, by reason."""
+        found: Counter[str] = Counter()
+        for day in self.days:
+            found.update(day.exempt_reasons)
+        return found
 
     @property
     def inactive_days(self) -> int:
-        """Watched days that do not count: proactive messages were off or the range was ``0-0``."""
+        """Watched days that do not count: switched off, paused, or a range of ``0-0``."""
         return sum(1 for day in self.days if day.observed and not day.active)
+
+    @property
+    def unobserved_days(self) -> int:
+        """Days the scheduler did not run (no mark): they show nothing either way."""
+        return sum(1 for day in self.days if not day.observed)
 
     def to_json(self) -> dict[str, Any]:
         return {
             "first_day": self.first_day.isoformat(),
             "last_day": self.last_day.isoformat(),
             "days": [day.to_json() for day in self.days],
-            "streak": self.streak,
+            "observation_days": self.observation_days,
+            "exempt_days": self.exempt_days,
+            "exempt_reasons": dict(self.exempt_reasons),
             "inactive_days": self.inactive_days,
+            "unobserved_days": self.unobserved_days,
             "sent": self.sent,
             "deep_sleep": self.deep_sleep,
             "spacing_violations": self.spacing_violations,
@@ -218,7 +286,6 @@ class Audit:
             "edge_max_week": self.edge_max_week,
             "edge_weekly_max": self.edge_weekly_max,
             "compliant": self.compliant,
-            "complete": self.complete,
             "rating_count": len(self.ratings),
             "rating_mean": self.rating_mean,
             "hours": {str(hour): count for hour, count in sorted(self.hours.items())},
@@ -299,25 +366,22 @@ def audit_days(
                 chase_violations=sum(1 for row in sent if row.chase_seq > config.max_chase),
                 suppressed_window=sum(count for key, count in refused.items() if key in WINDOW),
                 refused=dict(refused),
-                excused=any(key in OUTSIDE for key in refused),
+                excused=any(key in EXTERNAL for key in refused),
                 hours=dict(hours),
-                switched_off=any(row.enabled is False for row in of_day),
+                switched_off=any(
+                    row.enabled is False or row.reason == Reason.DISABLED.value for row in of_day
+                ),
+                paused=Reason.PAUSED.value in refused,
             )
         )
         day += timedelta(days=1)
 
-    streak = 0
-    for item in reversed(days):
-        if not item.active:
-            break
-        streak += 1
     start = rating_from if rating_from is not None else now - WEEK
     given = tuple(ratings.between(start, now + timedelta(seconds=1)))
     return Audit(
         first_day=first_day,
         last_day=last_day,
         days=tuple(days),
-        streak=streak,
         edge_max_week=_edge_peak(sent_all),
         edge_weekly_max=config.edge_of_sleep_weekly_max,
         ratings=given,

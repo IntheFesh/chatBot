@@ -45,7 +45,7 @@ async def test_a_month_of_ticks_keeps_every_rule_and_hits_the_target(pro: World)
     for row in sent:
         assert str(time.her_state(row.at).kind) != "deep_sleep", row.local_at
     # every day is inside its range and watched
-    assert audit.complete and len(audit.days) == MONTH
+    assert audit.unobserved_days == 0 and audit.inactive_days == 0 and len(audit.days) == MONTH
     assert all(day.count_ok for day in audit.days), [
         (str(day.day), day.sent, day.low, day.high) for day in audit.days if not day.count_ok
     ]

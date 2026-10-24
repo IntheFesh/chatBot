@@ -425,8 +425,9 @@ def test_the_proactive_audit_and_the_stability_report_are_shown(services: Servic
         summary={
             "first_day": "2026-10-01",
             "last_day": "2026-10-07",
-            "days": [{}] * 7,
-            "streak": 7,
+            "days": [{}] * 10,
+            "observation_days": 7,
+            "exempt_days": 2,
             "sent": 21,
             "deep_sleep": 0,
             "spacing_violations": 0,
@@ -439,7 +440,8 @@ def test_the_proactive_audit_and_the_stability_report_are_shown(services: Servic
         },
     )
     row = table_rows(section(text_of(services), "### 2.5 主动消息审计"))[1]
-    assert row[0] == f"`{audit.id}`" and row[1] == "2026-10-01 至 2026-10-07" and row[2] == "7/7 天"
+    assert row[0] == f"`{audit.id}`" and row[1] == "2026-10-01 至 2026-10-07"
+    assert row[2] == "7/10 天（免责 2）"  # days of observation (D-850)
     assert row[3] == "21" and row[4] == "0" and row[5] == "0 / 0"
     assert (
         row[6] == "1（上限 2）"

@@ -73,6 +73,7 @@ from twin.eval.memory_test import (
     summarize,
 )
 from twin.eval.proactive_audit import audit_recent
+from twin.eval.proactive_gate import M3_DAYS, judge_days
 from twin.eval.proactive_report import print_audit
 from twin.eval.report import (
     print_blind_report,
@@ -485,12 +486,12 @@ def eval_gate(
 def eval_proactive(
     days: Annotated[
         int, typer.Option("--days", min=1, max=60, help="How many completed local days")
-    ] = 7,
+    ] = M3_DAYS,
     today: Annotated[
         bool, typer.Option("--today", help="Include today so far (a day that is not over)")
     ] = False,
 ) -> None:
-    """Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant."""
+    """Audit the proactive messages of the last days (R-EVAL-005); exit 1 unless M3's days hold."""
     services = _services()
     console = _interaction.console()
     audit = audit_recent(
@@ -502,17 +503,17 @@ def eval_proactive(
         days=days,
         include_today=today,
     )
-    good = audit.compliant and audit.complete
+    verdict, _ = judge_days(audit)  # the day rule of M3: 7 days of observation, 3 excused (D-850)
     run = _store(services).create_run(
         "proactive_audit",
         status="done",
-        verdict="passed" if good else ("insufficient" if not audit.complete else "failed"),
+        verdict=verdict,
         params={"days": days, "first_day": str(audit.first_day), "last_day": str(audit.last_day)},
         summary=audit.to_json(),
     )
     print_audit(console, audit)
     console.print(Text(f"审计记录：{run.id}"))
-    if not good:
+    if verdict != "passed":
         raise typer.Exit(1)
 
 

@@ -66,7 +66,7 @@ uv run twin secrets rotate-db-key           # 先 uv run twin service stop；轮
 | ☐ | D1 **M0** 技术验证 | `uv run twin llm probe`、`uv run twin channel probe start`…`report`，然后 `uv run twin eval gate M0` | `docs/LLM_REPORT.md` 与 `docs/CHANNEL_REPORT.md` 的文件头是 `measured`（不是 `pending`）；主动消息在窗口内稳定送达（R-CH-010）；DeepSeek 探针通过 | **待用户执行** |
 | ☐ | D2 **M1** 能聊、像她 | `uv run twin eval blind --backend deepseek --n 60` … `uv run twin eval gate M1` | 盲测猜对率 ≤ 70%，有效判断 ≥ 50 对 | **待用户执行** |
 | ☐ | D3 **M2** 记得住 | `uv run twin eval memory` … `uv run twin eval gate M2` | 记忆测试 ≥ 80%（10+10 构成完整） | **待用户执行** |
-| ☐ | D4 **M3** 有作息、会主动 | 连续真实运行 7 天后 `uv run twin eval proactive --days 7`、`uv run twin eval gate M3` | 深睡时段主动 0 次、每天次数在范围内、间隔与追发零违规、该周 `/评分` ≥ 4/5 | **待用户执行** |
+| ☐ | D4 **M3** 有作息、会主动 | 最近 10 天里攒够 7 个观察日后 `uv run twin eval proactive`、`uv run twin eval gate M3` | 深睡时段主动 0 次、每个观察日次数在范围内（免责日不超过 3 个）、间隔与追发零违规、这段时间 `/评分` ≥ 4/5 | **待用户执行** |
 | ☐ | D5 **M4** 持续成长 | 无人值守 7 天后 `uv run twin eval stability --days 7`、新的盲测、`uv run twin eval gate M4` | 无人值守 7 天（含一次断网演练）；盲测猜对率 ≤ 60% | **待用户执行** |
 | ☐ | D6 **M5** 风格模型（**只在训练过时**） | `uv run twin model evaluate <模型号>` … `uv run twin eval gate M5` | R-SRV-005；不通过就保留 DeepSeek 后端并在发布说明里写明，这**不阻塞**发布 | **待用户执行**（若训练） |
 | ☐ | D7 汇总报告（第 15 轮合并后） | `uv run twin eval report`，成本 `uv run twin eval cost --month <本月>`，一致性 `uv run twin eval consistency --days 7` | `data\reports\eval-<日期>.md` 列出 M0–M5 的门槛、当前值、样本数和证据来源，不含聊天正文；日常月费用 ≤ 15 美元 | **待用户执行** |

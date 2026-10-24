@@ -477,8 +477,17 @@ uv run twin eval memory --resume <运行号> --foreground         # DeepSeek 出
 ### 7.4 主动消息审计（M3）
 
 ```powershell
-uv run twin eval proactive --days 7        # 深睡时段 0 次、每天次数在范围内、间隔与追发零违规、边缘消息每周 ≤ 2、/评分 平均 ≥ 4
+uv run twin eval proactive                 # 最近 10 天：深睡时段 0 次、每天次数在范围内、间隔与追发零违规、边缘消息每周 ≤ 2、/评分 平均 ≥ 4
 ```
+
+M3 的观察口径（第 18 轮，你的决定，D-850）：看**最近 10 个自然日**，要有 **7 个观察日**，每个观察日发出的主动消息条数**严格**在当天的范围内。
+
+- **免责日**：当天发得比下限少，而且当天确有窗口关闭、条数用完、没登录、预算降级之类的外部拒绝。免责日既不算违规也不算观察日；10 天里**超过 3 个**免责日就判“样本不足”，报告列出这些拒绝的原因分布（例如“被窗口抑制 3、平台条数用完 1”）——这说明她想发却发不出去，要先解决窗口问题（每天给她发一条消息）。
+- 条数在范围内的日子照常是观察日，即使当天也有消息被窗口拦下。
+- 你 `/暂停` 或 `/主动 关` 的日子、范围是 0-0 的日子、程序没有运行的日子都**不算观察日**（不是违规，只是不计入）；关着的时候发出了消息仍是违规，任何一天超过上限都是违规。
+- 观察日不必连续：中间有一天没开电脑，不会让前面的天作废。
+
+`twin eval proactive` 的表格里“观察日”一列写“是 / 免责 / 否”，最后一行写观察日、免责日和不计入的天数；它的结论与 `twin eval gate M3` 的天数口径相同（只是不看 `/评分`），所以不足 7 个观察日时退出码为 1。
 
 ### 7.5 稳定性（M4）
 
@@ -701,7 +710,7 @@ uv run twin purge --all
 | **M0 技术验证** | ClawBot 收发、主动窗口与条数、图片/GIF、正在输入；DeepSeek 思考开关与缓存命中 | 通道探针：主动消息在窗口内稳定送达（窗口 ≥ 12 小时、连发 ≥ 3 条）；DeepSeek 探针按 R-LLM-013 口径通过；否则停下评估企业微信通道 | `twin llm probe`（第 1.4 节）、`twin channel probe start`…`report`（第 2.3 节）、`twin eval gate M0`；见 `PENDING_USER_ACTIONS.md` 第 01、02 轮 | 待用户执行 |
 | **M1 能聊、像她** | 导入、画像、生成与节奏、表情代码 | 盲测猜对率 ≤ 70%（点估计，有效判断 ≥ 50 对） | 第 3、4、5、7.1 节；`twin eval gate M1`；第 09b 轮 | 待用户执行 |
 | **M2 记得住** | 表情包库、记忆、指令 | 记忆测试 ≥ 80%（20 题，10+10 构成完整） | 第 7.3 节；`twin eval gate M2`；第 09b、11 轮（指令全集完成后复判） | 待用户执行 |
-| **M3 有作息、会主动** | 作息与真实模式、主动消息、思考开关 | **连续 7 天**真实运行：深睡时段主动 0 次、每天次数在范围内、间隔与追发零违规；该周 `/评分` ≥ 4/5 | 先确认 R-CH-010（上面的提示）；`twin run` 跑满 7 天；每天给她发一条；`twin eval proactive --days 7`、`twin eval gate M3`；第 10 轮 | 待用户执行 |
+| **M3 有作息、会主动** | 作息与真实模式、主动消息、思考开关 | **最近 10 个自然日内有 7 个观察日**（免责日、暂停或关闭的日子不算；免责日超过 3 个为样本不足，第 7.4 节）：深睡时段主动 0 次、每个观察日次数在范围内、间隔与追发零违规；这段时间 `/评分` ≥ 4/5 | 先确认 R-CH-010（上面的提示）；`twin run` 跑满 7 个观察日；每天给她发一条；`twin eval proactive`、`twin eval gate M3`；第 10 轮 | 待用户执行 |
 | **M4 持续成长** | 学习、增量导入、运维 | **无人值守 7 天**（全部由计划任务启动，期间做一次断网演练，学习和增量导入各成功一次）；**新的**盲测 ≤ 60% | 第 1.5、7.1、7.5 节；`twin eval stability --days 7`、`twin eval gate M4`；第 12 轮 | 待用户执行 |
 | **M5 风格模型** | 训练、评估、量化部署 | R-SRV-005（第 8.3 节）；不通过则保留 DeepSeek 后端（不阻塞其他任何事） | 第 6、8 章；`twin model evaluate`、`twin eval gate M5`；第 13、14 轮 | 待用户执行（若训练） |
 
@@ -741,7 +750,7 @@ uv run twin purge --all
 | `twin eval cost` | 轻量修改 | Month cost of the daily account against the 15 dollar line; one-time batches are listed apart (R-EVAL-007). |
 | `twin eval gate` | 轻量修改 | Judge a milestone; exit code 0 passed, 1 not passed, 2 not reached yet (R-EVAL-010). |
 | `twin eval memory` | 轻量修改 | Memory test: twenty questions from the fact store, judged and reviewed (R-EVAL-003). |
-| `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 if not compliant. |
+| `twin eval proactive` | 轻量修改 | Audit the proactive messages of the last days (R-EVAL-005); exit 1 unless M3's days hold. |
 | `twin eval report` | 轻量修改 | The summary report of the stored M0–M5 and measure results (R-EVAL-008). |
 | `twin eval runs` | 只读 | List the recent evaluation runs. |
 | `twin eval stability` | 轻量修改 | The stability report of the last days, from the health snapshots (R-EVAL-006). |
