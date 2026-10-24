@@ -356,7 +356,7 @@ uv run twin settings history backend.fallback   # 某个设置谁在什么时候
 ### 6.1 前提
 
 - 聊天记录已导入；`pre_holdout` 范围的画像、作息、人设卡（含 DeepSeek 写的 `[自动-描述]`，不只是统计规则）已生成（`uv run twin profile rebuild`、`uv run twin persona regenerate --scope pre_holdout`）；记忆回放覆盖要导出的日期范围（`uv run twin memory replay start` 并批准）。缺了哪个，`twin train export` 会停下并告诉你先做什么（第 18 轮起也检查回放与描述，D-817）；确实要先导出看看时加 `--allow-incomplete`，数据集的统计里会记下缺了什么（`derived_data`）。
-- 想做 DPO：用 `/不像 <正确说法>` 攒偏好对，≥ 200 对才有意义（`training.dpo_min_pairs`）。
+- 想做 DPO：用 `/不像 <正确说法>` 攒偏好对，≥ 200 对才有意义（`training.dpo_min_pairs`）。只算留出切分点之前存下的偏好对（第 18 轮，D-860）：新纠正都在切分点之后，要等切分点移过它们（重新导出训练集时）才能用；`/状态` 与 `uv run twin train retrain-check` 会分别列出两边的对数。
 
 ### 6.2 在 AutoDL 租卡并扩容数据盘
 
@@ -437,7 +437,7 @@ uv run twin model list
 
 她的新消息比上次训练数据多 10% 时会提醒（告警 + `/状态`），也可以 `uv run twin train retrain-check`。重训 = （先 `uv run twin retrieval resplit`，见下）→ 重新 `twin train export`（新版本号）→ `twin train bundle` → `twin train remote all`，从基座全量训练，不在旧适配器上叠加。训练集只取留出切分点之前的样本，切分点不随导入移动：不重切，上次之后导入的聊天全在留出集里，新导出的训练集与上次几乎一样（`retrain-check` 与 `export` 在切分点明显落后时会提示，第 18 轮 D-818）。偏好对单独走 DPO：`uv run twin train export-dpo` 生成带 `dpo_train.jsonl` 的新数据集版本，再打包训练。它是重任务：命令只把作业排进队列，由运行中的应用执行（应用没在运行时加 `--foreground` 在前台做完并打印结果）；结果之后随时可以用 `uv run twin train export-status` 查看。
 
-**DPO 的参考模型与适配器栈（第 17 轮，DECISIONS D-650 至 D-657）**：DPO 的参考模型是 SFT 模型，不是基座。bf16 三档（`5090-8b`、`pro6000-14b`、`pro6000-32b`）在合并了 SFT 的模型上新建一个 DPO 适配器（不多占显存和磁盘），所以模型是 `sft` + `dpo` 两个适配器叠加；`5090-14b`（4 比特）继续 SFT 适配器，参考是显式的 4 比特 SFT 模型，`dpo.sh` 先用最长的 64 条偏好对试跑 1 步，显存不够就降批大小，仍放不下才**仅这一档**退回“基座”作参考——退回时 `twin train remote dpo` 与 `twin train remote status` 会用大写的 `FALLBACK` 告诉你，`artifacts/dpo/dpo_reference.json`、训练报告（`artifacts/dpo/metrics.json`）和登记后的 `twin model show` 里也有。`twin train remote eval` 在有 DPO 适配器时用同一批留出样本评估 SFT 与 SFT+DPO 两个栈，按“风格指标在 ±30% 内的个数、偏差、验证集 loss”的顺序比较（全平保留 SFT），把更好的写回实例；`export` 合并的就是保留的那个（有 DPO 适配器却还没有评估的裁决时 `export.sh` 会停下，不会猜）。远程 vLLM 把两个适配器按秩拼接成一个适配器服务（`--max-lora-rank` 随之读自适配器配置）；`twin model register` 逐层核对哈希并记录适配器栈。第一次真实运行请留意：5090-14b 的试跑结果、`dpo_reference.json` 里的 `fallback`、两个栈的评估数字。
+**DPO 的参考模型与适配器栈（第 17 轮，DECISIONS D-650 至 D-657）**：DPO 的参考模型是 SFT 模型，不是基座。bf16 三档（`5090-8b`、`pro6000-14b`、`pro6000-32b`）在合并了 SFT 的模型上新建一个 DPO 适配器（不多占显存和磁盘），所以模型是 `sft` + `dpo` 两个适配器叠加；`5090-14b`（4 比特）继续 SFT 适配器，参考是显式的 4 比特 SFT 模型，`dpo.sh` 先用最长的 64 条偏好对试跑 1 步，显存不够就降批大小，仍放不下才**仅这一档**退回“基座”作参考——退回时 `twin train remote dpo` 与 `twin train remote status` 会用大写的 `FALLBACK` 告诉你，`artifacts/dpo/dpo_reference.json`、训练报告（`artifacts/dpo/metrics.json`）和登记后的 `twin model show` 里也有。`twin train remote eval` 在有 DPO 适配器时用同一批留出样本评估 SFT 与 SFT+DPO 两个栈，按第 18 轮的规则选栈（D-862..D-864）：① 导出时按偏好对 id 的哈希留出约 1/5 的偏好对，不参与 DPO 训练（`dpo_holdout.jsonl`，D-861）；在这些对上算 DPO 相对 SFT 的隐式奖励准确率（DPO 是否比 SFT 更偏好你给的说法），bootstrap 90% 区间的下限要高于 50%（5090-14b 退回基座参考时改用按长度归一的对数概率比较）；② 测试上下文的风格指标做配对 bootstrap，DPO 的平均偏差不得显著比 SFT 差；两条都满足才保留 DPO，否则保留 SFT；验证集 loss 只列出来作参考。判定在本机算（要几秒到几分钟，取决于测试上下文多少），终端会打印两条判据的数字、区间与结论，把保留的栈写回实例；第 18 轮之前导出的 DPO 数据集没有留出的偏好对，比较时一律保留 SFT，要比较就重新 `twin train export-dpo` 再打包。DPO 只训练留出切分点之前存下的偏好对，系统段按偏好对当时的情况重做（`AsOfView`，D-860）；`export-dpo`、`twin train remote dpo` 都会说有几对因在切分点之后留到下次；`export` 合并的就是保留的那个（有 DPO 适配器却还没有评估的裁决时 `export.sh` 会停下，不会猜）。远程 vLLM 把两个适配器按秩拼接成一个适配器服务（`--max-lora-rank` 随之读自适配器配置）；`twin model register` 逐层核对哈希并记录适配器栈。第一次真实运行请留意：5090-14b 的试跑结果、`dpo_reference.json` 里的 `fallback`、两个栈的评估数字。
 
 ---
 

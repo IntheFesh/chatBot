@@ -20,10 +20,12 @@ on the instance (R-ARCH-006).
     the last export ended;
 ``export-dpo``
     writes the preference pairs of ``/不像 <正确说法>`` (the only reader of ``preference_pairs``) as
-    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset (HEAVY:
-    it queues the ``training_export_dpo`` job and ``--foreground`` runs it here when the
-    application is stopped; no model is called, but it makes the system segment of every pair
-    again and scans the file; ``export-status`` shows how it ended, round 17 item 29, D-713);
+    ``dpo_train.jsonl`` of a new dataset version made from the newest exported dataset - only the
+    pairs stored before its hold-out cut-off, a fifth of them held out in ``dpo_holdout.jsonl``
+    for the stack choice (D-860, D-861) - (HEAVY: it queues the ``training_export_dpo`` job and
+    ``--foreground`` runs it here when the application is stopped; no model is called, but it
+    makes the system segment of every pair again and scans the file; ``export-status`` shows how
+    it ended, round 17 item 29, D-713);
 ``retrain-check``
     compares her messages now with the ones the last training covered (R-TRN-012) and raises
     the ``retrain_suggested`` alert when it is time (the post-import hook calls the same code).

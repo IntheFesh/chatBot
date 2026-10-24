@@ -91,11 +91,22 @@ the same source:
   out-of-memory failure and, if even a batch of 1 does not fit, drops the three `ref_model*` keys
   for this profile only: the reference is then the base (adapter off) and
   `artifacts/dpo/dpo_reference.json` says so (D-651).
-* **Adapter stacks** (D-652..D-655).  `eval.sh` evaluates `sft` and, when there is a DPO adapter,
-  `dpo` (`sft,dpo` or the continued one) on the same test contexts and validation set; `twin train
-  remote eval` compares them with the style metrics (+-30 %, the M5 gate's own measure) and the
-  validation loss, keeps the better one (a tie keeps SFT) and writes it to `state/stack_choice`;
-  `export.sh` merges that stack (`adapter_name_or_path: output/sft,output/dpo`).  For the remote
+* **Adapter stacks** (D-652..D-655, D-862..D-865).  `eval.sh` evaluates `sft` and, when there is a
+  DPO adapter, `dpo` (`sft,dpo` or the continued one) on the same test contexts and validation set,
+  and scores the held-out preference pairs (`data/dpo_holdout.jsonl`: the fifth of the pairs
+  `twin train export-dpo` keeps out of the DPO training by the hash of their id, D-861) under each
+  stack with `tools/pair_logprobs.py` (the evaluation's base, adapters and quantisation; the
+  sequence of LLaMA-Factory's DPO processor; ids and numbers only, `artifacts/eval/<stack>/
+  pair_logps.jsonl`).  `twin train remote eval` keeps DPO only when (1) its implicit-reward accuracy
+  over SFT on the held-out pairs has a bootstrap 90 % interval above 50 % (length-normalised log
+  probabilities when the 4-bit profile fell back to the base as its reference) and (2) a paired
+  bootstrap over the test contexts does not show its mean style deviation (+-30 %, the M5 gate's
+  own measure) significantly worse; the validation loss is shown only.  It writes the winner to
+  `state/stack_choice`; `export.sh` merges that stack (`adapter_name_or_path:
+  output/sft,output/dpo`).  DPO itself trains only on the pairs stored before the hold-out cut-off
+  of its base dataset, each system segment made again through `AsOfView` as of the pair's moment
+  (D-860); `dpo.sh` counts the held-out pairs towards `TWIN_DPO_MIN_PAIRS` and records how many
+  pairs waited for a later export (`after_cutoff_pairs`).  For the remote
   vLLM the two layers are composed into **one** adapter by concatenating them along the rank, the
   scales (`alpha / r`) folded into `B` (`tools/adapter_stack.py`): `B·A = s1·B1·A1 + s2·B2·A2`, so
   the served adapter adds exactly `dSFT + dDPO`; `--max-lora-rank` is read from its config (64, or
@@ -166,7 +177,8 @@ selects the adapter with its `model` field; `/v1/completions` and `/tokenize` ex
 ## Contracts used by round 13b and later rounds
 
 * **Dataset directory** (`twin.training.dataset_dir`): `dataset_meta.json`, `sft_train.jsonl`,
-  `sft_val.jsonl`, `sft_test.jsonl`, optional `dpo_train.jsonl` and `parity_cases.jsonl`; written with
+  `sft_val.jsonl`, `sft_test.jsonl`, optional `dpo_train.jsonl`, `dpo_holdout.jsonl` (the held-out
+  pairs of the stack choice, never in `dataset_info.json`, D-861) and `parity_cases.jsonl`; written with
   `write_dataset_dir` by `twin train export` (round 13b), which sets `redacted=True` only after the
   residual-PII scan of every sample and scans the written files once more.  `dataset_meta.json` carries
   the versions (template, pre-holdout persona card `v<n>`, pre-holdout profile id), the cut-off, the
