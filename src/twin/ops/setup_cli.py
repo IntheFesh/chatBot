@@ -34,7 +34,7 @@ import typer
 
 from twin.clock import get_clock
 from twin.config.loader import ConfigError, default_config_path
-from twin.config.runtime import BOT_TIMEZONE, TARGET_USERNAME
+from twin.config.runtime import TARGET_USERNAME
 from twin.config.secrets import SecretStore
 from twin.config.settings import Settings
 from twin.config.writer import set_section_values
@@ -42,7 +42,7 @@ from twin.engine.safety.notifier import BODY_TEMPLATE, SUBJECT
 from twin.ingest.conversations import holds_another_conversation
 from twin.ops.mail import SMTP_PASSWORD_SECRET, MailError, OutgoingMail, SmtpMailer
 from twin.ops.process_model import CliError, CommandKind, command
-from twin.schedule.service import schedule_kit
+from twin.schedule.service import schedule_kit, time_service_for
 from twin.services import CliContext, Services, get_cli_context
 from twin.storage.migrate import SchemaState, schema_status
 
@@ -160,7 +160,10 @@ def _target(settings: Settings, config: Path, services: Services | None) -> None
 
 def _timezone(settings: Settings, config: Path, services: Services | None) -> None:
     typer.echo("5/6 机器人所在的时区")
-    current = services.runtime.get(BOT_TIMEZONE) if services else settings.time.bot_timezone
+    # the zone in effect comes from the time service, the one place that reads the setting
+    current = (
+        time_service_for(services).bot_timezone().key if services else settings.time.bot_timezone
+    )
     while True:
         answer = _ask("IANA 时区（美国中部 America/Chicago，中国 Asia/Shanghai）", current)
         try:

@@ -25,13 +25,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from twin.config.runtime import (
     BOT_TIMEZONE,
     PROACTIVE_DAILY_MAX,
     PROACTIVE_DAILY_MIN,
     PROACTIVE_ENABLED,
+    SettingSpec,
 )
 from twin.llm.pricing import PeakCalendar
 from twin.profile.activity_model import ActivityModel
@@ -69,6 +70,13 @@ class ScheduleKit:
         zone timeline.
         """
         self.planner.invalidate()
+
+
+def is_bot_timezone(spec: SettingSpec[Any]) -> bool:
+    """Whether ``spec`` is the bot's time zone: changing it is a switch, not a plain setting
+    (``twin settings set time.bot_timezone`` goes the way of ``twin timezone set``, D-829).
+    The setting is named here and in :mod:`twin.config.runtime` only."""
+    return spec is BOT_TIMEZONE
 
 
 def peak_calendar_for(services: Services) -> PeakCalendar:
