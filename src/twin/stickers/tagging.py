@@ -236,8 +236,12 @@ class StickerTagger:
 
     # ----------------------------------------------------------------- vision
 
-    async def see(self, image: ImageInput, tag: LedgerTag = DAILY) -> Vision:
-        """Ask the vision model what a picture shows (does not store anything)."""
+    async def see(self, image: ImageInput, tag: LedgerTag = DAILY, *, live: bool = False) -> Vision:
+        """Ask the vision model what a picture shows (does not store anything).
+
+        ``live`` for the sticker the user has just sent (D-890): the live retry rule, not the
+        offline one of the tagging jobs.
+        """
         schema = reply_model(VisionReply, self._catalog.vocabulary)
         messages = self.template(STICKER_TAG).render(vocabulary=self._vocabulary_text())
         result = await self._client.chat_json(
@@ -248,6 +252,7 @@ class StickerTagger:
             tag=tag,
             temperature=0.2,
             max_tokens=VISION_COMPLETION_TOKENS * 4,
+            live=live,
         )
         reply = result.value
         return Vision(reply.tags, one_line(reply.description), one_line(reply.use_cases))

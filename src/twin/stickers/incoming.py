@@ -225,7 +225,7 @@ async def describe_incoming_sticker(
     tagger = StickerTagger(services, active, catalog=catalog)
     timeout = services.settings.stickers.describe_timeout_s
     try:
-        seen = await asyncio.wait_for(tagger.see(source, tag), timeout)
+        seen = await asyncio.wait_for(tagger.see(source, tag, live=True), timeout)
         cached = await asyncio.to_thread(_cache, services, catalog, key, image, seen)
     except (TimeoutError, LlmError, ValueError, OSError) as exc:
         log.warning("incoming_sticker_not_described", reason=type(exc).__name__)

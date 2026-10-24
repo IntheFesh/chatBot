@@ -212,8 +212,12 @@ class CaptionService:
 
     # -------------------------------------------------------------- generation
 
-    async def generate(self, info: AssetInfo, tag: LedgerTag = DAILY) -> str:
-        """Ask the vision model for a description of ``info`` and return the cleaned text."""
+    async def generate(self, info: AssetInfo, tag: LedgerTag = DAILY, *, live: bool = False) -> str:
+        """Ask the vision model for a description of ``info`` and return the cleaned text.
+
+        ``live`` for the picture the user has just sent: somebody is waiting, so the call is held
+        to the live retry rule (D-890); a job's picture keeps the offline one.
+        """
         if not info.sha256:
             raise ImageError(f"asset {info.id} has no stored file")
         image = ImageInput.from_media(self._services.media, info.sha256, detail="auto")
@@ -224,6 +228,7 @@ class CaptionService:
             tag=tag,
             max_tokens=CAPTION_MAX_TOKENS,
             temperature=0.2,
+            live=live,
         )
         caption = clean_caption(result.content)
         if not caption:
@@ -262,7 +267,7 @@ class CaptionService:
             return None
         timeout = self._services.settings.ingest.caption_wait_timeout_s
         try:
-            caption = await asyncio.wait_for(self.generate(info), timeout)
+            caption = await asyncio.wait_for(self.generate(info, live=True), timeout)
         except (TimeoutError, LlmError):
             log.warning("caption_wait_gave_up", asset_id=info.id)
             await asyncio.to_thread(self.queue_caption, info.id)
@@ -281,7 +286,7 @@ class CaptionService:
         info = AssetInfo(sha256, sha256, "available", "image", None)
         timeout = self._services.settings.ingest.caption_wait_timeout_s
         try:
-            return await asyncio.wait_for(self.generate(info), timeout)
+            return await asyncio.wait_for(self.generate(info, live=True), timeout)
         except Exception as exc:  # the description is a nicety; the reply must not depend on it
             log.warning("inbound_caption_gave_up", reason=type(exc).__name__)
             return None

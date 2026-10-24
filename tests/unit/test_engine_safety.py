@@ -16,7 +16,7 @@ import respx
 from sqlalchemy import select
 
 from tests.support.clock import ManualClock
-from tests.support.deepseek import API, TEST_KEY, error, ok
+from tests.support.deepseek import API, TEST_KEY, error, ok, on_clock, timing_out
 from tests.support.waiting import wait_until
 from twin.config.runtime import BOT_TIMEZONE
 from twin.config.settings import SafetyConfig
@@ -389,3 +389,15 @@ async def test_the_pause_of_the_crisis_answer_takes_its_time_and_nothing_cuts_it
     assert await waiting is False  # False: the user's new message did not interrupt the answer
     assert clock.sleeps == [7.0]
     assert await uninterruptible_pause(clock)(-3.0) is False  # a negative pause is no pause
+
+
+async def test_r18_d6_the_second_judgement_of_a_crisis_is_a_live_call(
+    services: Services, runtime: LlmRuntime, api: respx.MockRouter, clock: ManualClock
+) -> None:
+    """R18-D6 (D-890): somebody is waiting for this answer - a timeout is not retried by the
+    client, the keyword hit stands at once.  Before: four more attempts with back-off, and the
+    second one's verdict."""
+    route = api.post(API).mock(side_effect=[timing_out(clock, 60), ok(content=VERDICT)])
+    assessment = await on_clock(clock, handler(services, runtime).assess([SAID]))
+    assert assessment is not None and assessment.is_crisis and not assessment.judged
+    assert route.call_count == 1

@@ -12,7 +12,8 @@ import httpx
 import pytest
 import respx
 
-from tests.support.deepseek import API, TEST_KEY, error, ok, request_json
+from tests.support.clock import ManualClock
+from tests.support.deepseek import API, TEST_KEY, error, ok, on_clock, request_json, timing_out
 from tests.support.persona import Scenario, sticker_png, sticker_scenario
 from twin.llm.runtime import DEEPSEEK_SECRET, build_llm_runtime
 from twin.services import Services
@@ -214,3 +215,14 @@ async def test_r18_f2_the_export_and_the_sandbox_read_the_line_the_reply_path_wr
     assert library_description(record) == StickerDescription(tagged_only, ("撒娇",), None, "none")
     assert library_description(None, "ab") == StickerDescription("ab", (), None, "none")
     assert library_description(catalog.get(described)) == online
+
+
+async def test_r18_d6_the_sticker_just_received_is_a_live_call(
+    scenario: Scenario, services: Services, api: respx.MockRouter, clock: ManualClock
+) -> None:
+    """R18-D6 (D-890): describing the user's sticker on the reply path is a live call - a timeout
+    is not retried; the plain marker comes back and nothing is cached."""
+    route = api.post(API).mock(side_effect=[timing_out(clock, 60), vision()])
+    found = await on_clock(clock, describe_incoming_sticker(services, image=STRANGER))
+    assert not found.known and found.tags == () and route.call_count == 1
+    assert StickerCatalog(services).get(STRANGER_MD5) is None

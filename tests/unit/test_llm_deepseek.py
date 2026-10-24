@@ -700,21 +700,23 @@ def test_redact_messages_counts_replacements() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure",
+    ("failure", "purpose"),
     [
-        error(429),
-        error(500),
-        error(503, "overloaded"),
-        httpx.ConnectError("no route"),
-        httpx.ReadTimeout("slow"),
+        (error(429), "reply"),
+        (error(500), "reply"),
+        (error(503, "overloaded"), "reply"),
+        (httpx.ConnectError("no route"), "reply"),
+        (httpx.ReadTimeout("slow"), "summary"),
     ],
     ids=["429", "500", "503", "connection", "timeout"],
 )
 async def test_retryable_failures_are_retried_with_growing_pauses(
-    rig: Rig, api: respx.MockRouter, failure: httpx.Response | Exception
+    rig: Rig, api: respx.MockRouter, failure: httpx.Response | Exception, purpose: str
 ) -> None:
+    """A timeout is retried for background work only: a live call hands it to the engine at once
+    (R18-D6, D-890, ``tests/unit/test_llm_live_retry.py``)."""
     route = mock(api, failure, failure, ok(content="终于"))
-    result = await rig.drive(rig.client.chat([user("x")], purpose="reply"))
+    result = await rig.drive(rig.client.chat([user("x")], purpose=purpose))
     assert result.content == "终于" and result.attempts == 3 and route.call_count == 3
     first, second = rig.clock.sleeps[:2]
     assert 0.5 <= first < 1.5 and 1.0 <= second < 3.0
@@ -857,10 +859,15 @@ async def test_a_flood_of_offline_calls_cannot_starve_a_live_reply(
     assert len(done) == 8 and state["peak"] == 3
 
 
-@pytest.mark.parametrize("purpose", ["reply", "plan", "proactive"])
+@pytest.mark.parametrize(
+    ("purpose", "live"), [("reply", None), ("proactive", None), ("caption", True)]
+)
 async def test_every_live_purpose_may_use_all_the_slots(
-    db: Database, clock: ManualClock, api: respx.MockRouter, purpose: str
+    db: Database, clock: ManualClock, api: respx.MockRouter, purpose: str, live: bool | None
 ) -> None:
+    """R18-D6 (D-890): "live" is the one definition of ``is_live`` - the picture the user has just
+    sent is described in a live slot; ``plan`` (the life line) is background work and no longer
+    takes the last slot (it used to be in this list)."""
     rig = Rig(db, clock, overrides={"deepseek": {"max_concurrency": 3}})
     gate = asyncio.Event()
     active = {"now": 0, "peak": 0}
@@ -874,7 +881,8 @@ async def test_every_live_purpose_may_use_all_the_slots(
 
     api.post(API).mock(side_effect=handler)
     calls = [
-        asyncio.create_task(rig.client.chat([user(str(i))], purpose=purpose)) for i in range(5)
+        asyncio.create_task(rig.client.chat([user(str(i))], purpose=purpose, live=live))
+        for i in range(5)
     ]
     await wait_until(lambda: active["now"] == 3)
     gate.set()

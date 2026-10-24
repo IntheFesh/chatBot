@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
+
+from tests.support.clock import ManualClock
+from tests.support.waiting import wait_until
 
 API = "https://api.deepseek.com/chat/completions"
 TEST_KEY = "synthetic-test-key-0001"
@@ -65,3 +70,51 @@ def request_json(request: httpx.Request) -> dict[str, Any]:
     body = json.loads(request.content)
     assert isinstance(body, dict)
     return body
+
+
+# ------------------------------------------------- slow answers on the manual clock (R18-D6)
+
+Effect = Callable[[httpx.Request], httpx.Response]
+
+
+def timing_out(clock: ManualClock, seconds: float) -> Effect:
+    """A respx side effect: the request takes ``seconds`` of the clock, then times out.
+
+    This is how a request that never answers ends on the client side: the SDK's own timeout
+    (``timeout_s``) gives up and raises ``ReadTimeout``.  The clock moves, nobody sleeps.
+    """
+
+    def effect(request: httpx.Request) -> httpx.Response:
+        clock.tick(seconds)
+        raise httpx.ReadTimeout("no answer", request=request)
+
+    return effect
+
+
+def slow(clock: ManualClock, seconds: float, response: httpx.Response) -> Effect:
+    """A respx side effect: ``response`` arrives after ``seconds`` of the clock."""
+
+    def effect(request: httpx.Request) -> httpx.Response:
+        clock.tick(seconds)
+        return response
+
+    return effect
+
+
+async def on_clock[T](clock: ManualClock, work: Awaitable[T], *, limit_s: float = 5.0) -> T:
+    """Run ``work``; whenever it sleeps on the clock, move the clock to the end of that sleep.
+
+    The clock then says exactly how long the work took in the time it believes in (back-off
+    pauses included), and code that would wait forever on a clock nobody moves does not hang.
+    """
+    task = asyncio.ensure_future(work)
+    try:
+        while True:
+            await wait_until(lambda: task.done() or clock.pending_sleepers >= 1, limit_s=limit_s)
+            if task.done():
+                return await task
+            await clock.advance(clock.sleeps[-1])
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)

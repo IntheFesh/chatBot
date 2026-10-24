@@ -16,7 +16,15 @@ from sqlalchemy import select
 
 from tests.fixtures.synth_export import SynthExport
 from tests.support.clock import ManualClock
-from tests.support.deepseek import API, TEST_KEY, error, ok, request_json
+from tests.support.deepseek import (
+    API,
+    TEST_KEY,
+    error,
+    ok,
+    on_clock,
+    request_json,
+    timing_out,
+)
 from tests.support.ingest import make_export, run_import
 from tests.support.policies import AlwaysOffPeak
 from tests.support.synthetic import mobile
@@ -535,3 +543,30 @@ def test_the_import_itself_queues_the_recent_pictures_for_approval(
         j.requires_approval and j.approved_at is None
         for j in queue.list_jobs(job_type=CAPTION_JOB, limit=1000)
     )
+
+
+async def test_r18_d6_the_picture_just_received_is_a_live_call_and_a_jobs_picture_is_not(
+    services: Services, imported: SynthExport, api: respx.MockRouter, clock: ManualClock
+) -> None:
+    """R18-D6 (D-890): the picture the user has just sent is described by a live call - a timeout
+    is not retried, the reply goes on without the description; a job's picture keeps the offline
+    rule and is asked again."""
+    asset_id = image_assets(services)[0]
+    with services.db.session() as session:
+        sha256 = session.get(MediaAsset, asset_id).sha256  # type: ignore[union-attr]
+    assert sha256
+    route = api.post(API).mock(side_effect=[timing_out(clock, 60), caption_reply()])
+    service = CaptionService(services)
+    try:
+        assert await on_clock(clock, service.describe_stored(sha256)) is None
+        assert route.call_count == 1
+        route.reset()
+        route.mock(side_effect=[timing_out(clock, 60), caption_reply()])
+        assert await on_clock(clock, service.get_caption(asset_id, wait=True)) is None
+        assert route.call_count == 1
+        route.reset()
+        route.mock(side_effect=[timing_out(clock, 60), caption_reply("窗台上的猫")])
+        assert await on_clock(clock, service.caption_asset(asset_id)) is True  # the job's way
+        assert route.call_count == 2 and captions(services)[asset_id] == "窗台上的猫"
+    finally:
+        await service.aclose()
