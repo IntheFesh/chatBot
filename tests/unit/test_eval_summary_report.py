@@ -358,6 +358,46 @@ def test_the_style_section_says_what_is_missing(services: Services) -> None:
     assert "未评估：风格指标（留出集）" in detail and "未评估：风格指标（live）" not in detail
 
 
+def test_r18_e5_a_style_report_short_of_events_is_shown_as_not_enough(services: Services) -> None:
+    """R18-E5 (D-852): the expected events of each share, and "not enough" instead of a verdict."""
+    results = [
+        judge_metric(spec, MetricReading(0.03, 5000), MetricReading(0.03, 100), min_expected=50)
+        for spec in STYLE_METRICS
+    ]
+    report = StyleReport("live", "live", results, days=7, messages=80, min_expected=50)
+    assert report.verdict == "insufficient"
+    kept = store_of(services).create_run(
+        "style",
+        mode="live",
+        status="done",
+        verdict=report.verdict,
+        params={"source": "live", "days": 7, "blind_run": None, "backend": None},
+        summary=report.to_json(),
+    )
+    detail = section(text_of(services), "### 2.2 风格指标（live 与留出集）")
+    assert f"记录 `{kept.id}`" in detail and "比例类指标的期望事件不到 50 次：样本不足" in detail
+    header, *rows = table_rows(detail)
+    assert header[-1] == "期望事件数"
+    comma = next(row for row in rows if row[0] == "逗号率")
+    assert comma[4] == "样本不足" and comma[5] == "3.0"
+    median = next(row for row in rows if row[0] == "文字长度中位数")
+    assert median[5] == "—"
+
+
+def test_a_style_report_kept_before_round_18_still_reads_its_verdict(services: Services) -> None:
+    """D-852: a summary without ``verdict`` (round 17 and before) falls back on ``passed``."""
+    run_id = style_run(services, "live", None, 1.0)
+    run = store_of(services).get_run(run_id)
+    legacy = {k: v for k, v in run.summary.items() if k != "verdict"}
+    store_of(services).create_run(
+        "style", mode="live", status="done", verdict="passed",
+        params={"source": "live", "days": 7, "blind_run": None, "backend": None},
+        summary=legacy,
+    )  # fmt: skip
+    detail = section(text_of(services), "### 2.2 风格指标（live 与留出集）")
+    assert "每项偏差在 ±30% 内：通过" in detail
+
+
 def test_the_memory_test_is_shown_with_its_score(services: Services) -> None:
     run_id = memory_run(services, correct=14, partial=4, wrong=2)  # 16/20 = 80 %
     row = table_rows(section(text_of(services), "### 2.3 记忆测试"))[1]

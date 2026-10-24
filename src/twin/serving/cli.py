@@ -25,12 +25,20 @@ from rich.text import Text
 from twin.app import ShutdownSignals
 from twin.config.runtime import BACKEND_ACTIVE, TUNNEL_WANTED
 from twin.engine.style_models import StyleModels
-from twin.eval.blind import EvalError
-from twin.eval.cli import continue_blind, describe_plan, interaction, run_blind_jobs
+from twin.eval.blind import MODEL_PARAM, EvalError
+from twin.eval.cli import (
+    continue_blind,
+    continue_style_sample,
+    describe_plan,
+    describe_style_plan,
+    interaction,
+    run_blind_jobs,
+)
 from twin.eval.gates import GateContext, GateOutcome
 from twin.eval.report import print_gate, print_style_report
 from twin.eval.store import EvalStore, EvalStoreError
-from twin.eval.style_metrics import StyleError, style_of_runs
+from twin.eval.style_metrics import StyleError, holds_replies, style_of_runs
+from twin.eval.style_sample import EnoughAlready, sample_runs
 from twin.ops.jobobject import ProcessJob
 from twin.ops.process_model import CliError, CommandKind, ExitCode, app_is_running, command
 from twin.ops.taskscheduler import SubprocessRunner
@@ -47,9 +55,10 @@ from twin.serving.evaluation import (
     EvaluationServers,
     install_servers,
     plan_model_evaluation,
+    plan_model_style_sample,
     tunnel_known_hosts,
 )
-from twin.serving.gate_m5 import MODEL_PARAM, WAYS, evaluation_runs, judge_model
+from twin.serving.gate_m5 import WAYS, judge_model
 from twin.serving.hardware import choose_build, detect_gpu
 from twin.serving.llamacpp import ServeError, find_install, loopback_endpoint
 from twin.serving.quant import (
@@ -425,12 +434,16 @@ def _generate_with_servers(services: Services) -> Callable[[Services], None]:
 
 
 def _print_results(console: Console, services: Services, model: ModelView) -> None:
-    """After the judging: the style metrics of each way and what the gate would say."""
+    """The style metrics of each way (on the model's style sample) and what the gate would say."""
     store = EvalStore(services.db, services.clock)
-    runs = evaluation_runs(store, model.id)
-    for way in WAYS:
+    samples = sample_runs(store, model.id)
+    if not samples:
+        console.print(
+            Text(f"还没有风格样本：运行 twin model evaluate {model.id} --style（M5 要用）")
+        )
+    for way in WAYS if samples else ():
         try:
-            print_style_report(console, style_of_runs(services, store, runs, way))
+            print_style_report(console, style_of_runs(services, store, samples, way))
         except StyleError as exc:
             console.print(Text(f"{way}: {exc}"))
     verdict = judge_model(GateContext(services, store), model.id)
@@ -461,18 +474,36 @@ def model_evaluate_command(
         bool,
         typer.Option("--foreground", help="Run the approved generation jobs here (no application)"),
     ] = False,
+    style: Annotated[
+        bool,
+        typer.Option(
+            "--style", help="Plan the model's style sample instead (M5's style metrics, D-852)"
+        ),
+    ] = False,
 ) -> None:
     """Blind test of DeepSeek against a model (as style and as hybrid) on new contexts (R-SRV-005).
 
     Without ``--resume`` it draws the contexts, prices the generation and queues it (approve the
     batches with ``twin jobs approve``); with ``--resume <run>`` it generates (``--foreground``:
-    here, with the model's server), lets you judge and shows the results.
+    here, with the model's server), lets you judge and shows the results.  ``--style`` plans the
+    model's style sample instead - the replies M5's style metrics are measured on, as many as the
+    rarest share of her style needs, nothing to judge; ``--resume`` goes on with it as well.
     """
     services = _services()
     console = _console()
     store = EvalStore(services.db, services.clock)
     contexts = n if n is not None else services.settings.eval.blind_n
+    if style and n is not None:
+        raise CliError(
+            "--n is the size of the blind test; the style sample sizes itself", ExitCode.USAGE
+        )
     try:
+        if resume is None and style:
+            model, sample = asyncio.run(plan_model_style_sample(services, model_id, seed=seed))
+            describe_style_plan(
+                console, services, sample, resume_command=f"twin model evaluate {model.id}"
+            )
+            return
         if resume is None:
             model, plan = asyncio.run(
                 plan_model_evaluation(services, model_id, contexts, seed=seed)
@@ -481,10 +512,24 @@ def model_evaluate_command(
             return
         model = _model(services, model_id)
         run = store.get_run(resume)
+    except EnoughAlready as exc:
+        console.print(Text(str(exc)))
+        return
     except (EvaluationError, EvalError, EvalStoreError) as exc:
         raise _fail(str(exc)) from exc
-    if run.kind != "blind" or run.params.get(MODEL_PARAM) != model.id:
+    if not holds_replies(run) or run.params.get(MODEL_PARAM) != model.id:
         raise _fail(f"run {run.id} was not drawn for {model.id}", lines=())
+    if run.kind != "blind":  # the style sample: generated, measured, never judged
+        if continue_style_sample(
+            services,
+            console,
+            store,
+            run,
+            foreground=foreground,
+            generate=_generate_with_servers(services),
+        ):
+            _print_results(console, services, model)
+        return
     continue_blind(
         services,
         console,

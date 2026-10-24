@@ -70,6 +70,7 @@ JOB_SIZE = 10  # pairs per job
 REPLY_COMPLETION_TOKENS = 600  # the DeepSeek backend's cap on a reply (an upper bound)
 PLAN_COMPLETION_TOKENS = 400  # the planner's cap of the hybrid backend
 MIN_VALID = 50  # R-EVAL-001: a gate counts only with this many valid judgements
+MODEL_PARAM = "model_id"  # ``params`` key of a run drawn for a model (R-SRV-005)
 
 FAIL_FELL_BACK = "fell_back"
 FAIL_NO_REPLY = "no_reply"
@@ -390,6 +391,31 @@ def _store_plan(
         for (sample, backend), side in zip(pairs, sides, strict=True)
     ]
     store.add_items(run.id, items)
+    run, batch_ids, total = queue_generation(kit, store, run, prices)
+    return BlindPlan(
+        run=run,
+        samples=len(drawn.samples),
+        pairs=len(items),
+        estimated_usd=total,
+        batch_ids=batch_ids,
+        requested=requested,
+        excluded=drawn.excluded,
+        strata=drawn.strata,
+    )
+
+
+def queue_generation(
+    kit: SandboxKit,
+    store: EvalStore,
+    run: RunView,
+    prices: Mapping[tuple[str, str], float],
+) -> tuple[RunView, list[str], float]:
+    """Queue the generation of a run's items as one-time batches that wait for the approval.
+
+    ``prices`` is the estimate of each (sample, backend) pair; the jobs of ``JOB_SIZE`` items
+    are packed into batches under the batch limit (R-LLM-014).  The blind test and the style
+    sample of a model (D-852) queue the same way; a pair too dear for any batch cancels the run.
+    """
     stored = store.items(run.id, with_payload=False)
     estimate_of = {item.id: prices[(item.sample_key, item.backend)] for item in stored}
     jobs = [stored[i : i + JOB_SIZE] for i in range(0, len(stored), JOB_SIZE)]
@@ -422,16 +448,7 @@ def _store_plan(
         raise
     total = sum(job_usd)
     run = store.update_run(run.id, batch_ids=batch_ids, params={"estimated_usd": round(total, 6)})
-    return BlindPlan(
-        run=run,
-        samples=len(drawn.samples),
-        pairs=len(items),
-        estimated_usd=total,
-        batch_ids=batch_ids,
-        requested=requested,
-        excluded=drawn.excluded,
-        strata=drawn.strata,
-    )
+    return run, batch_ids, total
 
 
 # -------------------------------------------------------------------- generate
@@ -522,7 +539,7 @@ async def generate_items(
     summary = GenerateSummary()
     items = [store.item(item_id) for item_id in item_ids]
     wanted = any(item.status == "pending" and item.backend in STYLE_BACKENDS for item in items)
-    model_id = run.params.get("model_id")
+    model_id = run.params.get(MODEL_PARAM)
     models: StyleModels | None = None
     llm = build_llm_runtime(services)
     style: StyleRuntime | None = None

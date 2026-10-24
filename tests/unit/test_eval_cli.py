@@ -261,10 +261,11 @@ def test_a_style_report_is_kept_as_a_run_of_numbers_for_the_summary(cli_world: W
     assert code == 1 and "评估记录：" in screen
     store = EvalStore(cli_world.services.db, cli_world.services.clock)
     live = store.latest_run("style")
-    assert live is not None and live.status == "done" and live.verdict == "failed"
+    assert live is not None and live.status == "done" and live.verdict == "insufficient"
     assert live.mode == "live" and live.backends == ()
     assert live.params == {"source": "live", "days": 7, "blind_run": None, "backend": None}
     assert live.summary["source"] == "live" and live.summary["passed"] is False
+    assert live.summary["verdict"] == "insufficient"  # too few expected events (D-852)
     assert [m["key"] for m in live.summary["metrics"]] == [
         "text_length",
         "comma_rate",

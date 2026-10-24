@@ -376,7 +376,18 @@ def blind_section(ctx: Context) -> Section:
 
 
 PROPORTION_METRICS = frozenset(spec.key for spec in STYLE_METRICS if spec.proportion)
-STYLE_STATUS = {"pass": "通过", "fail": "不通过", "n/a": "不适用", "no_data": "无数据"}
+STYLE_STATUS = {
+    "pass": "通过",
+    "fail": "不通过",
+    "n/a": "不适用",
+    "no_data": "无数据",
+    "insufficient": "样本不足",
+}
+STYLE_VERDICTS = {
+    "passed": "每项偏差在 ±30% 内：通过",
+    "failed": "有指标超出 ±30%：不通过",
+    "insufficient": "比例类指标的期望事件不到 50 次：样本不足",
+}
 
 
 def _style_value(key: str, value: object) -> str:
@@ -391,6 +402,7 @@ def _style_table(run: RunView) -> list[str]:
     for metric in run.summary.get("metrics", []):
         key = str(metric.get("key"))
         deviation = metric.get("deviation")
+        expected = metric.get("expected")
         rows.append(
             [
                 metric.get("label"),
@@ -398,9 +410,10 @@ def _style_table(run: RunView) -> list[str]:
                 _style_value(key, (metric.get("measured") or {}).get("value")),
                 "—" if deviation is None else f"{deviation * 100:+.1f}%",
                 STYLE_STATUS.get(str(metric.get("status")), "—"),
+                "—" if not isinstance(expected, int | float) else f"{expected:.1f}",
             ]
         )
-    return table(["指标", "她（画像）", "机器人", "相对偏差", "结论"], rows)
+    return table(["指标", "她（画像）", "机器人", "相对偏差", "结论", "期望事件数"], rows)
 
 
 def style_section(ctx: Context) -> Section:
@@ -436,9 +449,9 @@ def style_section(ctx: Context) -> Section:
     parts += [(f"留出集：{backend} 后端对 pre_holdout 画像", run) for backend, run in holdout]
     for title, run in parts:
         section.runs.append(run.id)
-        verdict = (
-            "每项偏差在 ±30% 内：通过" if run.summary.get("passed") else "有指标超出 ±30%：不通过"
-        )
+        # a report kept before round 18 has no verdict, only "passed" (D-852)
+        found = run.summary.get("verdict") or ("passed" if run.summary.get("passed") else "failed")
+        verdict = STYLE_VERDICTS.get(str(found), STYLE_VERDICTS["failed"])
         section.lines += [
             "",
             f"**{title}**（记录 `{run.id}`，{ctx.stamp(run.created_at)}；"

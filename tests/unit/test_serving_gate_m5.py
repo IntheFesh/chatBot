@@ -8,10 +8,11 @@ a threshold or of the way something is counted breaks one of these tests.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pytest
 
-from tests.support.model_eval import evaluation_run, style_report
+from tests.support.model_eval import evaluation_run, style_report, style_sample_run
 from twin.eval.blind import MIN_VALID
 from twin.eval.gates import (
     EXIT_NOT_PASSED,
@@ -31,6 +32,7 @@ from twin.serving.gate_m5 import (
     judge_m5,
     judge_model,
     latest_evaluated_model,
+    style_detail,
 )
 
 MODEL = "run-1-Q5_K_M"
@@ -250,3 +252,109 @@ def test_a_passing_gate_through_the_framework_exits_with_zero(
     assert outcome.exit_code == EXIT_PASSED and outcome.verdict is not None
     assert outcome.verdict.values["winner"] == "style"
     assert check_gate(services, "M5").exit_code == EXIT_PASSED
+
+
+# --------------------------------------------- round 18: the style sample (R18-E5, D-852)
+
+PASSING = {"deepseek": (50, 40), "style": (50, 20), "hybrid": (50, 22)}
+
+
+def test_r18_e5_the_style_criterion_reads_the_models_style_sample_not_its_blind_pairs(
+    services: Services,
+) -> None:
+    """R18-E5 (D-852): the style metrics come from the sample sized for 50 expected events."""
+    blind = evaluation_run(services, MODEL, PASSING)
+    sample = style_sample_run(services, MODEL)
+    style_sample_run(services, "other-model")
+    style_sample_run(services, MODEL, status="cancelled")
+    seen: list[tuple[str, list[str]]] = []
+
+    def style_of(
+        services_: Services, store: EvalStore, runs: Sequence[RunView], backend: str
+    ) -> StyleReport:
+        seen.append((backend, [run.id for run in runs]))
+        return style_report(backend)
+
+    ctx = GateContext(services, EvalStore(services.db, services.clock))
+    verdict = judge_model(ctx, MODEL, style_of=style_of)
+    assert verdict.passed
+    assert seen == [("style", [sample.id]), ("hybrid", [sample.id])]
+    assert set(verdict.runs) == {blind.id, sample.id}
+    assert verdict.values["style_samples"] == [sample.id]
+    assert verdict.values["minimum_expected_events"] == 50
+
+
+def test_r18_e5_a_style_sample_short_of_events_is_not_enough_and_says_how_to_add(
+    services: Services,
+) -> None:
+    """R18-E5 (D-852): a share with fewer than 50 expected events: "insufficient", not "failed"."""
+    evaluation_run(services, MODEL, PASSING)
+    style_sample_run(services, MODEL)
+
+    def style_of(
+        services_: Services, store: EvalStore, runs: Sequence[RunView], backend: str
+    ) -> StyleReport:
+        return style_report(backend, short=("comma_rate",), off=("text_length",))
+
+    ctx = GateContext(services, EvalStore(services.db, services.clock))
+    verdict = judge_model(ctx, MODEL, style_of=style_of)
+    assert verdict.verdict == "insufficient"
+    assert f"twin model evaluate {MODEL} --style" in verdict.summary
+    detail = next(c.detail for c in verdict.checks if c.name.startswith("style：留出集风格"))
+    assert "样本不足" in detail and "逗号率 期望事件 3.0 < 50" in detail
+    assert verdict.values["ways"]["style"]["style_verdict"] == "insufficient"
+    assert verdict.values["ways"]["style"]["expected"]["comma_rate"] == pytest.approx(3.0)
+
+
+def test_r18_e5_without_a_style_sample_the_gate_asks_for_one(services: Services) -> None:
+    """R18-E5 (D-852): the blind test alone is no evidence for the style criterion any more."""
+    evaluation_run(services, MODEL, PASSING)
+    verdict = judge_model(GateContext(services, EvalStore(services.db, services.clock)), MODEL)
+    assert verdict.verdict == "insufficient"
+    assert f"twin model evaluate {MODEL} --style" in verdict.summary
+    assert verdict.values["style_samples"] == []
+
+
+def test_r18_e5_a_way_that_lost_the_blind_test_fails_without_a_style_sample(
+    services: Services,
+) -> None:
+    """R18-E5 (D-852): no style sample can turn a lost blind test into a pass: it is "failed"."""
+    evaluation_run(services, MODEL, {"deepseek": (50, 30), "style": (50, 30), "hybrid": (50, 31)})
+    verdict = judge_model(GateContext(services, EvalStore(services.db, services.clock)), MODEL)
+    assert verdict.verdict == "failed"
+    assert verdict.values["ways"]["style"]["verdict"] == "failed"
+    assert "--style" not in verdict.summary  # nothing to add: the blind test decided
+
+
+def test_r18_e5_one_way_failed_and_the_other_waiting_for_its_style_sample_is_not_enough(
+    services: Services,
+) -> None:
+    """R18-E5 (D-852): the gate fails only when no way can pass any more.
+
+    ``style`` lost the blind test (failed); ``hybrid`` won it and waits for its style sample: the
+    model may still pass with ``hybrid``, so M5 says "not enough" and how to go on.
+    """
+    evaluation_run(services, MODEL, {"deepseek": (50, 40), "style": (50, 40), "hybrid": (50, 20)})
+    verdict = judge_model(GateContext(services, EvalStore(services.db, services.clock)), MODEL)
+    assert verdict.values["ways"]["style"]["verdict"] == "failed"
+    assert verdict.values["ways"]["hybrid"]["verdict"] == "insufficient"
+    assert verdict.verdict == "insufficient" and not verdict.passed
+    assert f"twin model evaluate {MODEL} --style" in verdict.summary
+
+
+def test_r18_e5_the_style_check_names_the_events_what_is_left_out_and_the_reference() -> None:
+    """R18-E5, R18-E2 (D-851, D-852): what the check of a way says next to its verdict."""
+    passed = replace(
+        style_report("style"),
+        results=[
+            replace(r, status="n/a", deviation=None) if r.key == "quote_rate" else r
+            for r in style_report("style").results
+        ],
+        quoted=(12, 48),
+    )
+    detail = style_detail(passed)
+    assert detail.startswith("可判定的各项都在范围内")
+    assert "期望事件数：逗号率 100.0" in detail
+    assert "通道做不到、不计入：引用率" in detail and "参考（不计入）：25% 的回复" in detail
+    failed = style_detail(style_report("style", off=("sticker_share",)))
+    assert failed.startswith("不在范围内的指标：表情包占比")

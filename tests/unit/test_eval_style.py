@@ -298,7 +298,13 @@ async def test_the_live_source_measures_what_the_bot_really_sent_in_the_last_day
     by_key = {r.key: r for r in report.results}
     assert by_key["quote_rate"].status == "n/a"
     assert by_key["text_length"].measured.value == pytest.approx(8.0, abs=2.0)
-    assert by_key["emoji_code_rate"].measured.value == pytest.approx(0.5)
+    assert by_key["text_length"].days is None  # a median is judged on the week asked for
+    # 16 texts hold far fewer than 50 expected codes at her rate: since round 18 (D-852) the
+    # share is carried over the weeks before, here to the whole conversation (the old bubble
+    # 30 days ago included: 8 codes in 17 texts), and is still "not enough"
+    emoji = by_key["emoji_code_rate"]
+    assert emoji.status == "insufficient" and emoji.days == 35
+    assert emoji.measured.value == pytest.approx(8 / 17, abs=1e-5)
     wider = style_of_live(services, 60)
     assert wider.messages == 17
     with pytest.raises(StyleError, match="at least 1"):
@@ -498,4 +504,5 @@ async def test_r18_e2_the_live_source_asks_the_configured_channel(
     able = ChannelCapabilities(supports_quote=True, supports_typing=True)
     monkeypatch.setattr("twin.eval.style_metrics.configured_capabilities", lambda services_: able)
     judged = style_of_live(services, 7)
-    assert next(r for r in judged.results if r.key == "quote_rate").status == "fail"  # 0 vs hers
+    quote = next(r for r in judged.results if r.key == "quote_rate")
+    assert quote.counts and quote.status in ("fail", "insufficient")  # judged, not "n/a"

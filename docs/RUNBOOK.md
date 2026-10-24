@@ -459,7 +459,7 @@ uv run twin eval blind --resume <运行号> --foreground   # 生成；全部生�
 
 ```powershell
 uv run twin eval style --source live --days 7                              # 机器人最近 7 天真实输出 vs 她的 live 画像
-uv run twin eval style --source eval_items --run <盲测运行号> --backend deepseek   # 留出集上下文的输出 vs pre_holdout 画像
+uv run twin eval style --source eval_items --run <盲测运行号> --backend deepseek   # 留出集上下文的输出 vs pre_holdout 画像（--run 也可以是风格样本）
 ```
 
 六项核心指标（文字长度中位数、逗号率、连发中位数、表情包占比、表情代码率、引用率），**每项偏差在 ±30% 以内为通过**，有一项不通过退出码为 1。
@@ -559,12 +559,17 @@ uv run twin model tunnel stop             # 用完关闭，然后到 AutoDL 控�
 uv run twin model evaluate <模型号> --n 80              # 从留出集抽 80 个新上下文，deepseek / style / hybrid 各生成一遍，估价
 uv run twin jobs approve <批次号>
 uv run twin model evaluate <模型号> --resume <运行号> --foreground   # 生成（这时才启动模型服务器）并让你判“哪条是她”
+uv run twin model evaluate <模型号> --style             # 风格样本：样本量自动定（约 700 条回复/方式），估价
+uv run twin jobs approve <批次号>
+uv run twin model evaluate <模型号> --resume <样本运行号> --foreground   # 生成风格样本（不用判断），给出两种方式的风格指标
 uv run twin eval gate M5                                # 判定上线门槛
 uv run twin model activate <模型号>                      # 通过后：backend.active 设成猜对率更低的那种方式
 uv run twin model disable <模型号>                       # 停用；运行中的应用几秒内跟上
 ```
 
-上线门槛（R-SRV-005）：盲测里风格模型（style 或 hybrid 其中一种）的猜对率低于 deepseek 后端（单侧两比例检验 p < 0.1，每个后端各有 ≥ 50 对有效判断），**且**留出集六项风格指标都在 ±30% 以内。分词核对没过的模型任何情况下都不能激活。`--force` 能在门槛没过时强制启用，但会记审计、`/状态` 一直写“未通过门槛”、预算降级的最后一级不会切到它：
+上线门槛（R-SRV-005）：盲测里风格模型（style 或 hybrid 其中一种）的猜对率低于 deepseek 后端（单侧两比例检验 p < 0.1，每个后端各有 ≥ 50 对有效判断），**且**留出集六项风格指标都在 ±30% 以内。
+
+**风格指标看“风格样本”，不看盲测那几十对**（第 18 轮，你的决定，D-852）：她的逗号率只有 3% 左右，65 个上下文里同分布的模型三项稀有比例同时落在 ±30% 内的概率只有约四分之一。所以比例类指标要有 **≥ 50 次期望事件**（她的比率 × 机器人回复里的分母）才判定，不够就是“样本不足”（不是不通过）；`twin model evaluate <模型号> --style` 按最稀有的比例指标达到 50 次期望事件（再加 10% 余量，抵消分母的波动和生成失败的对子）自动定样本量——按她的比率约 700 条回复/方式，上限是留出集的可用上下文，不够时每个上下文用不同的随机种子多生成几份（种子记在每一条里）。它是一次性批任务，先估价：style 方式不调用 DeepSeek，hybrid 方式每条要一次 DeepSeek 规划。这些回复不用你判断；盲测仍按自己的 `--n`。生成完以后若还有指标“样本不足”（例如模型的回复比她短、文字气泡少），再运行一次 `--style` 会按模型实际的分母补足；够了会说“nothing more to generate”。盲测已经输给 deepseek 的方式直接判不通过，不必再做风格样本。通道做不到的指标（引用率）不计入，报告另附一个参考数：模型写了 `[引用:…]` 的回复占比。分词核对没过的模型任何情况下都不能激活。`--force` 能在门槛没过时强制启用，但会记审计、`/状态` 一直写“未通过门槛”、预算降级的最后一级不会切到它：
 
 ```powershell
 uv run twin model activate <模型号> --force
@@ -714,7 +719,7 @@ uv run twin purge --all
 | **M2 记得住** | 表情包库、记忆、指令 | 记忆测试 ≥ 80%（20 题，10+10 构成完整） | 第 7.3 节；`twin eval gate M2`；第 09b、11 轮（指令全集完成后复判） | 待用户执行 |
 | **M3 有作息、会主动** | 作息与真实模式、主动消息、思考开关 | **最近 10 个自然日内有 7 个观察日**（免责日、暂停或关闭的日子不算；免责日超过 3 个为样本不足，第 7.4 节）：深睡时段主动 0 次、每个观察日次数在范围内、间隔与追发零违规；这段时间 `/评分` ≥ 4/5 | 先确认 R-CH-010（上面的提示）；`twin run` 跑满 7 个观察日；每天给她发一条；`twin eval proactive`、`twin eval gate M3`；第 10 轮 | 待用户执行 |
 | **M4 持续成长** | 学习、增量导入、运维 | **无人值守 7 天**（全部由计划任务启动，期间做一次断网演练，学习和增量导入各成功一次）；**新的**盲测 ≤ 60% | 第 1.5、7.1、7.5 节；`twin eval stability --days 7`、`twin eval gate M4`；第 12 轮 | 待用户执行 |
-| **M5 风格模型** | 训练、评估、量化部署 | R-SRV-005（第 8.3 节）；不通过则保留 DeepSeek 后端（不阻塞其他任何事） | 第 6、8 章；`twin model evaluate`、`twin eval gate M5`；第 13、14 轮 | 待用户执行（若训练） |
+| **M5 风格模型** | 训练、评估、量化部署 | R-SRV-005（第 8.3 节）；不通过则保留 DeepSeek 后端（不阻塞其他任何事） | 第 6、8 章；`twin model evaluate`（盲测）与 `twin model evaluate --style`（风格样本）、`twin eval gate M5`；第 13、14 轮 | 待用户执行（若训练） |
 
 汇总所有门槛、各项度量和证据来源的报告：`twin eval report`（第 15 轮，见第 7.7 节）；打 `v1.0.0` 之前的完整检查在 [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md)。
 

@@ -667,7 +667,8 @@
 
 4. **评估、门槛、上线（只有这样 M5 才可能通过）**
    - `uv run twin model evaluate <id> --n 80`：从留出集抽 80 个**新的**上下文（以前盲测用过的不会再抽），三种方式（deepseek、style、hybrid）各生成一遍，估价后等你批准：`uv run twin jobs approve <批次号>`（批次号命令会打印）。每种方式和 deepseek 都要有 ≥ 50 对**有效**判断，跳过的不算，所以 `--n` 要留余量。
-   - `uv run twin model evaluate <id> --resume <运行号> --foreground`：在本窗口里生成（这时才启动模型的服务器）并让你判“哪条是她”；判完给出三种方式的风格指标和 M5 预览。样本不够会说还差多少对，再做一次 `twin model evaluate` 累积即可。
+   - `uv run twin model evaluate <id> --resume <运行号> --foreground`：在本窗口里生成（这时才启动模型的服务器）并让你判“哪条是她”；判完给出 M5 预览。样本不够会说还差多少对，再做一次 `twin model evaluate` 累积即可。
+   - **风格样本（第 18 轮起 M5 的风格指标只看它，D-852）**：`uv run twin model evaluate <id> --style` 按她最稀有的比例指标（逗号率约 3%）达到 50 次期望事件自动定样本量（约 700 条回复/方式），估价后等你批准；`uv run twin model evaluate <id> --resume <样本运行号> --foreground` 生成（不用你判断），给出两种方式的风格指标（含每项期望事件数、引用率的参考数）和 M5 预览。还“样本不足”就再运行一次 `--style` 补足。**请告诉我这一步实际花了多少钱、生成用了多久**（hybrid 每条要一次 DeepSeek 规划，沙箱里没有真实费用）。
    - `uv run twin eval gate M5`：写下判定。**没过就留在这里改进，不要降门槛或改统计口径**；不过的话保留 DeepSeek，不阻塞第 15、16 轮。请把输出发给我。
    - 通过后 `uv run twin model activate <id>`：把 `backend.active` 设成猜对率更低的那种方式。想指定另一种用 `--backend style|hybrid`（那种方式也要过了）。
    - `--force`：门槛没过也要用的话才加。后果：模型被标成“未通过门槛”，`/状态` 会写出来，预算最后一级不会切到它，这次激活在审计里有记录。分词核对没过的模型即使 `--force` 也不能激活。

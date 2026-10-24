@@ -30,12 +30,25 @@ wrote a ``[引用:…]`` line before the post-processing removed it (a count eac
 
 A metric passes when its relative deviation ``(bot - her) / her`` is within +-30 %.  When her value
 is 0 the bot has to be 0 as well.  A metric with no data on either side does not pass.
+
+**A rare share needs enough events to be judged** (round 18, user decision, D-852): for a share
+(comma rate, sticker share, emoji-code rate, quote rate) the *expected number of events* is her
+rate times the metric's denominator in the bot's replies (its texts, or all its messages); below
+:data:`MIN_EXPECTED_EVENTS` (50) the metric is ``insufficient`` - not a pass - and the report says
+"not enough yet" instead of judging the +-30 % on noise (a copy of her style passes the three rare
+shares together only about a quarter of the time on the 65 contexts of a blind test, about 95 %
+at 50 expected events).  When her rate is 0 there is nothing to expect: the bot must be 0, as
+before.  The judges ask for it (``min_expected``): the M5 sample, ``twin eval style`` in both
+sources; a report of the ``live`` source carries a share that has too few events in its week over
+to the weeks before it, one week at a time, until it has enough or the conversation has no older
+day (:func:`style_of_live`).  How many replies the rarest share needs is :func:`replies_needed`.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -58,8 +71,12 @@ EPSILON = 1e-9  # floating-point slack only: 1.3 against 1.0 is 30 %, not 30.000
 ITEM_SPACING_S = 7200.0  # between two replies: far more than a burst gap
 BUBBLE_SPACING_S = 2.0  # between the bubbles of one reply: well inside a burst
 EPOCH = datetime(2026, 1, 1, tzinfo=UTC)
+MIN_EXPECTED_EVENTS = 50  # R-EVAL-002 (round 18, user decision, D-852): events a share needs
+WEEK_DAYS = 7  # the live source carries a share that lacks events over whole weeks (D-852)
+CONVERSATION_START = datetime(1970, 1, 1, tzinfo=UTC)  # before any message of the conversation
+SAMPLE_PURPOSE = "sample"  # ``params.purpose`` of a style run that holds generated replies
 
-Status = Literal["pass", "fail", "n/a", "no_data"]
+Status = Literal["pass", "fail", "n/a", "no_data", "insufficient"]
 Abilities = Mapping[str, bool | None]  # an ability of a channel -> it has it (None: not known)
 
 
@@ -80,6 +97,7 @@ class MetricSpec:
     read: Callable[[ProfileMetrics], MetricReading]
     proportion: bool = True
     needs: str | None = None  # the ability of the channel (``supports_*``) it depends on (D-851)
+    unit: str | None = None  # a share's denominator: ``text`` messages or every ``message``
 
     def measurable(self, channel: Abilities | None) -> bool | None:
         """Whether replies through ``channel`` can show it (``None``: the record does not say).
@@ -120,11 +138,13 @@ def _comma(metrics: ProfileMetrics) -> MetricReading:
 
 STYLE_METRICS: tuple[MetricSpec, ...] = (
     MetricSpec("text_length", "文字长度中位数", _median_of("text_length"), proportion=False),
-    MetricSpec("comma_rate", "逗号率", _comma),
+    MetricSpec("comma_rate", "逗号率", _comma, unit="text"),
     MetricSpec("burst_size", "连发中位数", _median_of("burst_size"), proportion=False),
-    MetricSpec("sticker_share", "表情包占比", _scalar_of("sticker_share")),
-    MetricSpec("emoji_code_rate", "表情代码率", _scalar_of("emoji_code_rate")),
-    MetricSpec("quote_rate", "引用率", _scalar_of("quote_rate"), needs="supports_quote"),
+    MetricSpec("sticker_share", "表情包占比", _scalar_of("sticker_share"), unit="message"),
+    MetricSpec("emoji_code_rate", "表情代码率", _scalar_of("emoji_code_rate"), unit="text"),
+    MetricSpec(
+        "quote_rate", "引用率", _scalar_of("quote_rate"), needs="supports_quote", unit="text"
+    ),
 )
 
 
@@ -209,6 +229,8 @@ class MetricResult:
     status: Status
     interval: tuple[float, float] | None = None
     real: MetricReading | None = None  # her real replies in the same contexts, when known
+    expected: float | None = None  # a share: her rate times the bot's denominator (D-852)
+    days: int | None = None  # live: the days the share was judged on, when more than asked
 
     @property
     def counts(self) -> bool:
@@ -229,6 +251,8 @@ class MetricResult:
             "status": self.status,
             "interval": list(self.interval) if self.interval else None,
             "real": reading(self.real),
+            "expected": self.expected,
+            "days": self.days,
         }
 
 
@@ -241,6 +265,15 @@ def deviation_of(reference: float | None, measured: float | None) -> float | Non
     return (measured - reference) / reference
 
 
+def expected_events(
+    spec: MetricSpec, reference: MetricReading, measured: MetricReading
+) -> float | None:
+    """A share's expected events: her rate times the bot's denominator (``None``: no share)."""
+    if not spec.proportion or reference.value is None:
+        return None
+    return reference.value * measured.n
+
+
 def judge_metric(
     spec: MetricSpec,
     reference: MetricReading,
@@ -248,11 +281,14 @@ def judge_metric(
     *,
     measurable: bool | None = True,
     real: MetricReading | None = None,
+    min_expected: int | None = None,
 ) -> MetricResult:
     """The verdict on one metric (see the module description).
 
     ``measurable`` ``False``: the channel cannot produce it - "not measurable", left out of the
     verdict; ``None``: nobody knows whether it could - no data, which is not a pass.
+    ``min_expected``: a share whose expected events are fewer is ``insufficient`` (D-852); a
+    share she never shows (her rate 0) expects nothing and is judged as it is.
     """
     if measurable is False:
         return MetricResult(spec.key, spec.label, reference, measured, None, "n/a", None, real)
@@ -263,14 +299,24 @@ def judge_metric(
         hits = min(measured.n, max(0, round(measured.value * measured.n)))
         interval = wilson_interval(hits, measured.n)
     deviation = deviation_of(reference.value, measured.value)
-    if reference.value is None or measured.value is None:
-        status: Status = "no_data"
+    expected = expected_events(spec, reference, measured)
+    status: Status
+    if (
+        min_expected is not None
+        and expected is not None
+        and reference.value is not None
+        and reference.value > 0
+        and expected < min_expected
+    ):
+        status = "insufficient"
+    elif reference.value is None or measured.value is None:
+        status = "no_data"
     elif deviation is not None and abs(deviation) <= TOLERANCE + EPSILON:
         status = "pass"
     else:
         status = "fail"
     return MetricResult(
-        spec.key, spec.label, reference, measured, deviation, status, interval, real
+        spec.key, spec.label, reference, measured, deviation, status, interval, real, expected
     )
 
 
@@ -287,6 +333,21 @@ class StyleReport:
     messages: int = 0  # the bot's messages (bubbles) measured
     notes: list[str] = field(default_factory=list)
     quoted: tuple[int, int] | None = None  # (replies the model began with a quote, replies)
+    min_expected: int | None = None  # the events a share needed to be judged (D-852)
+
+    @property
+    def verdict(self) -> Literal["passed", "failed", "insufficient"]:
+        """``insufficient`` when a counted share lacks events or nothing could be measured;
+        otherwise ``passed`` when every metric that counts is within the tolerance."""
+        counted = [r for r in self.results if r.counts]
+        if not counted or any(r.status == "insufficient" for r in counted):
+            return "insufficient"
+        return "passed" if all(r.status == "pass" for r in counted) else "failed"
+
+    @property
+    def insufficient(self) -> list[MetricResult]:
+        """The shares that had too few expected events to be judged."""
+        return [r for r in self.results if r.status == "insufficient"]
 
     @property
     def quoted_share(self) -> float | None:
@@ -298,8 +359,7 @@ class StyleReport:
     @property
     def passed(self) -> bool:
         """Every metric that can be measured is within the tolerance (and at least one was)."""
-        counted = [r for r in self.results if r.counts]
-        return bool(counted) and all(r.status == "pass" for r in counted)
+        return self.verdict == "passed"
 
     def to_json(self) -> dict[str, Any]:
         """The report as numbers and closed names, to be kept with a ``style`` evaluation run."""
@@ -311,6 +371,8 @@ class StyleReport:
             "days": self.days,
             "messages": self.messages,
             "passed": self.passed,
+            "verdict": self.verdict,
+            "min_expected": self.min_expected,
             "tolerance": TOLERANCE,
             "metrics": [result.to_json() for result in self.results],
             "notes": list(self.notes),
@@ -336,11 +398,13 @@ def compare(
     *,
     channel: Abilities | None = None,
     real: ProfileMetrics | None = None,
+    min_expected: int | None = None,
 ) -> list[MetricResult]:
     """Judge all six metrics of ``measured`` against ``reference``.
 
     ``channel`` is what the channel the replies went through could do (``None``: no channel);
     a metric it cannot produce is not measurable (D-851), whatever the source or the backend.
+    ``min_expected``: the expected events a share needs to be judged (D-852).
     """
     ours, hers = read_metrics(measured), read_metrics(reference)
     reals = read_metrics(real) if real is not None else {}
@@ -351,9 +415,69 @@ def compare(
             ours[spec.key],
             measurable=spec.measurable(channel),
             real=reals.get(spec.key),
+            min_expected=min_expected,
         )
         for spec in STYLE_METRICS
     ]
+
+
+# ----------------------------------------------------------------- sample size
+
+
+def her_units_per_reply(reference: ProfileMetrics) -> dict[str, float]:
+    """Her denominators per reply, by metric: the estimate a plan sizes the sample with (D-852).
+
+    A reply is a burst: her mean burst size is her messages per reply, and the messages that are
+    not stickers are her texts (the replies a sample draws are text, stickers and quotes only).
+    """
+    burst = reference.distribution("her", "burst_size")
+    messages = burst.mean() if burst is not None and not burst.is_empty else 1.0
+    sticker = reference.scalar("her", "sticker_share") or 0.0
+    per_unit = {"message": messages, "text": messages * max(0.0, 1.0 - sticker)}
+    return {spec.key: per_unit[spec.unit] for spec in STYLE_METRICS if spec.unit in per_unit}
+
+
+def units_per_reply(report: StyleReport, replies: int) -> dict[str, float]:
+    """The bot's denominators per reply, by metric, as a report of ``replies`` replies found."""
+    if replies <= 0:
+        return {}
+    return {result.key: result.measured.n / replies for result in report.results}
+
+
+def expected_per_reply(
+    reference: ProfileMetrics, channel: Abilities | None, per_reply: Mapping[str, float]
+) -> dict[str, float]:
+    """Her expected events per reply of each share the channel can produce and she shows.
+
+    ``per_reply`` is the denominator of each metric per reply (hers as an estimate, or the
+    bot's as measured); a share she never shows (rate 0) expects nothing and is left out.
+    """
+    found: dict[str, float] = {}
+    for spec in STYLE_METRICS:
+        if not spec.proportion or spec.measurable(channel) is not True:
+            continue
+        rate = spec.read(reference).value
+        units = per_reply.get(spec.key, 0.0)
+        if rate is not None and rate > 0 and units > 0:
+            found[spec.key] = rate * units
+    return found
+
+
+def replies_needed(
+    reference: ProfileMetrics,
+    channel: Abilities | None,
+    per_reply: Mapping[str, float],
+    *,
+    min_expected: int = MIN_EXPECTED_EVENTS,
+) -> int:
+    """The replies the rarest share needs for ``min_expected`` expected events (D-852).
+
+    With no share to expect events of, the sample is as large as the events asked for.
+    """
+    rates = expected_per_reply(reference, channel, per_reply)
+    if not rates:
+        return min_expected
+    return math.ceil(min_expected / min(rates.values()) - EPSILON)
 
 
 def channel_notes(channel: Abilities | None, where: str) -> list[str]:
@@ -382,29 +506,87 @@ class StyleError(RuntimeError):
 
 
 def style_of_live(services: Services, days: int) -> StyleReport:
-    """The last ``days`` days of the bot against the live profile (``--source live``)."""
+    """The last ``days`` days of the bot against the live profile (``--source live``).
+
+    A share with fewer than :data:`MIN_EXPECTED_EVENTS` expected events in those days is judged
+    on more of the conversation instead (:func:`carry_over_weeks`); its result says on how many.
+    """
     if days < 1:
         raise StyleError("--days must be at least 1")
     profile = load_profile(services, "live")
     if profile is None:
         raise StyleError("there is no live profile; run `twin profile rebuild` first")
-    since = services.clock.now_utc() - timedelta(days=days)
+    now = services.clock.now_utc()
     settings = services.settings.profile
-    recs = list(live_recs(services, since))
+    recs = list(live_recs(services, now - timedelta(days=days)))
     measured = measure(recs, settings.burst_gap_s, settings.segment_gap_min)
     bubbles = sum(1 for rec in recs if rec.her)
     channel = abilities_of(configured_capabilities(services))
     notes = channel_notes(channel, f"the {services.settings.channel.kind} channel")
     if bubbles == 0:
         notes.append(f"the bot sent nothing in the last {days} day(s)")
+    results = compare(profile.metrics, measured, channel=channel, min_expected=MIN_EXPECTED_EVENTS)
+    if any(result.status == "insufficient" for result in results):
+        results = carry_over_weeks(services, profile.metrics, channel, results, days, now)
+        notes += [
+            f"{result.key}: fewer than {MIN_EXPECTED_EVENTS} expected events in {days} day(s), "
+            f"judged on the last {result.days} days"
+            + (" - still not enough" if result.status == "insufficient" else "")
+            for result in results
+            if result.days is not None
+        ]
     return StyleReport(
         "live",
         "live",
-        compare(profile.metrics, measured, channel=channel),
+        results,
         days=days,
         messages=bubbles,
         notes=notes,
+        min_expected=MIN_EXPECTED_EVENTS,
     )
+
+
+def carry_over_weeks(
+    services: Services,
+    reference: ProfileMetrics,
+    channel: Abilities,
+    results: Sequence[MetricResult],
+    days: int,
+    now: datetime,
+) -> list[MetricResult]:
+    """Judge each share that lacks events on whole weeks before the asked days (D-852).
+
+    The asked days are R-EVAL-002's week of the live source; a share with too few expected
+    events in them takes the week before as well, and the one before that, until it has
+    enough - the smallest number of whole weeks that does - or the conversation has no older
+    message (then it stays "not enough", judged on all of it).  The medians and the shares that
+    had enough are left as they were.
+    """
+    settings = services.settings.profile
+    everything = list(live_recs(services, CONVERSATION_START))
+    found = list(results)
+    if not everything:
+        return found
+    first = everything[0].ts
+    weeks = 0
+    while any(result.status == "insufficient" for result in found):
+        weeks += 1
+        span = days + WEEK_DAYS * weeks
+        start = (now - timedelta(days=span)).timestamp()
+        window = [rec for rec in everything if rec.ts >= start]
+        judged = compare(
+            reference,
+            measure(window, settings.burst_gap_s, settings.segment_gap_min),
+            channel=channel,
+            min_expected=MIN_EXPECTED_EVENTS,
+        )
+        found = [
+            replace(judged[index], days=span) if result.status == "insufficient" else result
+            for index, result in enumerate(found)
+        ]
+        if start <= first:
+            break
+    return found
 
 
 def candidates_of(items: Sequence[ItemView], side: Literal["bot", "real"]) -> list[Candidate]:
@@ -464,14 +646,29 @@ def style_of_items(services: Services, store: EvalStore, run: RunView, backend: 
     return style_of_runs(services, store, [run], backend)
 
 
+def holds_replies(run: RunView) -> bool:
+    """A blind run, or the style sample of a model (``twin model evaluate --style``, D-852)."""
+    return run.kind == "blind" or (
+        run.kind == "style" and run.params.get("purpose") == SAMPLE_PURPOSE
+    )
+
+
 def style_of_runs(
     services: Services, store: EvalStore, runs: Sequence[RunView], backend: str
 ) -> StyleReport:
-    """The same for the contexts of several blind runs together (the evaluation of one model
-    may be done in more than one run, with contexts no run shares: ``twin model evaluate``)."""
+    """The same for the replies of several runs together: the style sample of a model may be
+    made in more than one run (``twin model evaluate --style`` tops it up, D-852).
+
+    A share needs :data:`MIN_EXPECTED_EVENTS` expected events to be judged.
+    """
+    if not runs:
+        raise StyleError("there are no generated replies to measure yet (no run was given)")
     for run in runs:
-        if run.kind != "blind":
-            raise StyleError(f"run {run.id} is a {run.kind} run; style metrics need a blind run")
+        if not holds_replies(run):
+            raise StyleError(
+                f"run {run.id} is a {run.kind} run; style metrics need a blind run "
+                "or a style sample"
+            )
     profile = load_profile(services, "pre_holdout")
     if profile is None:
         raise StyleError("there is no pre-holdout profile; run `twin profile rebuild` first")
@@ -499,6 +696,7 @@ def style_of_runs(
         notes=notes,
         channel=channel,
         quoted=quoted_replies(items),
+        min_expected=MIN_EXPECTED_EVENTS,
     )
 
 
@@ -513,6 +711,7 @@ def style_of_candidates(
     notes: Sequence[str] = (),
     channel: Abilities | None = None,
     quoted: tuple[int, int] | None = None,
+    min_expected: int | None = None,
 ) -> StyleReport:
     """The six metrics of ``bots`` (replies to hold-out contexts) against the pre-holdout profile.
 
@@ -520,7 +719,8 @@ def style_of_candidates(
     (:func:`style_of_runs`) and the comparison of two adapter stacks on the same test contexts
     (``twin.training.stack_choice``, D-655) both come through here, so a stack is judged by the
     very measuring and the very +-30 % of the M5 gate.  ``channel`` is what the channel the
-    replies went through could do (``None``: they went through none, as the stacks' raw output).
+    replies went through could do (``None``: they went through none, as the stacks' raw output);
+    ``min_expected`` the expected events a share needs to be judged (``None``: judged as it is).
     """
     settings = services.settings.profile
     measured = measure(candidate_recs(bots), settings.burst_gap_s, settings.segment_gap_min)
@@ -532,10 +732,13 @@ def style_of_candidates(
     return StyleReport(
         "eval_items",
         "pre_holdout",
-        compare(reference, measured, channel=channel, real=measured_real),
+        compare(
+            reference, measured, channel=channel, real=measured_real, min_expected=min_expected
+        ),
         backend=backend,
         run_id=run_id,
         messages=sum(len(c.lines) for c in bots),
         notes=list(notes),
         quoted=quoted,
+        min_expected=min_expected,
     )

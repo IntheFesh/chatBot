@@ -100,8 +100,22 @@ def _value(metric: MetricResult, value: float | None, proportion: bool) -> str:
     return f"{value * 100:.2f}%" if proportion else f"{value:.2f}"
 
 
-_STATUS = {"pass": "通过", "fail": "不通过", "n/a": "不适用", "no_data": "无数据"}
+_STATUS = {
+    "pass": "通过",
+    "fail": "不通过",
+    "n/a": "不适用",
+    "no_data": "无数据",
+    "insufficient": "样本不足",
+}
 _PROPORTIONS = {"comma_rate", "sticker_share", "emoji_code_rate", "quote_rate"}
+
+
+def _events(result: MetricResult) -> str:
+    """A share's expected events (and, live, the days it was judged on when more were needed)."""
+    if result.expected is None:
+        return "—"
+    shown = f"{result.expected:.1f}"
+    return f"{shown}（最近 {result.days} 天）" if result.days is not None else shown
 
 
 def print_style_report(console: Console, report: StyleReport) -> None:
@@ -112,7 +126,15 @@ def print_style_report(console: Console, report: StyleReport) -> None:
         else f"回测 {report.run_id}（{report.backend} 后端）vs pre_holdout 画像"
     )
     table = Table(title=f"风格指标：{where}（每项偏差 ±{TOLERANCE:.0%} 内为通过）")
-    for column in ("指标", "她（画像）", "机器人", "相对偏差", "结论", "机器人的 95% 区间"):
+    for column in (
+        "指标",
+        "她（画像）",
+        "机器人",
+        "相对偏差",
+        "结论",
+        "期望事件数",
+        "机器人的 95% 区间",
+    ):
         table.add_column(column)
     show_real = any(r.real is not None for r in report.results)
     if show_real:
@@ -125,6 +147,7 @@ def print_style_report(console: Console, report: StyleReport) -> None:
             _value(result, result.measured.value, proportion),
             _deviation(result),
             _STATUS[result.status],
+            _events(result),
             "—"
             if result.interval is None
             else f"{result.interval[0] * 100:.1f}%–{result.interval[1] * 100:.1f}%",
@@ -144,6 +167,19 @@ def print_style_report(console: Console, report: StyleReport) -> None:
             )
         )
     console.print(Text(f"机器人的消息条数：{report.messages}"))
+    if report.min_expected is not None:
+        console.print(
+            Text(
+                f"比例类指标要有 ≥ {report.min_expected} 次期望事件（她的比率 × 机器人的分母）"
+                "才判定，不够时记为样本不足"
+            )
+        )
+    if report.verdict == "insufficient":
+        short = "、".join(f"{r.label}（期望事件 {_events(r)}）" for r in report.insufficient)
+        console.print(
+            Text("样本不足：" + (short or "没有能判定的指标") + "，不判通过与否", style="yellow")
+        )
+        return
     verdict = "每项都在 ±30% 内：通过" if report.passed else "有指标超出 ±30%：不通过"
     console.print(Text(verdict, style="green" if report.passed else "red"))
     if not report.passed:
