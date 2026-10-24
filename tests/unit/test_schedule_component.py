@@ -332,6 +332,9 @@ def test_the_schedule_and_the_power_monitor_join_the_application(
     assert component.name == "schedule" and monitor.name == "power_events"
     config = services.settings.schedule
     assert monitor.threshold_s == config.power_tick_s * config.power_jump_ticks
+    # R18-D3 (D-797): the sleep check compares the services' clock with its own seconds - a
+    # simulated clock is never paired with the hardware counter of Windows
+    assert monitor.awake_seconds() == services.clock.monotonic()
 
 
 # ------------------------------------------------------------ changes from outside

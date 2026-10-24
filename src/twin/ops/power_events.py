@@ -21,7 +21,10 @@ A clock jump (all platforms)
     ``Clock.monotonic()`` on Linux and macOS, and on Windows the unbiased interrupt time
     (:meth:`~twin.ops.winapi.Win32.unbiased_interrupt_time`): there ``time.monotonic()`` of
     Python 3.12 is ``GetTickCount64``, which counts the sleep, so the difference would never
-    move (round 18, D-797).
+    move (round 18, D-797).  :func:`awake_clock_for` makes the choice: the unbiased time belongs
+    to the real system clock only - a simulated clock (tests, the evaluation sandbox) jumps hours
+    while the hardware counter does not, and comparing the two would see a "sleep" at every
+    jump; such a clock's own monotonic seconds stop with it (D-797).
 
 Both paths end in :meth:`PowerEventMonitor.resumed`; two reports of one wake-up (the window message
 and the next tick) are one event.
@@ -38,7 +41,7 @@ from datetime import datetime
 from typing import Literal
 
 from twin.app import ComponentHealth, HealthStatus, TaskSupervisor
-from twin.clock import Clock
+from twin.clock import Clock, SystemClock
 from twin.ops.alerts import AlertSink
 from twin.ops.logging import get_logger
 from twin.ops.winapi import (
@@ -52,6 +55,30 @@ from twin.ops.winapi import (
 )
 
 log = get_logger("twin.power_events")
+
+
+def awake_clock_for(
+    clock: Clock, *, platform: str | None = None, win32: Win32 | None = None
+) -> Callable[[], float]:
+    """The clock that stops while the machine sleeps, on the same time base as ``clock``.
+
+    Only the real system clock on Windows needs the unbiased interrupt time (``time.monotonic()``
+    counts a sleep there); the binding is loaded on the first reading.  Any other clock - the
+    system clock elsewhere, or a simulated clock whose wall time jumps while the hardware counter
+    does not - is compared with its own monotonic seconds (D-797).
+    """
+    on = sys.platform if platform is None else platform
+    if on != "win32" or not isinstance(clock, SystemClock):
+        return clock.monotonic
+    bound: list[Win32] = [win32] if win32 is not None else []
+
+    def unbiased_seconds() -> float:
+        if not bound:
+            bound.append(load_win32())
+        return bound[0].unbiased_interrupt_time() / UNBIASED_TICKS_PER_S
+
+    return unbiased_seconds
+
 
 DEDUP_MIN_S = 30.0
 WINDOW_START_TIMEOUT_S = 5.0
@@ -94,8 +121,10 @@ class PowerEventMonitor:
         platform: str | None = None,
         win32: Win32 | None = None,
         alerts: AlertSink | None = None,
+        awake: Callable[[], float] | None = None,
     ) -> None:
         self._clock = clock
+        self._awake = awake  # seconds of a clock that stops in a sleep; None: clock.monotonic
         self._on_resume = on_resume
         self._tick_s = tick_s
         self._jump_ticks = jump_ticks
@@ -153,8 +182,8 @@ class PowerEventMonitor:
 
     def awake_seconds(self) -> float:
         """Seconds of a clock that does not run while the machine sleeps (see the module text)."""
-        if self._platform == "win32" and self._win32 is not None:
-            return self._win32.unbiased_interrupt_time() / UNBIASED_TICKS_PER_S
+        if self._awake is not None:
+            return self._awake()
         return self._clock.monotonic()
 
     async def _watch(self) -> None:

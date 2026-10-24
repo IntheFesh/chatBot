@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from twin.app import Application, ComponentHealth, HealthStatus, TaskSupervisor
 from twin.ops.logging import get_logger
-from twin.ops.power_events import PowerEvent, PowerEventMonitor
+from twin.ops.power_events import PowerEvent, PowerEventMonitor, awake_clock_for
 from twin.ops.state_watch import StateWatcher
 from twin.schedule.events import (
     CandidatesExpired,
@@ -282,6 +282,7 @@ def register_schedule(
         tick_s=config.power_tick_s,
         jump_ticks=config.power_jump_ticks,
         alerts=services.alerts,
+        awake=awake_clock_for(services.clock),
     )
     application.register(monitor)
     if reconnect is not None:

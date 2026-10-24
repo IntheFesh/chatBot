@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 
 import pytest
@@ -19,7 +20,8 @@ from tests.support.clock import ManualClock
 from tests.support.waiting import wait_until
 from tests.support.win32 import FakeWin32
 from twin.app import HealthStatus
-from twin.ops.power_events import PowerEvent, PowerEventMonitor, clock_drift
+from twin.clock import SystemClock
+from twin.ops.power_events import PowerEvent, PowerEventMonitor, awake_clock_for, clock_drift
 from twin.ops.winapi import (
     PBT_APMRESUMEAUTOMATIC,
     PBT_APMRESUMESUSPEND,
@@ -179,6 +181,11 @@ async def test_the_user_waking_the_machine_by_hand_is_the_same_wake_up(clock: Ma
         await monitor.stop()
 
 
+def unbiased_of(fake: FakeWin32) -> Callable[[], float]:
+    """What :func:`awake_clock_for` gives the real system clock on Windows, read from ``fake``."""
+    return awake_clock_for(SystemClock(), platform="win32", win32=fake)
+
+
 def windows_sleep(clock: ManualClock, fake: FakeWin32, seconds: float) -> None:
     """The machine slept the way Windows sleeps for Python 3.12.
 
@@ -200,7 +207,7 @@ async def test_a_window_that_cannot_be_made_falls_back_to_the_clock(clock: Manua
     fake = FakeWin32(clock=clock)
     fake.window_fails = True
     heard = Heard()
-    monitor = await started(clock, heard, platform="win32", win32=fake)
+    monitor = await started(clock, heard, platform="win32", win32=fake, awake=unbiased_of(fake))
     try:
         assert monitor.window_handle is None
         health = monitor.health()
@@ -226,7 +233,7 @@ async def test_on_windows_the_clock_check_reads_the_unbiased_interrupt_time(
     """
     fake = FakeWin32(clock=clock)
     heard = Heard()
-    monitor = await started(clock, heard, platform="win32", win32=fake)
+    monitor = await started(clock, heard, platform="win32", win32=fake, awake=unbiased_of(fake))
     try:
         await wait_until(lambda: clock.pending_sleepers >= 1)
         await clock.advance(TICK)  # an ordinary tick
@@ -241,6 +248,42 @@ async def test_on_windows_the_clock_check_reads_the_unbiased_interrupt_time(
         await wait_until(lambda: len(heard.events) == 2)
     finally:
         await monitor.stop()
+
+
+async def test_a_simulated_clock_is_never_compared_with_the_hardware_counter(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 correction (D-797): on Windows the check read ``QueryUnbiasedInterruptTime`` even
+    when the monitor ran on a simulated clock.  The simulated wall clock jumps hours in a test
+    world (or the evaluation sandbox) while the hardware counter does not move, so every jump
+    was a "sleep": the morning greeting was voided and replies were re-planned (the Windows CI
+    failures of the life tests).  A clock that is not the system clock is compared with its own
+    monotonic seconds; nothing is heard when it simply runs on."""
+    heard = Heard()
+    still = FakeWin32()  # a hardware counter that does not follow the simulated clock
+    monitor = await started(clock, heard, platform="win32", win32=still)
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        for _ in range(12):  # a simulated world steps from one wake-up to the next, awake
+            clock.tick(300)  # (tests/support/life_world.py: steps of up to five minutes)
+            await clock.advance(TICK)
+        assert heard.events == []
+        assert monitor.awake_seconds() == clock.monotonic()
+    finally:
+        await monitor.stop()
+
+
+def test_only_the_system_clock_on_windows_reads_the_unbiased_interrupt_time(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 (D-797): which clock :func:`awake_clock_for` pairs with which wall clock."""
+    fake = FakeWin32(clock=clock)
+    fake.suspended_s = 100.0
+    real_on_windows = awake_clock_for(SystemClock(), platform="win32", win32=fake)
+    assert real_on_windows() == pytest.approx(clock.monotonic() - 100.0)  # the unbiased time
+    assert awake_clock_for(clock, platform="win32", win32=fake) == clock.monotonic
+    system = SystemClock()
+    assert awake_clock_for(system, platform="linux") == system.monotonic
 
 
 @pytest.mark.windows
@@ -300,7 +343,7 @@ async def test_a_real_hidden_window_receives_a_broadcast_message(clock: ManualCl
         await wait_until(lambda: len(heard.events) == 1)
         assert heard.events[0].source == "wm_powerbroadcast"
         await wait_until(lambda: clock.pending_sleepers >= 1)
-        await clock.advance(TICK)  # the clock check reads the real unbiased interrupt time
+        await clock.advance(TICK)  # the clock check reads this simulated clock's own seconds
         assert len(heard.events) == 1 and monitor.health().status is HealthStatus.OK
     finally:
         await monitor.stop()
