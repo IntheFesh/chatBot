@@ -81,10 +81,18 @@ jobs:
       - name: every test file pytest collects is covered by the sharding
         run: uv run python scripts/shard_tests.py --check-collection
 
+      # R-SCOPE-003 (D-825): a fresh install has no consent date, so `twin doctor` must name it
+      # and fail; with the date `twin setup` records (the same one the test fixtures write) it passes
       - name: smoke test of the CLI
         run: |
           uv run twin --help
-          uv run twin doctor
+          if uv run twin doctor > doctor-without-consent.txt 2>&1; then
+            cat doctor-without-consent.txt
+            echo "twin doctor passed although no consent date is recorded"
+            exit 1
+          fi
+          grep -q "consent.confirmed_at" doctor-without-consent.txt
+          TWIN_CONSENT__CONFIRMED_AT=2026-10-08 uv run twin doctor
 
   tests:
     name: tests (${{ matrix.os }}, ${{ matrix.shard }}/${{ matrix.shards }})
