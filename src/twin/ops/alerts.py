@@ -179,6 +179,12 @@ SPECS: dict[str, AlertSpec] = {
     "job_failed": AlertSpec(
         "后台任务失败", "用 twin jobs list --status failed 查看。", notify=False
     ),
+    # the health check of the jobs that failed in the last day (round 18, D-892): one notice for all
+    "failed_jobs": AlertSpec(
+        "有后台任务处于失败状态",
+        "用 twin jobs list --status failed 查看原因，再用 twin jobs retry --failed 重新排队；"
+        "任务重新跑成功后会自动通知已恢复。",
+    ),
     "reply_failed": AlertSpec("一次回复没有发出", "已用延迟回复降级。", notify=False),
     "channel_quota_exhausted": AlertSpec("微信条数用完", "等你发下一条消息后恢复。", notify=False),
     "power_resume_failed": AlertSpec("唤醒后的处理失败", "请查看日志。", notify=False),

@@ -33,6 +33,7 @@ from twin.ops.health import (
     check_components,
     check_deepseek,
     check_disk,
+    check_failed_jobs,
     check_queue,
     check_style,
 )
@@ -602,3 +603,92 @@ async def test_the_loops_run_under_the_clock(services: Services, clock: ManualCl
         await monitor.stop()
     assert monitor.health().status is HealthStatus.OK
     assert len(snapshots(services)) >= 2
+
+
+# ------------------------------------------------------------- failed jobs (R18-D1-②)
+
+
+def failed_job(queue: JobQueue, job_type: str) -> str:
+    """A job of ``job_type`` that failed for good just now, as the worker leaves one."""
+    job_id = queue.enqueue(job_type, {}, max_attempts=1)
+    claimed = queue.claim_next({job_type}, offpeak_allowed=True, worker_id="w")
+    assert claimed is not None and claimed.id == job_id
+    assert queue.fail(job_id, "w", "RuntimeError", retry_at=None) == "failed"
+    return job_id
+
+
+def finish_all(queue: JobQueue, job_type: str) -> None:
+    while (job := queue.claim_next({job_type}, offpeak_allowed=True, worker_id="w")) is not None:
+        assert queue.complete(job.id, "w")
+
+
+def test_r18_d1_failed_jobs_are_a_warning_counted_by_type_with_the_command_to_retry() -> None:
+    """R18-D1-② (D-892, user decision 【后台任务失败与告警补发】①)."""
+    calm = check_failed_jobs({})
+    assert calm.name == "failed_jobs" and calm.level is HealthLevel.OK and calm.category is None
+    check = check_failed_jobs({"memory_extract": 2, "image_caption": 1})
+    assert check.level is HealthLevel.WARN and check.value == 3
+    assert (check.category, check.severity) == ("failed_jobs", "warning")
+    assert "image_caption ×1" in check.detail and "memory_extract ×2" in check.detail
+    assert "twin jobs retry --failed" in check.detail
+
+
+async def test_r18_d1_the_collector_counts_the_jobs_still_failed_from_the_last_day(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D1-②: only "24 小时内" counts, and only what is still failed."""
+    queue = JobQueue(services.db, clock)
+    failed_job(queue, "lifeline_generate")  # a day and an hour before the look: not counted
+    clock.tick(25 * 3600)
+    failed_job(queue, "memory_extract")
+    failed_job(queue, "memory_extract")
+    retried = failed_job(queue, "image_caption")
+    failed_job(queue, "image_caption")
+    assert queue.retry(retried)  # queued again: no longer failed
+    cancelled = queue.enqueue("persona_generate", {})
+    assert queue.cancel(cancelled)  # cancelled is somebody's decision, not a failure
+    queue.enqueue("memory_extract", {})  # waiting
+    report = await HealthCollector(services).collect()
+    check = report.get("failed_jobs")
+    assert check is not None and check.level is HealthLevel.WARN and check.value == 3
+    assert "memory_extract ×2" in check.detail and "image_caption ×1" in check.detail
+    assert "lifeline_generate" not in check.detail
+    clock.tick(24 * 3600 + 60)  # those three are older than a day now
+    aged = (await HealthCollector(services).collect()).get("failed_jobs")
+    assert aged is not None and aged.level is HealthLevel.OK
+
+
+async def test_r18_d1_failed_jobs_are_announced_once_and_retrying_them_sends_the_recovery(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D1-②: the warning is announced by the monitor (one notice for all failed jobs, the
+    per-job ``job_failed`` stays unannounced, D-445); after ``twin jobs retry --failed`` the jobs
+    run, the check is good again and the "recovered" notice is queued."""
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    log_in(services).record_poll_success()
+    queue = JobQueue(services.db, clock)
+    for job_type in ("memory_extract", "memory_extract", "image_caption"):
+        failed_job(queue, job_type)
+        services.alerts.raise_alert("job_failed", f"job {job_type} failed")  # as the worker does
+    report = await monitor.tick()
+    check = report.get("failed_jobs")
+    assert check is not None and check.level is HealthLevel.WARN and report.status == "degraded"
+    announced = [a for a in alerts_of(services) if a.toast_state != "none"]
+    assert [(a.category, a.kind) for a in announced] == [("failed_jobs", "alert")]
+    assert announced[0].detail == {"check": "failed_jobs", "value": 3}
+    clock.tick(60)
+    await monitor.tick()  # still there: not announced again
+    assert len([a for a in alerts_of(services) if a.category == "failed_jobs"]) == 1
+
+    assert len(queue.retry_failed()) == 3  # `twin jobs retry --failed`
+    finish_all(queue, "memory_extract")
+    finish_all(queue, "image_caption")
+    clock.tick(60)
+    report = await monitor.tick()
+    assert report.get("failed_jobs").level is HealthLevel.OK  # type: ignore[union-attr]
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs"]
+    assert [(a.kind, a.resolved_at is not None) for a in rows] == [
+        ("alert", True),
+        ("recovery", False),
+    ]
+    assert rows[1].toast_state == "pending" and rows[1].mail_state == "pending"

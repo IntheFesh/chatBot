@@ -9,10 +9,11 @@
   are deleted once an hour;
 * turns a failing check into an alert the moment it starts failing (the category the check names),
   again every ``ops.health.remind_h`` hours while it goes on, and closes it with a "recovered"
-  notice when the check is good again (R-OPS-004).  What is open is read back from the alerts
-  table at the first look (``AlertService.open_alerts``, round 18, D-800): a problem announced
-  before a restart is closed by the next process, and one that goes on is reminded, not
-  announced afresh;
+  notice when the check is good again (R-OPS-004).  A warning that names a category is announced
+  the same way (``failed_jobs``, round 18, D-892); the other warnings name none and stay quiet.
+  What is open is read back from the alerts table at the first look (``AlertService.open_alerts``,
+  round 18, D-800): a problem announced before a restart is closed by the next process, and one
+  that goes on is reminded, not announced afresh;
 * every Sunday at 03:30 local time runs the integrity check (:mod:`twin.ops.integrity`) in a
   task of its own - it can take minutes on a large database and must not delay the snapshots -
   keeps the result in the setting ``ops.integrity.last`` and raises ``integrity_failed`` if it is
@@ -164,7 +165,7 @@ class HealthMonitor:
         remind = timedelta(hours=self._config.remind_h)
         for check in report.checks:
             known = self._open.get(check.name)
-            if check.level is HealthLevel.FAIL and check.category is not None:
+            if check.level is not HealthLevel.OK and check.category is not None:
                 if known is not None and known.category != check.category:
                     alerts.recover(known.category, f"{check.name}: now {check.category}")
                     known = None

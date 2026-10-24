@@ -94,9 +94,10 @@ def test_health_without_the_application_says_what_only_it_could_tell(home: Servi
     assert code == 0, out
     checks = data["checks"]
     assert set(checks) == {
-        "channel", "disk", "queue", "backup", "budget", "readiness", "process", "deepseek",
-        "style_model", "app",
+        "channel", "disk", "queue", "failed_jobs", "backup", "budget", "readiness", "process",
+        "deepseek", "style_model", "app",
     }  # fmt: skip
+    assert checks["failed_jobs"]["status"] == "ok"  # R18-D1-②: nothing failed
     # nothing imported yet: the bot is not ready (D-873), a warning without an alert
     assert checks["readiness"]["status"] == "warn" and checks["readiness"]["category"] is None
     assert checks["readiness"]["detail"] == "未就绪：缺 画像、作息模型、人设卡"
