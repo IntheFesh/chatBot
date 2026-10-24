@@ -10,6 +10,12 @@
   pre-holdout compact card), statistical profile and dataset - from the manifest and **locks**
   them into the row.  The versions are required: a manifest without them is refused, because a
   model without them could be served with the wrong prompt (R-TRN-011);
+* locks the **hold-out cut-off** of that dataset as well (round 18, user decision, D-885): the
+  evaluation of the model draws only contexts after it (D-886), whatever the cut-off is later
+  moved to.  The manifest names it (``holdout_cutoff`` of the training package); an older
+  manifest does not, and the dataset version recorded at the export gives it; with neither the
+  model is refused, and so is a manifest that contradicts the record.  Registering the files of a
+  row that has no cut-off yet (registered before round 18) fills it in;
 * writes one row per usable file: a GGUF per quantisation and the LoRA adapter (``quant`` is
   ``lora``).  Registering the same files again changes nothing; a different file under the same
   run and quantisation is refused.
@@ -35,14 +41,16 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from twin.clock import ensure_aware
 from twin.storage.db import Database
-from twin.storage.training_models import ModelRegistryEntry, TrainingRun
+from twin.storage.training_models import DatasetVersion, ModelRegistryEntry, TrainingRun
 from twin.training.adapter_stack import (
     AdapterStack,
     StackError,
@@ -98,6 +106,7 @@ class ModelView:
     active: bool
     gate_passed: bool | None
     created_at: str
+    holdout_cutoff: datetime | None = None  # the cut-off of its training set (D-885)
 
     @property
     def adapter_stack(self) -> AdapterStack | None:
@@ -156,6 +165,7 @@ def _view(row: ModelRegistryEntry) -> ModelView:
         active=row.active,
         gate_passed=row.gate_passed,
         created_at=row.created_at.isoformat(),
+        holdout_cutoff=row.holdout_cutoff,
     )
 
 
@@ -203,6 +213,33 @@ def locked_versions(manifest: Mapping[str, Any]) -> LockedVersions:
             "the manifest does not name " + ", ".join(missing) + "; the model cannot be locked"
         )
     return LockedVersions(*(str(manifest[name]) for name in LOCKED_FIELDS))
+
+
+def locked_cutoff(session: Session, manifest: Mapping[str, Any], dataset_version: str) -> datetime:
+    """The hold-out cut-off of the dataset the model was trained on (see the module text)."""
+    named: datetime | None = None
+    raw = str(manifest.get("holdout_cutoff") or "").strip()
+    if raw:
+        try:
+            named = ensure_aware(datetime.fromisoformat(raw))
+        except ValueError:
+            raise RegistryError(
+                f"the manifest names a hold-out cut-off {raw!r} that is not a moment"
+            ) from None
+    row = session.get(DatasetVersion, dataset_version)
+    recorded = row.holdout_cutoff if row is not None else None
+    if named is not None and recorded is not None and named != recorded:
+        raise RegistryError(
+            f"the manifest says the hold-out cut-off was {named.isoformat()}, but dataset "
+            f"{dataset_version} was exported with {recorded.isoformat()}"
+        )
+    found = named or recorded
+    if found is None:
+        raise RegistryError(
+            f"the manifest names no hold-out cut-off and dataset {dataset_version} is not "
+            "recorded here: the model cannot be locked to the cut-off it was trained with"
+        )
+    return found
 
 
 def _stored_path(directory: Path, relative: str, models_dir: Path | None) -> str:
@@ -258,6 +295,7 @@ def register_artifacts(
                 f"the run {chosen_run} used dataset {run.dataset_version}, "
                 f"the manifest says {versions.dataset_version}"
             )
+        cutoff = locked_cutoff(session, manifest, versions.dataset_version)
         for model in models:
             relative = str(model["path"])
             if relative not in by_path:
@@ -272,6 +310,8 @@ def register_artifacts(
                         f"{row_id} is already registered with a different sha256; "
                         "a model file is never replaced"
                     )
+                if row.holdout_cutoff is None:  # a row of an older registry gets its cut-off
+                    row.holdout_cutoff = cutoff
                 unchanged += 1
             else:
                 row = ModelRegistryEntry(
@@ -288,6 +328,7 @@ def register_artifacts(
                     persona_version=versions.persona_version,
                     profile_version=versions.profile_version,
                     dataset_version=versions.dataset_version,
+                    holdout_cutoff=cutoff,
                     eval=metrics,
                     enabled=False,
                     active=False,

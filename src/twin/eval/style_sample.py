@@ -12,7 +12,9 @@ the blind test:
   plus :data:`PLAN_MARGIN` for the spread of the bot's own denominators and the pairs that fail to
   generate - what decides in the end is the bot's real denominator when the sample is measured;
 * the contexts are drawn from the hold-out the way a blind test draws them (the same checks,
-  stratified), as many as needed, at most every usable one; when the hold-out has fewer, every
+  stratified) - and only after the cut-off the model was trained with (``since``, locked in
+  ``model_registry``, round 18, D-886) - as many as needed, at most every usable one; when the
+  hold-out has fewer, every
   context is answered more than once, each copy with a seed of its own (``replica`` and ``seed``
   are kept in the item, so the sample can be made again);
 * a second plan for the same model tops the sample up: it measures what was generated, sizes the
@@ -34,6 +36,7 @@ import math
 from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Final
 
 from twin.channel.configured import abilities_of
@@ -174,8 +177,12 @@ async def plan_style_sample(
     kit: SandboxKit | None = None,
     models: StyleModels | None = None,
     extra_params: Mapping[str, Any] | None = None,
+    since: datetime | None = None,
 ) -> StylePlan:
-    """Size, draw and queue the style sample of ``model_id`` (see the module description)."""
+    """Size, draw and queue the style sample of ``model_id`` (see the module description).
+
+    ``since`` is the cut-off the model was trained with: no context before it is drawn (D-886).
+    """
     check_backends(services, backends, models)
     problems = readiness_problems(services, backends)
     if problems:
@@ -210,7 +217,7 @@ async def plan_style_sample(
             for run in earlier
             for item in store.items(run.id, backend=backends[0], with_payload=False)
         )
-        drawer = SampleDrawer(services)
+        drawer = SampleDrawer(services, since=since)
         fresh: DrawResult = await asyncio.to_thread(
             lambda: drawer.draw(need, seed=chosen_seed, exclude=set(used))
         )
@@ -242,6 +249,7 @@ async def plan_style_sample(
                 "seed": chosen_seed,
                 "thinking_mode": thinking,
                 "holdout_cutoff": holdout_cutoff(services).isoformat(),
+                "drawn_since": drawer.start().isoformat(),
                 "min_expected": MIN_EXPECTED_EVENTS,
                 "margin": PLAN_MARGIN,
                 "needed": need,

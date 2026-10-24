@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -277,3 +277,26 @@ def test_the_history_is_at_most_seven_merged_turns_before_the_message_being_answ
     assert len(sample.history) == 7 and sample.history[-1]["role"] == "bot"
     assert sample.inbound[0]["text"] == "最后一问"
     assert [turn["role"] for turn in sample.history] == ["bot", "user"] * 3 + ["bot"]
+
+
+def test_r18_c3_a_draw_for_a_model_starts_at_its_training_cutoff(services: Services) -> None:
+    """R18-C3 ③ (user decision, D-886): M5 draws only after the cut-off the model was trained with
+    (``since``), never before the cut-off in force, and still never a context used before."""
+    build(services)
+    cutoff = holdout_cutoff(services)
+    everything = SampleDrawer(services).draw(500, seed=1)
+    times = sorted(sample.at for sample in everything.samples)
+    trained = times[len(times) // 2]  # a model trained after a later re-split
+    bound = SampleDrawer(services, since=trained)
+    drawn = bound.draw(500, seed=1)
+    assert drawn.samples and all(sample.at >= trained for sample in drawn.samples)
+    assert drawn.holdout_blocks < everything.holdout_blocks
+    assert {s.sample_key for s in drawn.samples} == {
+        s.sample_key for s in everything.samples if s.at >= trained
+    }
+    earlier = SampleDrawer(services, since=cutoff - timedelta(days=30)).draw(500, seed=1)
+    assert keys(earlier.samples) == keys(everything.samples)  # the later of the two bounds
+    used = {sample.sample_key for sample in drawn.samples[:5]}
+    again = bound.draw(500, seed=2, exclude=used)
+    assert not used & {sample.sample_key for sample in again.samples}
+    assert again.excluded["context_used_before"] == len(used)

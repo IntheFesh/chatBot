@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from twin.llm.errors import StyleModelError
 from twin.llm.style_client import RenderedPrompt, StyleHealth, StyleOutput, StyleParams
@@ -31,8 +32,13 @@ def register_model(
     persona_version: str = "v1",
     profile_version: str = "p1",
     dataset_version: str = "ds-test-01",
+    holdout_cutoff: datetime | None = None,
 ) -> str:
-    """A model file in the registry; returns its id (``<run_id>-<quant>``)."""
+    """A model file in the registry; returns its id (``<run_id>-<quant>``).
+
+    ``holdout_cutoff`` is the cut-off the model is locked to (round 18, D-885); an evaluation of
+    the model needs it, serving does not.
+    """
     now = services.clock.now_utc()
     row_id = f"{run_id}-{quant}"
     with services.db.transaction(bump_state=False) as session:
@@ -51,6 +57,7 @@ def register_model(
                 persona_version=persona_version,
                 profile_version=profile_version,
                 dataset_version=dataset_version,
+                holdout_cutoff=holdout_cutoff,
                 eval={},
                 enabled=active,
                 active=active,

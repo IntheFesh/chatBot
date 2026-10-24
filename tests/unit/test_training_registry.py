@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -437,3 +438,63 @@ def test_the_register_command_reports_a_damaged_directory(data_dir: Path) -> Non
     assert done.exit_code == 1 and "Q8_0.gguf" in done.output
     other = runner.invoke(app, ["model", "register", str(data_dir)])
     assert other.exit_code == 1 and "not an artifact directory" in other.output
+
+
+# ------------------------------------------- the cut-off the model was trained with (R18-C3)
+
+TRAINED_CUTOFF = "2026-08-14T02:46:19+00:00"
+
+
+def test_r18_c3_registering_locks_the_holdout_cutoff_of_the_training_set(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C3 ③ (user decision, D-885): ``model_registry`` locks the hold-out cut-off of the
+    dataset the model was trained on (the training package names it; the manifest copies it)."""
+    directory = tmp_path / "models" / "r-test-1"
+    manifest = build_artifact_dir(directory, versions={"holdout_cutoff": TRAINED_CUTOFF})
+    assert manifest["holdout_cutoff"] == TRAINED_CUTOFF
+    result = register_artifacts(services.db, directory, models_dir=tmp_path / "models")
+    moment = datetime.fromisoformat(TRAINED_CUTOFF)
+    assert {model.holdout_cutoff for model in result.models} == {moment}
+    assert get_model(services.db, "r-test-1-lora").holdout_cutoff == moment
+
+
+def test_r18_c3_the_local_dataset_record_gives_the_cutoff_a_manifest_does_not_name(
+    services: Services, tmp_path: Path
+) -> None:
+    """R18-C3 ③ (D-885): an older manifest names no cut-off - the dataset version recorded at the
+    export does; with neither the model is refused, and a manifest that contradicts the record
+    too.  Registering again fills the cut-off of a row registered before round 18."""
+    dataset = write_synthetic_dataset(tmp_path / "ds", version="ds-test-01")
+    ensure_dataset_version(services.db, dataset, "ds")
+    recorded = datetime.fromisoformat(dataset.meta.holdout_cutoff)
+    directory = tmp_path / "r1"
+    build_artifact_dir(directory, versions={"holdout_cutoff": ""})
+    result = register_artifacts(services.db, directory)
+    assert {model.holdout_cutoff for model in result.models} == {recorded}
+    with services.db.transaction() as session:
+        for row in session.scalars(select(ModelRegistryEntry)):
+            row.holdout_cutoff = None  # what the rows of an older registry hold
+    assert get_model(services.db, "r-test-1-Q4_K_M").holdout_cutoff is None
+    again = register_artifacts(services.db, directory)
+    assert again.created == 0 and {m.holdout_cutoff for m in again.models} == {recorded}
+    unknown = tmp_path / "r2"
+    build_artifact_dir(
+        unknown, run_id="r-2", dataset_version="ds-x", versions={"holdout_cutoff": ""}
+    )
+    with pytest.raises(RegistryError, match="hold-out cut-off"):
+        register_artifacts(services.db, unknown)
+    other = tmp_path / "r3"
+    build_artifact_dir(other, run_id="r-3", versions={"holdout_cutoff": TRAINED_CUTOFF})
+    with pytest.raises(RegistryError, match="dataset ds-test-01 was exported with"):
+        register_artifacts(services.db, other)
+
+
+def test_r18_c3_model_show_names_the_locked_cutoff(data_dir: Path) -> None:
+    """R18-C3 ③ (D-885): ``twin model show`` lists the cut-off with the other locked versions."""
+    directory = data_dir / "models" / "r-test-1"
+    build_artifact_dir(directory, versions={"holdout_cutoff": TRAINED_CUTOFF})
+    assert runner.invoke(app, ["model", "register", str(directory)]).exit_code == 0
+    shown = runner.invoke(app, ["model", "show", "r-test-1-Q5_K_M"])
+    assert shown.exit_code == 0, shown.output
+    assert "hold-out cut-off" in shown.output and "2026-08-14 02:46" in shown.output

@@ -163,3 +163,21 @@ async def test_r18_e5_a_fresh_installation_says_what_to_do_first(services: Servi
     with pytest.raises(EvalError, match="unknown backend"):
         await plan_style_sample(services, ("nobody",), model_id="m-5", seed=1)
     assert EvalStore(services.db, services.clock).list_runs("style") == []
+
+
+async def test_r18_c3_the_style_sample_of_a_model_starts_at_its_training_cutoff(
+    world: World, api: respx.MockRouter, script: DeepSeekScript
+) -> None:
+    """R18-C3 ③ (D-886): the style sample (R9's size) is drawn after the model's own cut-off."""
+    usable = SampleDrawer(world.services).draw(10_000, seed=1).samples
+    times = sorted(sample.at for sample in usable)
+    trained = times[len(times) // 2]
+    plan = await plan_style_sample(
+        world.services, ("deepseek",), model_id="m-9", seed=7, since=trained
+    )
+    store = EvalStore(world.services.db, world.services.clock)
+    items = store.items(plan.run.id)
+    assert items and all(item.at >= trained for item in items)
+    later = {sample.sample_key for sample in usable if sample.at >= trained}
+    assert {item.sample_key for item in items} == later and plan.contexts == len(later)
+    assert store.get_run(plan.run.id).params["drawn_since"] == trained.isoformat()

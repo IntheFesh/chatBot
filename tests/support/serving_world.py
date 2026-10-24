@@ -20,6 +20,7 @@ from tests.support.style_models import register_model
 from tests.support.tiny_tokenizer import tiny_qwen_tokenizer
 from twin.clock import SystemClock
 from twin.config.runtime import BACKEND_ACTIVE, BackendName
+from twin.profile.holdout import get_holdout
 from twin.services import Services
 from twin.serving.llamacpp import WINDOWS_BASE_FILES
 from twin.serving.runtime import LocalProgram, TokenizerSource
@@ -115,6 +116,9 @@ def build_serving_world(
     options: dict[str, object] = {}
     if template_version is not None:
         options["template_version"] = template_version
+    stored = get_holdout(real)
+    if stored is not None:  # the model was trained with the cut-off in force (D-885)
+        options["holdout_cutoff"] = stored.cutoff
     model_id = register_model(
         real,
         run_id=run_id,

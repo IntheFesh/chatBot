@@ -7,6 +7,7 @@ trained with.  Enabling, serving and the release gate come with round 14.
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -76,8 +77,16 @@ def model_register_command(
     )
     typer.echo(
         f"locked to template {versions.template_version}, persona card {versions.persona_version}, "
-        f"profile {versions.profile_version}, dataset {versions.dataset_version}"
+        f"profile {versions.profile_version}, dataset {versions.dataset_version}, "
+        f"hold-out cut-off {_cutoff(result.models[0].holdout_cutoff)}"
     )
+
+
+def _cutoff(moment: datetime | None) -> str:
+    """The locked hold-out cut-off as the commands show it (D-885)."""
+    if moment is None:
+        return "unknown (register the model's files again)"
+    return f"{moment:%Y-%m-%d %H:%M} UTC (evaluated on contexts after it)"
 
 
 @model_app.command("list")
@@ -125,6 +134,7 @@ def model_show_command(
         ("persona card version", model.versions.persona_version),
         ("profile version", model.versions.profile_version),
         ("dataset version", model.versions.dataset_version),
+        ("hold-out cut-off", _cutoff(model.holdout_cutoff)),
         ("state", _flags(model)),
         ("registered", model.created_at),
     ]
