@@ -1,0 +1,808 @@
+"""The training-set export (R-TRN-002 to R-TRN-007, R-TRN-013).
+
+``twin train export`` turns the real conversation into ShareGPT samples for LLaMA-Factory: every
+reply block of hers is one sample, the target is what she wrote, the input is what the style
+model would have been given at that moment.
+
+*One prompt, one builder.*  The system message and the conversation come from the same
+:class:`~twin.engine.style_prompt.StylePromptBuilder` the running bot uses, fed with
+``AsOfView(t)`` of the moment ``t`` of the first message of the block: the pre-holdout compact
+persona card, the local time and weekday, her state at that time according to the pre-holdout
+routine, the memory block as it was known then.  Nothing after ``t`` can reach a prompt
+(R-TRN-013).  The messages of the conversation itself are read through
+:mod:`twin.training.export_blocks`, i.e. through :mod:`twin.ingest.corpus` and only before ``t``.
+
+*What becomes a sample.*  Every reply block of hers whose target still has something in it after
+the lines the bot could not send are deleted - except a block that does not fit 2,048 tokens even
+after all older context is dropped; each reason is counted.  The context is what the running bot
+would read: the last eight merged turns, **whatever the pauses between them were** (D-642), so a
+reply 200 minutes after the user's message is a sample like any other.  A prompt must end with a
+turn of the user's: when the context does not (she opened the conversation, wrote twice in a row,
+or wrote after a long silence), the sample is a *proactive* one and the last turn is the fixed cue
+the proactive path uses (:data:`~twin.engine.style_prompt.PROACTIVE_CUE_TEXT`), as online.  A
+sample that is too long loses its oldest context, never its target: LLaMA-Factory would otherwise
+cut the end of the prompt, the assistant opener included (``training/README.md``).
+
+*Splits.*  By time: the samples from :func:`~twin.profile.holdout.holdout_cutoff` on are the test
+set, the last 5 % of the rest the validation set, the earlier ones train.
+
+*Desensitising.*  One :class:`~twin.llm.redaction.ConsistentRedactor` for the whole set: the same
+person, phone number or address is the same token everywhere.  Every sample is scanned for
+what is left (personal data, event text in a target) before the set is declared desensitised, and
+the written files are scanned again.
+
+*Plans.*  ``training.hybrid_plan_ratio`` of the training and validation samples carry a plan
+(:mod:`twin.training.plans`), and so does every proactive one of them: online the proactive path
+always hands the style model a plan (D-643).  When some of them have none yet, the export stops
+after a first pass, hands the missing inputs back, and writes nothing; once the plans exist the
+same command completes.
+
+*What has to exist first* (R18-F7, D-817).  The pre-holdout persona card, profile and routine;
+the description part of that card (``[自动-描述]``: a card of statistics rules only is not what the
+style model is meant to learn from); and the memory replay of every local day with messages in the
+export range, since every prompt carries ``memory_view(t)``.  A gap stops the export with the
+command that closes it; ``ExportOptions.allow_incomplete`` (``--allow-incomplete``) exports anyway,
+and the statistics of the dataset record what was missing (``derived_data``).
+
+*Built for this cut-off* (round 18, user decision, D-881/D-882; iron rule 13).  ``twin train
+export`` re-splits the hold-out first when the data has moved past it (the job,
+:mod:`twin.training.export_job`), and nothing derived from the pre-holdout data may be read under
+the old cut-off: the exporter refuses to start while the active pre-holdout profile, routine or
+card statistics were computed for another cut-off (:mod:`twin.profile.pre_holdout`).  A
+description generated for another cut-off ("stale") does not stop the first pass - the plans do
+not use the card - but the export waits for the new one, which the job plans inside the batch of
+the plans (one approval for both, D-883); ``--allow-incomplete`` writes the set with the stale one
+and records it.
+
+*Her state on waking.*  The prompt says she has just woken (``WOKE_UP_LINE``) when the user wrote
+while the routine had her deep asleep and she answers awake, and for a proactive sample in the
+greeting window after her sleep, as the engine and the greeting trigger do (D-644).  A plan
+carries the sticker tag of the target as ``sticker_hint``, as the online planner would write it.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+from collections.abc import Callable, Generator, Iterator
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
+
+from twin.engine.prompt import STATE_LINES, moment_text
+from twin.engine.style_prompt import (
+    PlanFields,
+    StylePromptBuilder,
+    StylePromptError,
+    StyleTurn,
+    TokenBudget,
+    normalize_context,
+    with_proactive_cue,
+)
+from twin.ingest.corpus import her_message_count
+from twin.llm.redaction import ConsistentRedactor, redact, redact_text
+from twin.memory.asof import AsOfSource, AsOfView
+from twin.memory.replay import days_not_replayed
+from twin.profile.holdout import HoldoutError, holdout_cutoff
+from twin.profile.persona.refresh import has_description
+from twin.profile.persona.render import RenderedPersona
+from twin.profile.pre_holdout import PreHoldoutState, pre_holdout_state
+from twin.stickers.catalog import StickerCatalog
+from twin.stickers.incoming import user_sticker_lines
+from twin.training import lf_template
+from twin.training.dataset_dir import DatasetDir, ParityCase, SftSample, write_dataset_dir
+from twin.training.export_blocks import (
+    BlockRef,
+    LoadedBlock,
+    MessageLoader,
+    iter_block_refs,
+)
+from twin.training.export_stats import SampleFacts, StatsCollector
+from twin.training.export_text import Target, context_text, event_lines, render_target
+from twin.training.parity_cases import (
+    DEEP_TURNS,
+    MULTILINE_LINES,
+    TAG_CODE,
+    TAG_DEEP,
+    TAG_ENTITY,
+    TAG_MULTILINE,
+    TAG_PLAN,
+    TAG_PRELUDE,
+    TAG_PROACTIVE,
+    TAG_QUOTE,
+    TAG_SINGLE,
+    TAG_STICKER,
+    TAG_TEST,
+    TAG_TRIMMED,
+    ParitySelector,
+)
+from twin.training.plans import (
+    DONE,
+    PlanEntry,
+    PlanInput,
+    PlanStore,
+    fact_lines,
+    needs_plan,
+    plan_selected,
+    target_hash,
+)
+from twin.training.profiles import CUTOFF_LEN
+from twin.training.tokenizer import TextTokenizer
+
+if TYPE_CHECKING:
+    from twin.services import Services
+
+VAL_RATIO = 0.05
+MIN_PROMPT_TOKENS = 64
+BATCH_BLOCKS = 256
+SCOPE = "pre_holdout"
+WORK_DIR_PREFIX = ".export-"
+PERSONA_COMMAND = "`twin persona regenerate --scope pre_holdout`"
+REPLAY_COMMAND = "`twin memory replay start`"
+ALLOW_INCOMPLETE_OPTION = "--allow-incomplete"
+
+DROP_NO_REPRODUCIBLE = "no_reproducible_line"
+DROP_EMPTY_TARGET = "empty_target"
+DROP_NO_USER_TURN = "no_user_turn_to_answer"
+DROP_TARGET_TOO_LONG = "target_too_long"
+DROP_OVER_BUDGET = "over_budget"
+DROP_TEMPLATE = "template_unsafe"
+DROP_MISSING_MESSAGE = "message_missing"
+
+ExportState = Literal["done", "waiting_for_plans"]
+
+
+class ExportError(RuntimeError):
+    """The training set cannot be exported (the message names what to do, never message text)."""
+
+
+@dataclass(frozen=True)
+class ExportOptions:
+    """What to export: a time range (default: everything), where to write, the plan share."""
+
+    since: datetime | None = None
+    until: datetime | None = None
+    out_dir: Path | None = None
+    plan_ratio: float | None = None
+    batch_blocks: int = BATCH_BLOCKS
+    allow_incomplete: bool = False  # export although derived data is missing (D-817)
+
+
+@dataclass(frozen=True)
+class DerivedGaps:
+    """What the derived data of the export lacks (R18-F7, D-817); dates only, never text."""
+
+    days_not_replayed: tuple[date, ...]
+    persona_description: bool
+    persona_description_current: bool = True  # generated for this cut-off (D-882)
+
+    @property
+    def complete(self) -> bool:
+        return (
+            not self.days_not_replayed
+            and self.persona_description
+            and self.persona_description_current
+        )
+
+    def problems(self) -> list[str]:
+        found = []
+        days = self.days_not_replayed
+        if not self.persona_description_current:
+            found.append(
+                "the [自动-描述] of the pre-holdout persona card was generated for an earlier "
+                f"hold-out cut-off; approve the batch the export planned or run {PERSONA_COMMAND}"
+            )
+        if days:
+            found.append(
+                f"{len(days)} days with messages in the export range ({days[0]} to {days[-1]}) "
+                f"are not replayed into the memory yet; run {REPLAY_COMMAND} and approve it"
+            )
+        if not self.persona_description:
+            found.append(
+                "the pre-holdout persona card has no [自动-描述] yet (statistics rules only); "
+                f"run {PERSONA_COMMAND}"
+            )
+        return found
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "complete": self.complete,
+            "memory_days_not_replayed": len(self.days_not_replayed),
+            "persona_description": self.persona_description,
+            "persona_description_current": self.persona_description_current,
+        }
+
+
+def derived_gaps(
+    services: Services,
+    since: datetime | None,
+    until: datetime | None,
+    state: PreHoldoutState | None = None,
+) -> DerivedGaps:
+    """The local days with messages in ``[since, until)`` that the replay has not done, whether
+    the pre-holdout card has its description and whether that one was generated for the cut-off
+    in force (dates and yes or no; no text)."""
+    found = state or pre_holdout_state(services)
+    return DerivedGaps(
+        days_not_replayed(services, since, until),
+        has_description(services, SCOPE),
+        found.description != "stale",
+    )
+
+
+@dataclass
+class ExportResult:
+    """The outcome of :meth:`TrainingSetExporter.run`."""
+
+    state: ExportState
+    dataset: DatasetDir | None = None
+    stats: dict[str, Any] = field(default_factory=dict)
+    missing_plans: dict[str, PlanInput] = field(default_factory=dict)
+    plan_selected: int = 0
+    describe: bool = False  # the pre-holdout description must be generated for this cut-off
+
+
+class ExportPromptBuilder(StylePromptBuilder):
+    """The style prompt builder with the persona card desensitised like everything else."""
+
+    def __init__(self, redactor: ConsistentRedactor, *, memory_tokens: int) -> None:
+        super().__init__(memory_tokens=memory_tokens)
+        self._redactor = redactor
+        self._cards: dict[str, RenderedPersona] = {}
+
+    def persona(self, data: Any) -> RenderedPersona | None:
+        card = super().persona(data)
+        if card is None:
+            return None
+        known = self._cards.get(card.version_id)
+        if known is None:
+            known = replace(card, text=self._redactor.redact_text(card.text))
+            self._cards[card.version_id] = known
+        return known
+
+
+@dataclass
+class _Prepared:
+    """A reply block that can become a sample: its target and the conversation before it."""
+
+    block: LoadedBlock
+    target: Target
+    turns: list[StyleTurn]  # the proactive cue included when ``proactive``
+    sha: str
+    pre_holdout: bool
+    selected: bool
+    proactive: bool  # no user turn waits for this reply: the context ends with the cue
+    after_gap: bool  # the pause before the block is longer than the segment gap
+    anchor: datetime  # the moment whose state says whether she was asleep (see _woke_up)
+
+    @property
+    def sample_id(self) -> str:
+        return self.block.sample_id
+
+    @property
+    def at(self) -> datetime:
+        return self.block.at
+
+
+def val_count(pre_holdout_samples: int) -> int:
+    """How many of the samples before the cut-off are validation: the latest 5 % (at least one)."""
+    return max(1, round(pre_holdout_samples * VAL_RATIO))
+
+
+class TrainingSetExporter:
+    """Builds the dataset directory (see the module description)."""
+
+    def __init__(
+        self,
+        services: Services,
+        tokenizer: TextTokenizer,
+        options: ExportOptions | None = None,
+    ) -> None:
+        self._services = services
+        self._tokenizer = tokenizer
+        self._options = options or ExportOptions()
+        try:
+            self._cutoff = holdout_cutoff(services)
+        except HoldoutError as exc:
+            raise ExportError(f"the hold-out cannot be determined yet: {exc}") from exc
+        self._source = AsOfSource(services)
+        self._check_derived_data()
+        settings = services.settings
+        self._ratio = (
+            self._options.plan_ratio
+            if self._options.plan_ratio is not None
+            else settings.training.hybrid_plan_ratio
+        )
+        self._memory_tokens = settings.style_model.memory_tokens
+        catalog = StickerCatalog(services)
+        self._labeler = catalog.tag_lookup()
+        self._user_stickers = user_sticker_lines(catalog)  # as the reply path writes them
+        self._loader = MessageLoader(services)
+        self._memory_builder = StylePromptBuilder(memory_tokens=self._memory_tokens)
+
+    # ----------------------------------------------------------------------- checks
+
+    def _check_derived_data(self) -> None:
+        if self._source.compact is None:
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND} first")
+        if self._source.profile is None or self._source.activity is None:
+            raise ExportError(
+                "there is no pre-holdout profile or routine; run `twin profile rebuild` first"
+            )
+        state = pre_holdout_state(self._services)
+        if not state.profile_current or not state.card_current:  # never read the old cut-off's
+            waiting = (
+                f" (still queued: {', '.join(state.waiting)}; the export waits for them)"
+                if state.waiting
+                else ""
+            )
+            problems = state.stale() or [
+                "the pre-holdout data is being rebuilt for the cut-off "
+                f"{state.cutoff:%Y-%m-%d %H:%M} UTC"
+            ]
+            raise ExportError("; ".join(problems) + waiting)
+        options = self._options
+        self._gaps = derived_gaps(self._services, options.since, options.until, state)
+        blocking = replace(self._gaps, persona_description_current=True)  # waited for, not refused
+        if not blocking.complete and not options.allow_incomplete:
+            raise ExportError(
+                "the derived data of the export is incomplete: "
+                + "; ".join(blocking.problems())
+                + f". To export anyway, add {ALLOW_INCOMPLETE_OPTION} "
+                "(the statistics of the dataset record what was missing)"
+            )
+
+    @property
+    def description_pending(self) -> bool:
+        """The description of the pre-holdout card was generated for another cut-off (D-882)."""
+        return not self._gaps.persona_description_current and not self._options.allow_incomplete
+
+    def _persona_card(self) -> RenderedPersona:
+        card = self._source.compact
+        if card is None:
+            raise ExportError(f"there is no pre-holdout persona card; run {PERSONA_COMMAND}")
+        return card
+
+    @property
+    def cutoff(self) -> datetime:
+        return self._cutoff
+
+    # --------------------------------------------------------------------- preparing
+
+    def _prepare(self, block: LoadedBlock, stats: StatsCollector) -> _Prepared | None:
+        target = render_target([m.data for m in block.reply], self._labeler)
+        stats.target_dropped.update(target.dropped)
+        if not target.has_content:
+            stats.drop(DROP_EMPTY_TARGET)
+            return None
+        turns: list[StyleTurn] = []
+        last_at: datetime | None = None  # the last message of the last turn that has text
+        for turn in block.context:
+            text = context_text([m.data for m in turn], self._labeler, self._user_stickers)
+            if text:
+                turns.append(StyleTurn("user" if turn[0].data.is_sent else "assistant", text))
+                last_at = turn[-1].at
+        proactive = not normalize_context(turns).ends_with_user
+        if proactive:
+            turns = with_proactive_cue(turns)
+        gap_s = self._services.settings.profile.segment_gap_min * 60.0
+        after_gap = last_at is not None and (block.at - last_at).total_seconds() > gap_s
+        pre_holdout = block.at < self._cutoff
+        return _Prepared(
+            block=block,
+            target=target,
+            turns=turns,
+            sha=target_hash(target.text),
+            pre_holdout=pre_holdout,
+            selected=pre_holdout and (proactive or plan_selected(block.sample_id, self._ratio)),
+            proactive=proactive,
+            after_gap=after_gap,
+            anchor=self._anchor(block.at, last_at, proactive=proactive),
+        )
+
+    def _anchor(self, at: datetime, last_at: datetime | None, *, proactive: bool) -> datetime:
+        """The moment before ``at`` at which she must have been asleep for her to have woken up.
+
+        An answer: when the user's last message arrived (``last_at``; the engine reads the state
+        of that moment).  A proactive sample: the end of the greeting window before ``at`` - the
+        greeting trigger fires 5 to 40 minutes after her waking up.
+        """
+        if proactive or last_at is None:
+            window = self._services.settings.schedule.greeting_window_min
+            return at - timedelta(minutes=window[-1])
+        return last_at
+
+    def _woke_up(self, item: _Prepared, view: AsOfView) -> bool:
+        """Did she wake up for this reply?  The deterministic part of the engine's rule (R-ENG-003).
+
+        She was deep asleep (the routine of the time) when the user wrote, and is not any more
+        when she answers (``view`` is the view of that moment); for a proactive sample that is the
+        greeting window.  The engine also lets her wake up by chance at the edge of her sleep;
+        that cannot be told from the data.  The earlier moment is read through a view as well, and
+        it is never later than the sample's own (R-TRN-013).
+        """
+        if view.her_state() == "deep_sleep":
+            return False
+        return self._source.at(item.anchor).her_state() == "deep_sleep"
+
+    def _prepared(self, stats: StatsCollector) -> Iterator[_Prepared]:
+        options = self._options
+        refs: list[BlockRef] = []
+
+        def flush() -> Iterator[_Prepared]:
+            try:
+                blocks = self._loader.load(refs)
+            except LookupError:
+                stats.drop(DROP_MISSING_MESSAGE)
+                blocks = []
+            refs.clear()
+            for block in blocks:
+                prepared = self._prepare(block, stats)
+                if prepared is not None:
+                    yield prepared
+
+        for ref in iter_block_refs(
+            self._services, since=options.since, until=options.until, across_gaps=True
+        ):
+            if ref.reproducible < 1:
+                stats.drop(DROP_NO_REPRODUCIBLE)
+                continue
+            refs.append(ref)
+            if len(refs) >= options.batch_blocks:
+                yield from flush()
+        yield from flush()
+
+    # ------------------------------------------------------------------ first pass
+
+    def scan(self) -> tuple[dict[str, PlanInput], int]:
+        """The samples that carry a plan and have none: ``({id: inputs}, number selected)``."""
+        entries = PlanStore(self._services.db).entries()
+        stats = StatsCollector()
+        missing: dict[str, PlanInput] = {}
+        selected = 0
+        for item in self._prepared(stats):
+            if not item.selected:
+                continue
+            selected += 1
+            if needs_plan(entries.get(item.sample_id), item.sha):
+                missing[item.sample_id] = self._plan_input(item)
+        return missing, selected
+
+    def _plan_input(self, item: _Prepared) -> PlanInput:
+        """What the plan of a sample is written from; all of it desensitised (it leaves)."""
+        view = self._source.at(item.at)
+        memory = self._memory_builder.memory_for(view, item.turns)
+        context = normalize_context(item.turns)
+        turns = [("assistant", redact_text(text)) for text in context.prelude]
+        turns += [(turn.role, redact_text(turn.content)) for turn in context.turns]
+        state = view.her_state()
+        when = moment_text(view.local)
+        if state in STATE_LINES:
+            when += f"；她那时的状态：{STATE_LINES[state]}"
+        return PlanInput(
+            target_sha=item.sha,
+            when=redact_text(when),
+            turns=tuple(turns),
+            reply=redact_text(item.target.text),
+            facts=tuple(redact_text(line) for line in fact_lines(memory.text)),
+        )
+
+    # ----------------------------------------------------------------- second pass
+
+    def run(self) -> ExportResult:
+        """Export the set, or report which plans are missing (see the module description).
+
+        The first pass runs whatever the ratio: a proactive sample of the training part needs a
+        plan even when no other sample does (D-643).
+        """
+        missing, selected = self.scan()
+        describe = self.description_pending
+        if missing or describe:
+            return ExportResult(
+                "waiting_for_plans",
+                missing_plans=missing,
+                plan_selected=selected,
+                describe=describe,
+            )
+        return self.build()
+
+    def build(self) -> ExportResult:
+        """The second pass: compose, desensitise, split, scan and write the dataset directory."""
+        if self.description_pending:
+            raise ExportError("; ".join(self._gaps.problems()))
+        services = self._services
+        now = services.clock.now_utc()
+        version = f"ds-{now:%Y%m%d-%H%M%S}"
+        directory = self._options.out_dir or (
+            services.paths.data_dir / "training" / "datasets" / version
+        )
+        if directory.exists() and any(directory.iterdir()):
+            raise ExportError(f"{directory} is not empty; export to a new directory")
+        work = directory.parent / f"{WORK_DIR_PREFIX}{version}"
+        work.mkdir(parents=True, exist_ok=True)
+        try:
+            return self._build(version, directory, work, now)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    def _build(self, version: str, directory: Path, work: Path, now: datetime) -> ExportResult:
+        redactor = ConsistentRedactor()
+        builder = ExportPromptBuilder(redactor, memory_tokens=self._memory_tokens)
+        entries = PlanStore(self._services.db).entries()
+        stats = StatsCollector()
+        parity = ParitySelector()
+        pre_path, test_path = work / "pre.jsonl", work / "test.jsonl"
+        with (
+            pre_path.open("w", encoding="utf-8", newline="\n") as pre_file,
+            test_path.open("w", encoding="utf-8", newline="\n") as test_file,
+        ):
+            for item in self._prepared(stats):
+                sample = self._compose(item, builder, redactor, entries, stats, parity)
+                if sample is not None:
+                    row = json.dumps(sample.to_json(), ensure_ascii=False, separators=(",", ":"))
+                    (pre_file if item.pre_holdout else test_file).write(row + "\n")
+        pre_count, test_count = len(stats.pre), len(stats.test)
+        validation = val_count(pre_count)
+        if pre_count - validation < 1 or pre_count < 2 or test_count < 1:
+            raise ExportError(
+                f"too few samples for a training set: {pre_count} before the hold-out, "
+                f"{test_count} after it ({sum(stats.dropped.values())} blocks dropped: "
+                f"{dict(stats.dropped)})"
+            )
+        profile = self._source.profile
+        if profile is None:
+            raise ExportError("there is no pre-holdout profile; run `twin profile rebuild` first")
+        summary = stats.summarise(
+            val_count=validation,
+            profile_sticker_share=profile.metrics.scalar("her", "sticker_share"),
+            profile_code_rate=profile.metrics.scalar("her", "emoji_code_rate"),
+        )
+        summary.update(self._facts_about_the_run(redactor, parity))
+        card = self._persona_card()
+        split = pre_count - validation
+        # one generator per file range, closed here: an open file cannot be deleted on Windows
+        streams = [
+            samples_from(pre_path, 0, split, scan=True),
+            samples_from(pre_path, split, pre_count, scan=True),
+            samples_from(test_path, 0, test_count, scan=True),
+        ]
+        try:
+            dataset = write_dataset_dir(
+                directory,
+                dataset_version=version,
+                created_at=now.isoformat(),
+                template_version=lf_template.TEMPLATE_VERSION,
+                persona_version=f"v{card.number}",
+                profile_version=profile.version.id,
+                holdout_cutoff=self._cutoff.isoformat(),
+                train=streams[0],
+                val=streams[1],
+                test=streams[2],
+                parity=parity.cases(),
+                redacted=True,
+                plan_ratio=self._ratio,
+                range_from=self._options.since.isoformat() if self._options.since else None,
+                range_to=self._options.until.isoformat() if self._options.until else None,
+                stats=summary,
+            )
+        finally:
+            for stream in streams:
+                stream.close()
+        verify_written(dataset)
+        return ExportResult("done", dataset=dataset, stats=summary)
+
+    def _facts_about_the_run(
+        self, redactor: ConsistentRedactor, parity: ParitySelector
+    ) -> dict[str, Any]:
+        options = self._options
+        with self._services.db.session() as session:
+            until = int(session.scalar(her_message_count(options.until)) or 0)
+            before = (
+                int(session.scalar(her_message_count(options.since)) or 0) if options.since else 0
+            )
+        card = self._persona_card()
+        return {
+            "her_messages_covered": until - before,
+            "tokenizer_sha256": getattr(self._tokenizer, "sha256", None),
+            "cutoff_len": CUTOFF_LEN,
+            "context_turns": 8,
+            "persona_scope": SCOPE,
+            "persona_card": card.version_id,
+            "derived_data": self._gaps.to_json(),
+            "redacted_entities": redactor.counts(),
+            "parity_cases": len(parity.cases()),
+        }
+
+    # -------------------------------------------------------------------- composing
+
+    def _compose(
+        self,
+        item: _Prepared,
+        builder: ExportPromptBuilder,
+        redactor: ConsistentRedactor,
+        entries: dict[str, PlanEntry],
+        stats: StatsCollector,
+        parity: ParitySelector,
+    ) -> SftSample | None:
+        entity = False
+
+        def red(text: str) -> str:
+            nonlocal entity
+            result = redactor.redact(text)
+            entity = entity or result.changed
+            return result.text
+
+        reply = red(item.target.text)
+        try:
+            response_tokens = self._tokenizer.count(lf_template.render_response(reply))
+        except lf_template.TemplateError:
+            stats.drop(DROP_TEMPLATE)
+            return None
+        room = CUTOFF_LEN - response_tokens
+        if room < MIN_PROMPT_TOKENS:
+            stats.drop(DROP_TARGET_TOO_LONG)
+            return None
+        view = self._source.at(item.at)
+        memory = builder.memory_for(view, item.turns)
+        plan = self._plan_fields(item, entries, fact_lines(memory.text), red)
+        try:
+            parts = builder.compose(
+                view,
+                [StyleTurn(turn.role, red(turn.text)) for turn in item.turns],
+                plan=plan,
+                woke_up=self._woke_up(item, view),
+                memory=replace(memory, text=red(memory.text)),
+                budget=TokenBudget(room, self._tokenizer.count),
+            )
+        except StylePromptError:
+            stats.drop(DROP_NO_USER_TURN)
+            return None
+        except lf_template.TemplateError:
+            stats.drop(DROP_TEMPLATE)
+            return None
+        if parts.meta.over_budget:
+            stats.drop(DROP_OVER_BUDGET)
+            return None
+        prompt = parts.render().text
+        tokens = self._tokenizer.count(prompt) + response_tokens
+        sample = SftSample(item.sample_id, parts.system, parts.turns, reply)
+        target = item.target
+        stats.add(
+            SampleFacts(
+                pre_holdout=item.pre_holdout,
+                planned=plan is not None,
+                plan_selected=item.selected,
+                proactive=item.proactive,
+                after_gap=item.after_gap,
+                turns=len(parts.turns),
+                prelude=parts.meta.prelude_turns > 0,
+                trimmed=parts.meta.trimmed_turns > 0,
+                target_lines=len(target.lines),
+                target_chars=len(reply),
+                stickers=target.stickers,
+                text_lines=target.text_lines,
+                code_lines=target.code_lines,
+                quoted=target.quoted,
+                tokens=tokens,
+            )
+        )
+        tags = self._tags(item, parts.meta.prelude_turns, parts.meta.trimmed_turns, parts.turns)
+        if plan is not None:
+            tags.append(TAG_PLAN)
+        if entity:
+            tags.append(TAG_ENTITY)
+        if parity.wants(tags, tokens):
+            parity.offer(
+                lambda found: ParityCase(
+                    item.sample_id, parts.system, parts.turns, reply, prompt, found
+                ),
+                tags,
+                tokens,
+            )
+        return sample
+
+    @staticmethod
+    def _tags(
+        item: _Prepared, prelude: int, trimmed: int, turns: tuple[lf_template.Turn, ...]
+    ) -> list[str]:
+        target = item.target
+        tags: list[str] = []
+        flags = (
+            (prelude > 0, TAG_PRELUDE),
+            (trimmed > 0, TAG_TRIMMED),
+            (len(target.lines) >= MULTILINE_LINES, TAG_MULTILINE),
+            (target.stickers > 0, TAG_STICKER),
+            (target.code_lines > 0, TAG_CODE),
+            (target.quoted, TAG_QUOTE),
+            (item.proactive, TAG_PROACTIVE),
+            (len(turns) == 1, TAG_SINGLE),
+            (len(turns) >= DEEP_TURNS, TAG_DEEP),
+            (not item.pre_holdout, TAG_TEST),
+        )
+        tags.extend(tag for present, tag in flags if present)
+        return tags
+
+    @staticmethod
+    def _plan_fields(
+        item: _Prepared,
+        entries: dict[str, PlanEntry],
+        facts: list[str],
+        red: Callable[[str], str],
+    ) -> PlanFields | None:
+        if not item.selected:
+            return None
+        entry = entries.get(item.sample_id)
+        if entry is None or entry.status != DONE or entry.plan is None:
+            return None
+        if entry.target_sha != item.sha:
+            return None
+        fields = entry.plan.fields(facts)
+        plan = PlanFields(
+            intent=red(fields.intent),
+            facts_to_use=tuple(red(fact) for fact in fields.facts_to_use),
+            tone=red(fields.tone),
+            bubble_hint=red(fields.bubble_hint),
+            sticker_hint=red(item.target.sticker_tags[0]) if item.target.sticker_tags else "",
+        )
+        return None if plan.empty else plan
+
+
+# ------------------------------------------------------------------- files and scans
+
+
+def samples_from(path: Path, start: int, stop: int, *, scan: bool = False) -> Generator[SftSample]:
+    """The samples on lines ``start`` to ``stop - 1`` of a file, scanned on the way if asked."""
+    with path.open("r", encoding="utf-8") as stream:
+        for number, line in enumerate(stream):
+            if number >= stop:
+                return
+            if number >= start:
+                sample = sample_of(json.loads(line))
+                if scan:
+                    scan_sample(sample)
+                yield sample
+
+
+def sample_of(row: dict[str, Any]) -> SftSample:
+    """An :class:`SftSample` from its ShareGPT line."""
+    messages = row["conversations"]
+    turns = tuple(
+        lf_template.Turn("user" if index % 2 == 0 else "assistant", str(message["value"]))
+        for index, message in enumerate(messages[:-1])
+    )
+    return SftSample(str(row["id"]), str(row["system"]), turns, str(messages[-1]["value"]))
+
+
+def scan_sample(sample: SftSample) -> None:
+    """Fail when personal data is left in a sample or a target holds event text (R-TRN-007)."""
+    texts = [sample.system, *(turn.content for turn in sample.turns), sample.reply]
+    for text in texts:
+        found = redact(text)
+        if found.changed:
+            kinds = ", ".join(sorted(found.counts()))
+            raise ExportError(
+                f"personal data ({kinds}) is left in sample {sample.id} after desensitising"
+            )
+    events = event_lines(sample.reply.split("\n"))
+    if events:
+        raise ExportError(f"sample {sample.id} has {len(events)} event text line(s) in its target")
+
+
+def scanned(samples: Iterator[SftSample]) -> Iterator[SftSample]:
+    """``samples`` unchanged, each scanned on the way (a finding raises :class:`ExportError`)."""
+    for sample in samples:
+        scan_sample(sample)
+        yield sample
+
+
+def verify_written(dataset: DatasetDir) -> None:
+    """Scan the files that were written once more (the set must not be used otherwise)."""
+    for name in dataset.data_files():
+        if name.startswith("sft_"):
+            path = dataset.file_path(name)
+            for sample in samples_from(path, 0, 1 << 62):
+                scan_sample(sample)

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "repository": "ggml-org/llama.cpp",
+  "tag": "b11177",
+  "checked": "2026-10-10",
+  "note": "Sizes and sha256 are of the release assets as downloaded on 2026-10-10 (llama.cpp b11177, the tag whose converter and quantiser export.sh uses). get_llamacpp.ps1 refuses to run without this file and compares every download with these values; when the GitHub release API also reports a digest it must agree.",
+  "assets": {
+    "cpu": {
+      "archive": {
+        "name": "llama-b11177-bin-win-cpu-x64.zip",
+        "sha256": "7f11f910c9ef590782a0a0edbaa99aac1665823ab7bbd63830eca97c39e8defc",
+        "size": 18568210
+      }
+    },
+    "cuda-12.4": {
+      "archive": {
+        "name": "llama-b11177-bin-win-cuda-12.4-x64.zip",
+        "sha256": "14e756ba453e29db57578c1e5791245fe05c893671d3b334e08482ba1a0946bb",
+        "size": 254724695
+      },
+      "runtime": {
+        "name": "cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6",
+        "size": 391443627
+      }
+    },
+    "cuda-13.4": {
+      "archive": {
+        "name": "llama-b11177-bin-win-cuda-13.4-x64.zip",
+        "sha256": "35821fa553fc69feef4c3861456249ff6b5a282da67c4f8634688ad024149621",
+        "size": 150247793
+      },
+      "runtime": {
+        "name": "cudart-llama-bin-win-cuda-13.4-x64.zip",
+        "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668",
+        "size": 423535356
+      }
+    }
+  }
+}

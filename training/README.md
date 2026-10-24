@@ -1,0 +1,210 @@
+# training/
+
+AutoDL-side scripts and LLaMA-Factory configuration templates for the style model (round 13).
+Nothing here runs on the Windows machine; the package that is uploaded is desensitised and
+encrypted (R-PRIV-003), and everything is deleted from the instance after training.
+
+```
+training/
+  llamafactory/*.yaml.j2   one template per kind of configuration (sft, dpo, eval_generate,
+                           eval_loss, export); rendered per GPU profile by twin.training.yaml_render
+  autodl/                  lib.sh and the scripts: setup, decrypt, train, eval, dpo, export,
+                           serve_vllm, cleanup; versions.env (pinned versions, checked against
+                           twin.training.versions by a test); tools/*.py (standard library only)
+```
+
+The encrypted package built by `twin train bundle` contains the scripts, and `twin train remote
+upload` also puts them on the instance in plain (they are needed to decrypt and hold no data); the
+instance compares the two after decrypting and stops if they differ.
+
+## Pinned versions and what was checked on 2026-10-09
+
+Everything the instance installs is pinned in `src/twin/training/versions.py`
+(`training/autodl/versions.env` is the same list for the shell scripts).
+
+| Item | Pinned | How it was checked |
+| --- | --- | --- |
+| LLaMA-Factory | **0.9.5** (PyPI, 2026-05-30, wheel sha256 `10776e9b...c6a`) | `pip download llamafactory==0.9.5 --no-deps`, wheel and sdist read |
+| PyTorch | 2.9.1 from `https://download.pytorch.org/whl/cu128` (+ torchvision 0.24.1, torchaudio 2.9.1) | index listing; build script of v2.9.1 |
+| transformers / peft / trl / accelerate / datasets | 4.57.6 / 0.18.1 / 0.24.0 / 1.11.0 / 4.0.0 | upper bounds LLaMA-Factory 0.9.5 accepts (`transformers<=5.6.0`, `peft<=0.18.1`, `trl<=0.24.0`, `accelerate<=1.11.0`, `datasets<=4.0.0`) |
+| bitsandbytes | 0.49.2 | wheel contains `libbitsandbytes_cuda128.so`; CMake targets compute capability 120 for CUDA >= 12.8 |
+| jieba / nltk / rouge-chinese | 0.42.1 / 3.10.3 / 1.0.3 (2026-10-22) | `hparams/parser.py` of 0.9.5 runs `check_version("jieba" / "nltk" / "rouge_chinese", mandatory=True)` whenever `predict_with_generate` is set (`eval.sh`), `DISABLE_VERSION_CHECK` does not skip a mandatory check, and the wheel's `Requires-Dist` lists none of them; all three resolve on the index (jieba is source-only and builds on the instance) |
+| modelscope | 1.39.1 | wheel; its `download` command moved to the `modelscope-hub` package, so `setup.sh` uses `snapshot_download()` |
+| llama.cpp | tag **b11177** (2026-09-25) | `conversion/qwen.py` registers `Qwen3ForCausalLM`; `llama-quantize` is a CMake target |
+| vLLM | 0.26.0 in its own venv, the `+cu129` wheel of the GitHub release with torch 2.11.0 / torchvision 0.26.0 / torchaudio 2.11.0 from `https://download.pytorch.org/whl/cu129` (round 14) | HTTP status of the release assets (`+cu129` 200, `+cu128` and `+cu130` 404); the metadata of the `+cu129` wheel read with range requests; the cu129 index listing |
+
+### `qwen3_nothink` (R-TRN-011)
+
+Source: `src/llamafactory/data/template.py` of the 0.9.5 wheel.  It is registered with the plain
+`Template` class (the plain `qwen3` template is a `ReasoningTemplate`):
+
+```
+format_user      <|im_start|>user\n{{content}}<|im_end|>\n<|im_start|>assistant\n
+format_assistant {{content}}<|im_end|>\n
+format_system    <|im_start|>system\n{{content}}<|im_end|>\n
+stop_words       ["<|im_end|>"], replace_eos=True, no default_system, no prefix
+```
+
+Pure ChatML, no `<think>` marker anywhere.  `src/twin/training/lf_template.py` holds exactly these
+strings (module docstring explains the use for `StylePromptBuilder`, round 09).  Other facts read in
+the same source:
+
+* `get_template_and_fix_tokenizer(tokenizer, data_args)` returns the `Template`;
+  `template.encode_multiturn(tokenizer, messages, system, tools, discarding_history_cot)` returns
+  one `(prompt_ids, response_ids)` pair per turn.  Every filled slot is tokenised on its own with
+  `tokenizer.encode(slot, add_special_tokens=False)`, so text that contains `<|im_end|>` becomes the
+  special token, and the formatter also substitutes `{{idx}}` inside the user message.  The dataset
+  loader (`dataset_dir.py`) rejects both.
+* `mask_history: true`: the pairs are encoded newest first, only the last pair gets labels, and
+  **a sample longer than `cutoff_len` loses its oldest turns first - but the prompt of the last turn
+  is cut at its end**, i.e. the assistant opener (and the beginning of the reply) is lost.  The
+  exporter (round 13b) must therefore fit every sample in 2048 tokens itself by dropping the oldest
+  context turns; it must never leave that to LLaMA-Factory.
+* ShareGPT (`dataset_info.json`, `formatting: sharegpt`): an optional `system` column (or a first
+  message from `system`), then `human`/`gpt` strictly alternating from `human`, an even number of
+  messages for SFT.  A ranking dataset (`ranking: true`) has an odd number of messages and the
+  `chosen` / `rejected` replies as `{"from": "gpt", "value": ...}` objects.
+* `flash_attn` accepts `auto | disabled | sdpa | fa2 | fa3`; the configs use `sdpa`.
+* `max_samples` keeps the *first* N rows (`data/loader.py`: `dataset.select(range(max_samples))`); the trial step of
+  `setup.sh verify` therefore trains on `trial_data/sft_trial.jsonl`, the 64 longest training samples
+  (`tools/make_trial_dataset.py`), because memory is decided by length (R17, D-633).
+* `stage: dpo` defaults: `pref_beta: 0.1`, `pref_loss: sigmoid`; the official example uses a
+  learning rate of 5e-6.  **The reference model of this project's DPO runs is the SFT model, not
+  the base** (round 17, D-650).  What 0.9.5 does (`model/adapter.py`, `train/dpo/trainer.py`,
+  `train/trainer_utils.py`, `hparams/parser.py`):
+  * without `ref_model` the reference pass runs with the adapter switched off (`disable_adapter()`);
+  * `adapter_name_or_path` + `do_train` *continues* the last adapter of the list - so the reference
+    would be the bare base (the earlier setup of this project);
+  * `adapter_name_or_path` + `do_train` + `create_new_adapter: true` **merges every listed adapter
+    into the model in memory** and trains a new LoRA on it - with no `ref_model` the reference is
+    then the merged SFT model, at no extra VRAM and no disk;
+  * a quantised model refuses `create_new_adapter` (`Cannot create new adapter upon a quantized
+    model.`) and takes only one adapter;
+  * `ref_model`, `ref_model_adapters` and `ref_model_quantization_bit` (4 or 8) load an explicit
+    reference (`create_ref_model`): a second model next to the policy.
+
+  So the bf16 profiles (`5090-8b`, `pro6000-14b`, `pro6000-32b`; `TWIN_DPO_MODE=layered`) use
+  `create_new_adapter` and no `ref_model`; the model is the **stack** `sft,dpo` (`W + dSFT + dDPO`).
+  `5090-14b` (4-bit; `continued`) continues the SFT adapter, sets `ref_model` (the base),
+  `ref_model_adapters` (the SFT adapter) and `ref_model_quantization_bit: 4`, and its stack is
+  `dpo` alone.  `dpo.sh` tries one step on the 64 longest pairs first, halves the batch on an
+  out-of-memory failure and, if even a batch of 1 does not fit, drops the three `ref_model*` keys
+  for this profile only: the reference is then the base (adapter off) and
+  `artifacts/dpo/dpo_reference.json` says so (D-651).
+* **Adapter stacks** (D-652..D-655, D-862..D-865).  `eval.sh` evaluates `sft` and, when there is a
+  DPO adapter, `dpo` (`sft,dpo` or the continued one) on the same test contexts and validation set,
+  and scores the held-out preference pairs (`data/dpo_holdout.jsonl`: the fifth of the pairs
+  `twin train export-dpo` keeps out of the DPO training by the hash of their id, D-861) under each
+  stack with `tools/pair_logprobs.py` (the evaluation's base, adapters and quantisation; the
+  sequence of LLaMA-Factory's DPO processor; ids and numbers only, `artifacts/eval/<stack>/
+  pair_logps.jsonl`).  `twin train remote eval` keeps DPO only when (1) its implicit-reward accuracy
+  over SFT on the held-out pairs has a bootstrap 90 % interval above 50 % (length-normalised log
+  probabilities when the 4-bit profile fell back to the base as its reference) and (2) a paired
+  bootstrap over the test contexts does not show its mean style deviation (+-30 %, the M5 gate's
+  own measure) significantly worse; the validation loss is shown only.  It writes the winner to
+  `state/stack_choice`; `export.sh` merges that stack (`adapter_name_or_path:
+  output/sft,output/dpo`).  DPO itself trains only on the pairs stored before the hold-out cut-off
+  of its base dataset, each system segment made again through `AsOfView` as of the pair's moment
+  (D-860); `dpo.sh` counts the held-out pairs towards `TWIN_DPO_MIN_PAIRS` and records how many
+  pairs waited for a later export (`after_cutoff_pairs`).  For the remote
+  vLLM the two layers are composed into **one** adapter by concatenating them along the rank, the
+  scales (`alpha / r`) folded into `B` (`tools/adapter_stack.py`): `B·A = s1·B1·A1 + s2·B2·A2`, so
+  the served adapter adds exactly `dSFT + dDPO`; `--max-lora-rank` is read from its config (64, or
+  32 for the 32B profile).  `artifacts/manifest.json` carries `adapter_stack` (every layer with its
+  sha256, in order), `dpo` and `stack_choice`; `twin model register` checks each layer.
+  `tests/unit/test_dpo_reference_peft.py` proves the two claims on a tiny random Qwen3 with PEFT
+  (reference with the new adapter off == the SFT model; composed adapter == merged stack).
+* Early stopping is `early_stopping_steps` (a patience counted in evaluations; needs
+  `load_best_model_at_end`).  Training resumes by itself from the last checkpoint of `output_dir`
+  unless `overwrite_output_dir` is set.  `do_predict` + `predict_with_generate` writes
+  `generated_predictions.jsonl` with `prompt`, `predict` and `label`.
+* `llamafactory-cli export`: raises `Please merge adapters before quantizing the model` when an
+  adapter and `export_quantization_bit` are given, and `Cannot merge adapters to a quantized model`
+  when the base is loaded quantised.  The merge must therefore load the bf16 base without
+  `quantization_bit`; `export_device: cpu` for the 4-bit profile.
+
+### Blackwell (RTX 5090, RTX PRO 6000: compute capability 12.0, `sm_120`)
+
+* PyTorch >= 2.7 with CUDA 12.8 wheels supports Blackwell (release blog of 2.7); the build script of
+  v2.9.1 lists `12.0` for CUDA 12.8.  The `cu128` index carries torch up to 2.11.0; 2.12 and later are
+  only on `cu129`/`cu130`.  The default PyPI wheel of torch 2.11.0 is a **CUDA 13** build (it depends on
+  `nvidia-*-cu13`), which this project does not use - `setup.sh` installs torch from the `cu128`
+  index first, so no later `pip install` replaces it.
+* `setup.sh` checks `torch >= 2.7`, `torch.version.cuda` in the 12.8 series and `sm_120` in
+  `torch.cuda.get_arch_list()` when the GPU reports compute capability 12.0, and refuses 13.x always.
+
+### AutoDL
+
+* Data disk `/root/autodl-tmp` (50 GB free, expandable on hosts that allow it; kept when the system is
+  reset; the instance and its data are erased after 15 days of continuous shutdown).
+* `source /etc/network_turbo` accelerates github.com, githubusercontent.com, githubassets.com and
+  huggingface.co only; undo it with `unset http_proxy https_proxy`.  Provided without a stability
+  promise, for academic use.
+* SSH: `ssh -p <port> root@<host>`, password login; the page recommends tmux/screen for long jobs
+  (`remote_job.py` detaches jobs itself, so tmux is not needed).
+* ModelScope: `Qwen/Qwen3-8B` (16.4 GB), `Qwen/Qwen3-14B` (29.55 GB), `Qwen/Qwen3-32B` (65.54 GB) exist
+  with `safetensors` shards (sizes from the repository listing).
+
+### llama.cpp
+
+The converter is a package now: clone the whole tree (`convert_hf_to_gguf.py` imports
+`conversion/`).  `conversion/qwen.py` registers `Qwen3ForCausalLM`/`Qwen3Model`.
+`python convert_hf_to_gguf.py <dir> --outfile x.gguf --outtype f16` and
+`build/bin/llama-quantize x.gguf out.gguf Q4_K_M` (also `Q5_K_M`, `Q8_0`).  Its requirements pin
+`torch==2.11.0` (CPU index) and `transformers==4.57.6`, so `export.sh` creates a separate virtual
+environment for the converter and builds only the `llama-quantize` target on the CPU.
+
+### vLLM
+
+`vllm serve <model> --enable-lora --lora-modules name=<adapter dir> --max-lora-rank N`; a request
+selects the adapter with its `model` field; `/v1/completions` and `/tokenize` exist.
+
+### Could not be checked
+
+* (Round 14, 2026-10-10) The vLLM release assets could be checked: `vllm-0.26.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl` exists, `+cu128` and `+cu130` do not, and PyPI's default wheel is a CUDA 13 build.  `serve_vllm.sh` now installs the `+cu129` wheel (no fall-back to PyPI).  See `docs/DECISIONS.md` D-512 and `docs/SERVING_NOTES.md`.
+* Neither bitsandbytes 4-bit nor vLLM 0.26.0 was run on a real RTX 5090 or RTX PRO 6000 (no GPU in
+  the sandbox); the CUDA 12.8 binaries and the `12.0` architecture entries were read from the sources
+  above.  The first real run will show whether they work; `setup.sh` and `serve_vllm.sh` print the
+  versions they ended up with.
+* The request fields of vLLM's `/tokenize` (`prompt`, `add_special_tokens`; the reply has `tokens`, `count`, `max_model_len`) are what round 14's tokenizer comparison sends (`twin.serving.tokencheck`); the comparison against a real vLLM server could not be run in the sandbox.
+* AutoDL's image list for the two GPUs and the size of the system disk (their pages did not state it).
+* (Round 17, D-657) Whether the explicit 4-bit SFT reference of `5090-14b` fits next to the policy
+  (`dpo.sh` finds out with its trial step and records a fall-back), and that vLLM accepts the
+  composed adapter of rank 64 (rank 32 for the 32B profile; the ranks vLLM allows - 1, 8, 16, 32,
+  64, 128, 256, 320, 512 - are from memory).  The algebra of the composition and PEFT's loading of
+  it are tested on a tiny model; vLLM and a GPU were not available.
+
+## Contracts used by round 13b and later rounds
+
+* **Dataset directory** (`twin.training.dataset_dir`): `dataset_meta.json`, `sft_train.jsonl`,
+  `sft_val.jsonl`, `sft_test.jsonl`, optional `dpo_train.jsonl`, `dpo_holdout.jsonl` (the held-out
+  pairs of the stack choice, never in `dataset_info.json`, D-861) and `parity_cases.jsonl`; written with
+  `write_dataset_dir` by `twin train export` (round 13b), which sets `redacted=True` only after the
+  residual-PII scan of every sample and scans the written files once more.  `dataset_meta.json` carries
+  the versions (template, pre-holdout persona card `v<n>`, pre-holdout profile id), the cut-off, the
+  counts and `stats` (counts, drops, target lengths, sticker and emoji-code shares next to her profile,
+  plan share, tokens, planning figures for the training hours of each profile, the sha256 of the
+  tokenizer, `her_messages_covered` for the retraining reminder).
+* **Token counting** (`twin.training.tokenizer`): the export counts tokens with the Qwen3
+  `tokenizer.json` (identical for 8B, 14B and 32B; sha256 pinned in `twin.training.versions`, 11,422,654
+  bytes, checked 2026-10-09 on Hugging Face at commit `b968826d` and on ModelScope).  Every sample is at
+  most 2,048 tokens *including* the target: the oldest context turns are dropped until it fits, so
+  LLaMA-Factory never cuts the end of a prompt.  `twin train export --tokenizer <file or folder>` uses a
+  local copy; otherwise the file is downloaded once into `data/training/tokenizer/qwen3/`.
+* **Template check** (`setup.sh <profile> verify`): runs `python -m twin.training.parity_check
+  --model-dir <base model dir> --cases <workdir>/data/parity_cases.jsonl` (exit code 0 = token-identical;
+  it is in `twin.training.bundle.PYLIB_MODULES` next to `lf_template`, and the cases file is part of the
+  package whenever the dataset has one).  Per case it asserts what R-TRN-011 lists: the inference
+  prompt tokenised as one string equals the earlier turns plus the last turn's prompt as
+  LLaMA-Factory's `encode_multiturn` makes them; the last response decodes to the reply plus
+  `<|im_end|>` and the newline; with `mask_history` only the last response has labels (the output of the
+  supervised processor); nothing is longer than `cutoff_len`.  `--engine slots` re-implements the
+  encoding rules for environments without LLaMA-Factory (it checks the construction, not the release).
+  `tests/integration/test_template_parity.py` runs the real check against LLaMA-Factory 0.9.5 and the
+  real tokenizer files in an environment of its own (see its docstring).
+* **Artifact manifest** (`artifacts/manifest.json`, schema 1): `run_id`, `profile`, `base_model`,
+  `template`, `template_version`, `persona_version`, `profile_version`, `dataset_version`,
+  `holdout_cutoff`, `llamafactory_version`, `llama_cpp_tag`, `models[]` (`quant`, `kind`, `path`),
+  `files[]` (`path`, `sha256`, `size`), `metrics`.  `twin model register` locks the four versions
+  from it, and the hold-out cut-off of the training set (round 18, D-885): the evaluation of the
+  model draws only contexts after it (D-886).

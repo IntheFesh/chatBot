@@ -1,0 +1,361 @@
+"""The scheduler as a component of the application: its ticks, its wiring (R-ARCH-001)."""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, date, datetime, timedelta
+from typing import Any
+
+import pytest
+
+from tests.support.clock import ManualClock
+from tests.support.engine_harness import build_harness
+from tests.support.proactive_world import Never, World
+from tests.support.waiting import wait_until
+from twin.app import Application, HealthStatus
+from twin.engine.command_port import CommandContext
+from twin.engine.component import EngineComponent
+from twin.schedule.events import CandidatesExpired
+from twin.schedule.proactive.component import (
+    COMPONENT_NAME,
+    OFFSET_MARGIN_S,
+    ProactiveComponent,
+    build_scheduler,
+    next_tick_at,
+    register_proactive,
+    tick_offset_s,
+)
+from twin.schedule.proactive.scheduler import TickReport
+from twin.services import Services
+
+TICK_S = 300.0
+DAY = date(2026, 10, 9)
+
+
+# ------------------------------------------------------------------------ the grid
+
+
+def test_the_offset_is_a_fixed_draw_of_the_day_inside_the_tick() -> None:
+    first = tick_offset_s("salt", DAY, TICK_S)
+    assert first == tick_offset_s("salt", DAY, TICK_S)
+    assert OFFSET_MARGIN_S <= first <= TICK_S - OFFSET_MARGIN_S
+    days = {tick_offset_s("salt", DAY + timedelta(days=n), TICK_S) for n in range(30)}
+    assert len(days) > 20  # another offset on most days
+    assert tick_offset_s("other salt", DAY, TICK_S) != first
+    assert all(OFFSET_MARGIN_S <= v <= TICK_S - OFFSET_MARGIN_S for v in days)
+
+
+def test_a_very_short_tick_still_has_an_offset() -> None:
+    assert 0 < tick_offset_s("salt", DAY, 15.0) < 15.0
+
+
+@pytest.mark.parametrize("seconds", [0, 1, 37, 299, 300, 301, 12_345])
+def test_the_next_tick_is_the_first_one_on_the_grid_after_now(seconds: int) -> None:
+    offset = 42.5
+    now = datetime(2026, 10, 9, 12, 0, tzinfo=UTC) + timedelta(seconds=seconds)
+    following = next_tick_at(now, TICK_S, offset)
+    assert following > now and following - now <= timedelta(seconds=TICK_S)
+    assert (following.timestamp() - offset) % TICK_S == pytest.approx(0, abs=1e-6)
+    assert following.tzinfo is not None
+
+
+def test_a_moment_that_is_a_tick_waits_for_the_next_one() -> None:
+    offset = 40.0
+    on_grid = datetime.fromtimestamp(1_790_000_000 // 300 * 300 + offset, tz=UTC)
+    assert next_tick_at(on_grid, TICK_S, offset) == on_grid + timedelta(seconds=TICK_S)
+
+
+# ----------------------------------------------------------------------- the loop
+
+
+class Counting:
+    """A scheduler tick that only notes when it was called."""
+
+    def __init__(self, clock: ManualClock, fail_first: bool = False) -> None:
+        self.clock = clock
+        self.times: list[datetime] = []
+        self.fail_first = fail_first
+
+    async def __call__(self) -> TickReport:
+        self.times.append(self.clock.now_utc())
+        if self.fail_first and len(self.times) == 1:
+            raise RuntimeError("one bad tick")
+        return TickReport(at=self.clock.now_utc())
+
+
+async def asleep(world: World, *, ticks: tuple[Counting, int] | None = None) -> None:
+    """Wait (real time) until the tick loop sleeps on the clock - after ``n`` ticks, if given.
+
+    The loop reads its offset in a worker thread before it sleeps, so the clock must not be
+    moved before the sleeper exists; the condition is the state that was written, not a count of
+    loop turns.
+    """
+    if ticks is not None:
+        counting, number = ticks
+        await wait_until(lambda: len(counting.times) >= number)
+    await wait_until(lambda: world.clock.pending_sleepers >= 1)
+
+
+async def test_the_component_ticks_at_once_and_then_on_the_aligned_grid(calm: World) -> None:
+    counting = Counting(calm.clock)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    calm.go_to(calm.at(10, 0))
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    assert component.name == COMPONENT_NAME and tuple(component.depends_on) == (
+        "schedule",
+        "engine",
+    )
+    await component.start()
+    try:
+        await asleep(calm)
+        assert len(counting.times) == 1 and component.ticks == 1  # it opens the day at once
+        offset = tick_offset_s(calm.rig.planner.salt.get(), DAY, TICK_S)
+        for number in range(2, 6):
+            # up to the next point of the grid and not a second beyond it: the time of the tick is
+            # then the point itself, whatever the loop does first (the clock is moved by the test)
+            now = calm.clock.now_utc()
+            await calm.clock.advance((next_tick_at(now, TICK_S, offset) - now).total_seconds())
+            await asleep(calm, ticks=(counting, number))
+        assert len(counting.times) >= 4
+        for moment in counting.times[1:]:
+            assert (moment.timestamp() - offset) % TICK_S < 2.0 or TICK_S - (
+                (moment.timestamp() - offset) % TICK_S
+            ) < 2.0, moment
+        assert component.health().status == HealthStatus.OK
+    finally:
+        await component.stop()
+
+
+class Gated:
+    """A scheduler tick that blocks until the test lets it go (a planner call that is slow)."""
+
+    def __init__(self, clock: ManualClock) -> None:
+        self.clock = clock
+        self.entered = asyncio.Event()
+        self.gate = asyncio.Event()
+        self.calls = 0
+        self.finished = 0
+        self.cancelled = 0
+
+    async def __call__(self) -> TickReport:
+        self.calls += 1
+        self.entered.set()
+        try:
+            await self.gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        self.finished += 1
+        return TickReport(at=self.clock.now_utc())
+
+
+async def test_a_slow_first_tick_does_not_hold_up_the_start(calm: World) -> None:
+    """R17-36 (D-730): ``start`` returns while the first tick is still blocked on the planner."""
+    gated = Gated(calm.clock)
+    calm.scheduler.tick = gated  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await asyncio.wait_for(component.start(), timeout=10)  # before the fix: never returns
+    try:
+        await wait_until(lambda: gated.entered.is_set())  # the first tick runs, in the task
+        assert gated.calls == 1 and gated.finished == 0 and component.ticks == 0
+        assert component.health().status == HealthStatus.OK
+        gated.gate.set()
+        await wait_until(lambda: component.ticks == 1)  # it is counted when it is over
+        await asleep(calm)  # and then the loop waits for the grid, as before
+        assert gated.calls == 1
+        await calm.clock.advance(TICK_S + 1)
+        await wait_until(lambda: gated.calls == 2)
+        assert component.health().status == HealthStatus.OK
+    finally:
+        await component.stop()
+
+
+async def test_stopping_the_component_cancels_a_first_tick_that_is_blocked(calm: World) -> None:
+    """R17-36 (D-730): the blocked first tick is in the supervised task, so ``stop`` ends it."""
+    gated = Gated(calm.clock)
+    calm.scheduler.tick = gated  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await asyncio.wait_for(component.start(), timeout=10)
+    await wait_until(lambda: gated.entered.is_set())
+    await asyncio.wait_for(component.stop(), timeout=10)
+    assert gated.cancelled == 1 and gated.finished == 0
+    assert component.ticks == 0  # a cancelled tick is not a tick that was made
+    assert component.health().status == HealthStatus.OK  # and not a crash either
+    await calm.clock.advance(3 * TICK_S)
+    await calm.clock.settle()
+    assert gated.calls == 1  # nothing ticks after the stop
+
+
+async def test_the_first_tick_is_made_once_per_start_not_once_per_restart_of_the_loop(
+    calm: World,
+) -> None:
+    """R17-36 (D-730): the supervisor may restart the loop; it does not "open the day" again."""
+    counting = Counting(calm.clock)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await component.start()
+    try:
+        await asleep(calm, ticks=(counting, 1))
+        loop = component._loop  # type: ignore[attr-defined]
+        task = asyncio.ensure_future(loop())  # the loop as the supervisor would run it again
+        try:
+            await wait_until(lambda: calm.clock.pending_sleepers >= 2)
+            assert len(counting.times) == 1
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    finally:
+        await component.stop()
+
+
+async def test_a_component_without_a_first_tick_waits_for_the_grid(calm: World) -> None:
+    counting = Counting(calm.clock)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit, first_tick=False)
+    await component.start()
+    try:
+        await asleep(calm)
+        assert counting.times == []
+        await calm.clock.advance(TICK_S + 1)
+        await asleep(calm, ticks=(counting, 1))
+        assert len(counting.times) == 1
+    finally:
+        await component.stop()
+
+
+async def test_one_bad_tick_does_not_end_the_schedule(calm: World) -> None:
+    counting = Counting(calm.clock, fail_first=True)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await component.start()
+    try:
+        await asleep(calm)
+        assert component.ticks == 1  # the failed one counts, and nothing was raised
+        await calm.clock.advance(TICK_S + 1)
+        await asleep(calm, ticks=(counting, 2))
+        assert len(counting.times) == 2 and component.ticks == 2
+    finally:
+        await component.stop()
+
+
+async def test_stopping_the_component_stops_the_ticks(calm: World) -> None:
+    counting = Counting(calm.clock)
+    calm.scheduler.tick = counting  # type: ignore[method-assign]
+    component = ProactiveComponent(calm.scheduler, calm.services, calm.rig.kit)
+    await component.start()
+    await asleep(calm)
+    await component.stop()
+    before = len(counting.times)
+    await calm.clock.advance(3 * TICK_S)
+    await calm.clock.settle()  # nothing is left to wake: a few turns of the loop are all there is
+    assert len(counting.times) == before
+
+
+# --------------------------------------------------------------------------- wiring
+
+
+async def test_registering_adds_the_component_the_events_and_the_rating_command(
+    calm: World,
+) -> None:
+    application = Application()
+    engine_component = EngineComponent(calm.engine, calm.channel, calm.services)
+    component = register_proactive(application, calm.services, engine_component)
+    assert application.components[COMPONENT_NAME] is component
+    assert isinstance(component, ProactiveComponent)
+    before = component.scheduler.epoch
+    now = calm.clock.now_utc()
+    await calm.rig.kit.events.publish(CandidatesExpired(at=now, cutoff=now, reason="wake"))
+    assert component.scheduler.epoch == before + 1  # its own subscription heard it
+    router = engine_component.router
+    assert router is not None
+    outcome = await router.handle("/评分 5 好", CommandContext(now, "in-1"))
+    assert outcome is not None and "记下了：5/5。" in outcome.reply
+    assert [r.score for r in calm.ratings.recent(5)] == [5]
+    help_text = await router.handle("/帮助", CommandContext(now, "in-2"))
+    assert help_text is not None and "/评分 <1-5> [备注]" in help_text.reply
+
+
+async def test_a_plan_change_makes_the_scheduler_forget_what_it_worked_out(calm: World) -> None:
+    application = Application()
+    component = register_proactive(
+        application,
+        calm.services,
+        EngineComponent(calm.engine, calm.channel, calm.services),
+        rng=Never(),  # nothing is drawn: this scheduler has no pretended pauses to wait for
+    )
+    scheduler = component.scheduler
+    calm.user_writes(at=calm.at(20, 0, day=8))
+    calm.go_to(calm.at(10, 0))
+    await scheduler.tick()
+    assert scheduler._today is not None  # type: ignore[attr-defined]
+    outcome = calm.rig.planner.switch_timezone("Asia/Shanghai")
+    await calm.publish(outcome.events)
+    assert scheduler._today is None  # type: ignore[attr-defined]
+
+
+async def test_the_scheduler_needs_an_engine_made_by_build_engine(
+    services: Services, clock: ManualClock
+) -> None:
+    harness = build_harness(services, clock)
+    assert harness.engine.kit is None
+    with pytest.raises(RuntimeError, match="build_engine"):
+        build_scheduler(services, EngineComponent(harness.engine, harness.channel, services))
+
+
+def test_the_status_source_is_made_without_an_engine(calm: World) -> None:
+    from twin.schedule.proactive.component import proactive_status_for
+
+    source = proactive_status_for(calm.services, calm.channel.session_state)
+    assert source() is not None
+    calm.channel.session_state = lambda: (_ for _ in ()).throw(RuntimeError("no channel"))  # type: ignore[method-assign]
+    again: Any = proactive_status_for(calm.services, calm.channel.session_state)()
+    assert again is not None and again.blocked is None  # a channel that cannot say hides nothing
+
+
+async def test_the_openings_the_scheduler_shows_carry_the_labels_of_the_sticker_library(
+    services: Services,
+    clock: ManualClock,
+    pro_script: Any,
+    pro_api: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R17-13: the examples of how she opened a conversation name her stickers by their tag."""
+    import twin.schedule.proactive.component as component_module
+    from tests.support.proactive_world import build_world
+    from twin.retrieval.openers import OpenerExamples
+    from twin.stickers.catalog import StickerCatalog
+    from twin.stickers.labels import sticker_labels
+    from twin.storage.chat_models import Sticker
+
+    seen: list[Any] = []
+
+    class Recording(OpenerExamples):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            seen.append(kwargs.get("sticker_label"))
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(component_module, "OpenerExamples", Recording)
+    built = build_world(services, clock, script=pro_script)
+    try:
+        assert len(seen) == 1 and seen[0] is not None
+        md5, now = "ab" * 16, clock.now_utc()
+        with services.db.transaction(bump_state=False) as session:
+            session.add(
+                Sticker(
+                    md5=md5,
+                    status="available",
+                    attempts=0,
+                    her_uses=1,
+                    user_uses=0,
+                    context_uses=0,
+                    disabled=False,
+                    origin="import",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        StickerCatalog(services).save_vision(md5, ["开心"], "笑猫", "好消息", at=now)
+        assert seen[0](md5) == "开心" and seen[0] == sticker_labels(services).label_md5
+        assert seen[0]("0" * 32) is None
+    finally:
+        await built.aclose()

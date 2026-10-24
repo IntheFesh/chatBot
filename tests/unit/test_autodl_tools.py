@@ -1,0 +1,1077 @@
+"""R-TRN-009, R-TRN-010: the Python tools that ship with the AutoDL scripts."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import shutil
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+from hypothesis import given
+from hypothesis import strategies as st
+
+from tests.support.autodl_scripts import AUTODL, ROOT, installed_pythons, write_tiny_adapter
+from tests.support.waiting import wait_until_sync as wait_until
+from twin.training import bundle
+from twin.training.profiles import PROFILES
+from twin.training.versions import PYTHON_MIN
+
+TOOLS = AUTODL / "tools"
+CHECK_SCRIPT = ROOT / "scripts" / "check_remote_job.py"
+
+
+def load_tool(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"tool_{name}", TOOLS / f"{name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_script(name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(f"script_{name}", ROOT / "scripts" / f"{name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+check_remote_job = load_script("check_remote_job")
+remote_job = load_tool("remote_job")
+summarize_train = load_tool("summarize_train")
+make_eval = load_tool("make_eval_generations")
+make_trial = load_tool("make_trial_dataset")
+artifact_manifest = load_tool("artifact_manifest")
+adapter_stack = load_tool("adapter_stack")
+verify_manifest = load_tool("verify_manifest")
+
+
+def job(tmp_path: Path, *args: str) -> dict[str, object]:
+    """Run remote_job.py the way the orchestrator does: a separate process, JSON on stdout."""
+    done = subprocess.run(
+        [sys.executable, str(TOOLS / "remote_job.py"), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)  # type: ignore[no-any-return]
+
+
+def finished(tmp_path: Path, name: str) -> Callable[[], bool]:
+    return lambda: (
+        job(tmp_path, "status", "--dir", str(tmp_path / "jobs"), "--name", name)["state"]
+        in ("exited", "lost")
+    )
+
+
+def run_job(tmp_path: Path, name: str, *command: str, extra: tuple[str, ...] = ()) -> None:
+    jobs = str(tmp_path / "jobs")
+    job(tmp_path, "start", "--dir", jobs, "--name", name, *extra, "--", *command)
+
+
+# --------------------------------------------------------------------------- remote_job
+
+
+def test_a_job_runs_in_the_background_and_reports_its_exit_code_and_log(tmp_path: Path) -> None:
+    jobs = str(tmp_path / "jobs")
+    code = "import sys; print('hello'); print('oops', file=sys.stderr); sys.exit(3)"
+    started = job(
+        tmp_path, "start", "--dir", jobs, "--name", "t1", "--", sys.executable, "-c", code
+    )
+    assert started["state"] in ("started", "running", "exited")
+    wait_until(lambda: job(tmp_path, "status", "--dir", jobs, "--name", "t1")["state"] == "exited")
+    done = job(tmp_path, "status", "--dir", jobs, "--name", "t1")
+    assert done["exit_code"] == 3 and done["log_size"] > 0
+    tail = job(tmp_path, "tail", "--dir", jobs, "--name", "t1", "--offset", "0")
+    assert "hello" in str(tail["data"]) and "oops" in str(tail["data"]) and tail["eof"] is True
+
+
+def test_a_job_that_does_not_exist_reports_none(tmp_path: Path) -> None:
+    assert job(tmp_path, "status", "--dir", str(tmp_path / "jobs"), "--name", "nope") == {
+        "state": "none",
+        "exit_code": None,
+        "log_size": 0,
+    }
+    tail = job(tmp_path, "tail", "--dir", str(tmp_path / "jobs"), "--name", "nope", "--offset", "5")
+    assert tail == {"offset": 5, "data": "", "eof": True}
+
+
+def test_the_log_is_read_on_from_the_last_offset_and_survives_a_reconnect(tmp_path: Path) -> None:
+    jobs = str(tmp_path / "jobs")
+    marker = tmp_path / "go"
+    code = (
+        "import pathlib, sys, time\n"
+        "print('first line', flush=True)\n"
+        f"p = pathlib.Path({str(marker)!r})\n"
+        "while not p.exists():\n    time.sleep(0.05)\n"
+        "print('second line', flush=True)\n"
+    )
+    run_job(tmp_path, "t2", sys.executable, "-c", code)
+    wait_until(
+        lambda: (
+            "first line"
+            in str(job(tmp_path, "tail", "--dir", jobs, "--name", "t2", "--offset", "0")["data"])
+        )
+    )
+    first = job(tmp_path, "tail", "--dir", jobs, "--name", "t2", "--offset", "0")
+    assert str(first["data"]).strip() == "first line" and first["eof"] is True
+    assert job(tmp_path, "status", "--dir", jobs, "--name", "t2")["state"] == "running"
+    # "the connection dropped": a new process asks for the state and goes on from the offset
+    again = job(
+        tmp_path, "start", "--dir", jobs, "--name", "t2", "--", sys.executable, "-c", "pass"
+    )
+    assert again["state"] == "running"  # the same job, not a second one
+    marker.write_text("go", encoding="utf-8")
+    wait_until(finished(tmp_path, "t2"))
+    rest = job(tmp_path, "tail", "--dir", jobs, "--name", "t2", "--offset", str(first["offset"]))
+    assert str(rest["data"]).strip() == "second line"
+    assert job(tmp_path, "status", "--dir", jobs, "--name", "t2")["exit_code"] == 0
+
+
+def test_the_environment_and_working_directory_are_passed_to_the_command(tmp_path: Path) -> None:
+    jobs = str(tmp_path / "jobs")
+    work = tmp_path / "work"
+    work.mkdir()
+    code = "import os; print(os.environ['TWIN_X'], os.getcwd())"
+    run_job(
+        tmp_path,
+        "t3",
+        sys.executable,
+        "-c",
+        code,
+        extra=("--cwd", str(work), "--env", "TWIN_X=a=b"),
+    )
+    wait_until(finished(tmp_path, "t3"))
+    text = str(job(tmp_path, "tail", "--dir", jobs, "--name", "t3", "--offset", "0")["data"])
+    assert text.split()[0] == "a=b" and Path(text.split()[1]).resolve() == work.resolve()
+
+
+def test_a_finished_job_can_be_started_again_and_starts_with_an_empty_log(tmp_path: Path) -> None:
+    jobs = str(tmp_path / "jobs")
+    run_job(tmp_path, "t4", sys.executable, "-c", "print('one')")
+    wait_until(finished(tmp_path, "t4"))
+    run_job(tmp_path, "t4", sys.executable, "-c", "print('two')")
+    wait_until(
+        lambda: (
+            "two"
+            in str(job(tmp_path, "tail", "--dir", jobs, "--name", "t4", "--offset", "0")["data"])
+        )
+    )
+    data = str(job(tmp_path, "tail", "--dir", jobs, "--name", "t4", "--offset", "0")["data"])
+    assert "one" not in data
+
+
+def test_a_missing_program_is_a_failed_job_with_a_reason_in_the_log(tmp_path: Path) -> None:
+    jobs = str(tmp_path / "jobs")
+    run_job(tmp_path, "t5", str(tmp_path / "no-such-program"))
+    wait_until(finished(tmp_path, "t5"))
+    done = job(tmp_path, "status", "--dir", jobs, "--name", "t5")
+    assert done["exit_code"] == 127
+    assert "could not start" in str(
+        job(tmp_path, "tail", "--dir", jobs, "--name", "t5", "--offset", "0")["data"]
+    )
+
+
+def test_a_multibyte_character_is_never_cut_in_the_middle(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs" / "t6"
+    jobs.mkdir(parents=True)
+    (jobs / "log").write_bytes("ab我们".encode())  # 2 + 3 + 3 bytes
+    tail = remote_job.tail(jobs, 0, 4)  # 4 bytes end inside the first Chinese character
+    assert tail["data"] == "ab" and tail["offset"] == 2 and tail["eof"] is False
+    rest = remote_job.tail(jobs, 2, 100)
+    assert rest["data"] == "我们" and rest["offset"] == 8 and rest["eof"] is True
+
+
+def test_a_job_whose_supervisor_vanished_is_reported_lost(tmp_path: Path) -> None:
+    directory = tmp_path / "jobs" / "t7"
+    directory.mkdir(parents=True)
+    heartbeat = directory / "heartbeat"
+    heartbeat.write_text("x", encoding="utf-8")
+    old = time.time() - 600
+    import os
+
+    os.utime(heartbeat, (old, old))
+    assert remote_job.status(directory)["state"] == "lost"
+    heartbeat.write_text("y", encoding="utf-8")
+    assert remote_job.status(directory)["state"] == "running"
+
+
+def test_job_names_cannot_leave_the_jobs_directory(tmp_path: Path) -> None:
+    for name in ("", "../x", "a/b", "a\\b"):
+        with pytest.raises(ValueError, match="invalid job name"):
+            remote_job.job_dir(tmp_path, name)
+
+
+def test_stop_ends_a_running_job(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        pytest.skip("SIGTERM semantics: the job runs on the Linux instance; the stop path is POSIX")
+    jobs = str(tmp_path / "jobs")
+    run_job(tmp_path, "t8", sys.executable, "-c", "import time; time.sleep(60)")
+    wait_until(lambda: (tmp_path / "jobs" / "t8" / "child_pid").exists())
+    job(tmp_path, "stop", "--dir", jobs, "--name", "t8")
+    wait_until(finished(tmp_path, "t8"))
+    assert job(tmp_path, "status", "--dir", jobs, "--name", "t8")["exit_code"] != 0
+
+
+def test_start_without_a_command_is_a_usage_error(tmp_path: Path) -> None:
+    done = subprocess.run(
+        [
+            sys.executable,
+            str(TOOLS / "remote_job.py"),
+            "start",
+            "--dir",
+            str(tmp_path),
+            "--name",
+            "x",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert done.returncode == 2
+
+
+def run_check(python: str, root: Path | None = None) -> subprocess.CompletedProcess[str]:
+    command = [python, str(CHECK_SCRIPT)]
+    if root is not None:
+        command += ["--root", str(root)]
+    return subprocess.run(
+        command, capture_output=True, text=True, encoding="utf-8", check=False, timeout=180
+    )
+
+
+def test_remote_job_starts_a_command_on_every_installed_python() -> None:
+    """R17-2 (D-630): the tool runs under the Python of the instance, not only under ours.
+
+    ``start ... -- COMMAND`` once failed with "unrecognized arguments" on Python 3.11 and
+    3.12.0-3.12.6 (``argparse`` before 3.12.7 handles ``--`` after the options differently); the
+    tests ran under the newest 3.12 only.  ``scripts/check_remote_job.py`` runs start, status,
+    tail and stop for real under the interpreter that runs it; here under every different Python
+    this machine has (the system 3.11 and 3.12.3 of ``ubuntu-latest`` among them), and CI runs it
+    under 3.11 and 3.12.3 in its own job.
+    """
+    pythons = installed_pythons()
+    assert pythons, "not even the interpreter of the tests is usable"
+    failures = {}
+    for version, executable in pythons:
+        done = run_check(executable)
+        if done.returncode != 0:
+            failures[version] = done.stderr
+        else:
+            assert f"works under Python {version}" in done.stdout
+    assert not failures, failures
+
+
+def test_the_command_may_look_like_options(tmp_path: Path) -> None:
+    """R17-2 (D-630): everything after the first ``--`` is the command, verbatim."""
+    words = ["--name", "x", "--dir", "y", "--", "--env", "K=V", "start", "-h"]
+    code = "import sys, json; print(json.dumps(sys.argv[1:]))"
+    for version, executable in installed_pythons():
+        jobs = tmp_path / f"jobs-{version}"
+        tool = [executable, str(TOOLS / "remote_job.py")]
+        started = subprocess.run(
+            [
+                *tool,
+                "start",
+                "--dir",
+                str(jobs),
+                "--name",
+                "o",
+                "--",
+                executable,
+                "-c",
+                code,
+                *words,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=60,
+        )
+        assert started.returncode == 0, (version, started.stderr)
+        wait_until(lambda jobs=jobs: (jobs / "o" / "exit_code").exists(), timeout=30)
+        assert json.loads((jobs / "o" / "log").read_text("utf-8")) == words, version
+
+
+def test_only_the_first_double_dash_ends_the_options_and_only_start_takes_a_command(
+    tmp_path: Path,
+) -> None:
+    """R17-2 (D-630): the split of the arguments is ours, not ``argparse``'s."""
+    head, tail = remote_job.split_command(["start", "--name", "n", "--", "a", "--", "b"])
+    assert (head, tail) == (["start", "--name", "n"], ["a", "--", "b"])
+    assert remote_job.split_command(["status", "--name", "n"]) == (["status", "--name", "n"], [])
+    jobs = str(tmp_path / "jobs")
+    for action in ("status", "tail", "stop"):
+        with_command = [action, "--dir", jobs, "--name", "n", "--", "echo", "hi"]
+        assert remote_job.main(with_command) == 2  # a command only makes sense for start
+    assert remote_job.main(["start", "--dir", jobs, "--name", "n", "--"]) == 2
+    with pytest.raises(SystemExit) as refused:  # words without ``--`` are not a command
+        remote_job.main(["start", "--dir", jobs, "--name", "n", "echo", "hi"])
+    assert refused.value.code == 2
+
+
+@given(
+    head=st.lists(st.text(min_size=1, max_size=8).filter(lambda word: word != "--"), max_size=6),
+    tail=st.lists(st.text(max_size=8), max_size=6),
+)
+def test_the_split_gives_back_what_was_joined(head: list[str], tail: list[str]) -> None:
+    """R17-2 (D-630): whatever the command looks like, it comes out unchanged."""
+    assert remote_job.split_command([*head, "--", *tail]) == (head, tail)
+    assert remote_job.split_command(head) == (head, [])
+
+
+def test_the_check_script_reads_the_minimum_python_and_lists_what_the_instance_runs() -> None:
+    """R17-2 (D-630): one source for the minimum, and the files checked are the files shipped."""
+    check = check_remote_job
+    assert check.minimum_python(ROOT) == tuple(int(part) for part in PYTHON_MIN.split("."))
+    assert check.PYLIB_MODULES == bundle.PYLIB_MODULES
+    uploaded = bundle.plain_upload_files(PROFILES["5090-8b"])
+    tools = {Path(name).name for name in uploaded if name.startswith("autodl/tools/")}
+    listed = {path.name for path in check.instance_files(ROOT)}
+    assert {name for name in tools if name.endswith(".py")} <= listed
+    assert {f"{name}.py" for name in bundle.PYLIB_MODULES} <= listed
+
+
+def copy_instance_files(root: Path) -> None:
+    """A repository with only what ``check_remote_job.py`` looks at."""
+    shutil.copytree(TOOLS, root / "training" / "autodl" / "tools")
+    shutil.copy(AUTODL / "versions.env", root / "training" / "autodl" / "versions.env")
+    package = root / "src" / "twin" / "training"
+    package.mkdir(parents=True)
+    for name in (*check_remote_job.TOOL_MODULES, *bundle.PYLIB_MODULES):
+        shutil.copy(ROOT / "src" / "twin" / "training" / f"{name}.py", package)
+
+
+def test_the_check_refuses_syntax_that_the_minimum_python_cannot_parse(tmp_path: Path) -> None:
+    """R17-2 (D-630): a tool written for 3.12 must not reach an instance with 3.11."""
+    copy_instance_files(tmp_path)
+    clean = run_check(sys.executable, tmp_path)
+    assert clean.returncode == 0, clean.stderr
+    new_syntax = tmp_path / "training" / "autodl" / "tools" / "generic.py"
+    new_syntax.write_text("def first[T](items: list[T]) -> T:\n    return items[0]\n", "utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1
+    assert "training/autodl/tools/generic.py:1" in done.stderr
+    assert f"Python {PYTHON_MIN}" in done.stderr
+
+
+def test_the_check_needs_the_minimum_to_be_written_down(tmp_path: Path) -> None:
+    copy_instance_files(tmp_path)
+    versions = tmp_path / "training" / "autodl" / "versions.env"
+    versions.write_text("TWIN_TORCH=2.9.1\n", encoding="utf-8")
+    done = run_check(sys.executable, tmp_path)
+    assert done.returncode == 1 and "TWIN_PYTHON_MIN" in done.stderr
+
+
+# ----------------------------------------------------------------- make_trial_dataset
+
+
+def sharegpt_row(name: str, system: str, *turns: str) -> dict[str, object]:
+    roles = ("human", "gpt")
+    return {
+        "id": name,
+        "system": system,
+        "conversations": [{"from": roles[i % 2], "value": text} for i, text in enumerate(turns)],
+    }
+
+
+def write_trial_source(directory: Path, rows: list[dict[str, object]]) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    (directory / "sft_train.jsonl").write_text(text, encoding="utf-8")
+    info = {
+        "twin_sft_train": {
+            "file_name": "sft_train.jsonl",
+            "formatting": "sharegpt",
+            "columns": {"messages": "conversations", "system": "system"},
+            "tags": {"role_tag": "from", "content_tag": "value", "user_tag": "human"},
+        },
+        "twin_sft_val": {"file_name": "sft_val.jsonl", "formatting": "sharegpt"},
+    }
+    (directory / "dataset_info.json").write_text(json.dumps(info), encoding="utf-8")
+
+
+def test_the_trial_dataset_holds_the_longest_samples_unchanged(tmp_path: Path) -> None:
+    """R17-49c (D-633): longest first, rows copied as they are, the train entry reused."""
+    rows = [
+        sharegpt_row("a", "sys", "x" * 5, "y" * 5),  # 13
+        sharegpt_row("b", "sys", "x" * 50),  # 53
+        sharegpt_row("c", "", "x" * 20, "y" * 20, "z" * 20),  # 60
+        sharegpt_row("d", "sys", "x" * 8),  # 11
+        sharegpt_row("e", "s" * 30, "x" * 30),  # 60: ties with c, the earlier row goes first
+    ]
+    write_trial_source(tmp_path / "data", rows)
+    out = tmp_path / "trial"
+    arguments = ["--data-dir", str(tmp_path / "data"), "--dataset", "twin_sft_train"]
+    code = make_trial.main([*arguments, "--out-dir", str(out), "--count", "3"])
+    assert code == 0
+    written = (out / "sft_trial.jsonl").read_text("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in written] == ["c", "e", "b"]
+    source = (tmp_path / "data" / "sft_train.jsonl").read_text("utf-8").splitlines()
+    assert set(written) <= set(source)  # byte for byte what the exporter wrote
+    info = json.loads((out / "dataset_info.json").read_text("utf-8"))
+    assert list(info) == ["twin_sft_trial"]
+    expected = json.loads((tmp_path / "data" / "dataset_info.json").read_text("utf-8"))
+    assert info["twin_sft_trial"] == {**expected["twin_sft_train"], "file_name": "sft_trial.jsonl"}
+
+
+def test_a_training_set_with_fewer_samples_than_the_count_is_taken_whole(tmp_path: Path) -> None:
+    rows = [sharegpt_row(f"r{i}", "s", "x" * (i + 1)) for i in range(5)]
+    write_trial_source(tmp_path / "data", rows)
+    selected, total, shortest, longest = make_trial.build(
+        tmp_path / "data", "twin_sft_train", tmp_path / "trial", 64
+    )
+    assert (selected, total, shortest, longest) == (5, 5, 2, 6)
+
+
+@given(
+    lengths=st.lists(st.integers(min_value=0, max_value=200), min_size=1, max_size=40),
+    count=st.integers(min_value=0, max_value=50),
+)
+def test_the_selection_never_leaves_out_a_longer_sample_than_it_takes(
+    lengths: list[int], count: int
+) -> None:
+    """R17-49c (D-633): whatever the lengths, what is taken is at least as long as what is not."""
+    lines = [json.dumps(sharegpt_row(str(i), "", "x" * n)) for i, n in enumerate(lengths)]
+    chosen = make_trial.select_longest(lines, count)
+    assert len(chosen) == min(count, len(lines))
+    taken = {line for _, line in chosen}
+    assert len(taken) == len(chosen)
+    assert [length for length, _ in chosen] == sorted(
+        (length for length, _ in chosen), reverse=True
+    )
+    left = [n for line, n in zip(lines, lengths, strict=True) if line not in taken]
+    if chosen and left:
+        assert min(length for length, _ in chosen) >= max(left)
+
+
+def test_the_trial_dataset_refuses_data_it_cannot_use_and_never_prints_a_sample(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "a sentence of hers"
+    bad = tmp_path / "bad"
+    write_trial_source(bad, [{"id": "x", "system": secret, "conversations": [{"from": "human"}]}])
+    arguments = ["--dataset", "twin_sft_train", "--out-dir", str(tmp_path / "out")]
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert "line 1" in capsys.readouterr().err
+    (bad / "sft_train.jsonl").write_text(secret + "\n", encoding="utf-8")  # not JSON at all
+    assert make_trial.main(["--data-dir", str(bad), *arguments]) == 1
+    assert secret not in capsys.readouterr().err
+    empty = tmp_path / "empty"
+    write_trial_source(empty, [])
+    assert make_trial.main(["--data-dir", str(empty), *arguments]) == 1
+    assert "no samples" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(empty), "--dataset", "nope", "--out-dir", "x"]) == 1
+    assert "no dataset 'nope'" in capsys.readouterr().err
+    assert make_trial.main(["--data-dir", str(tmp_path / "missing"), *arguments]) == 1
+    assert not (tmp_path / "out").exists()  # nothing is written when nothing was chosen
+
+
+# ------------------------------------------------------------------------- the others
+
+
+def write_state(directory: Path, **extra: object) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    state = {
+        "best_model_checkpoint": "/x/y/checkpoint-8",
+        "best_metric": 1.25,
+        "global_step": 12,
+        "epoch": 3.0,
+        "log_history": [
+            {"step": 4, "eval_loss": 1.5},
+            {"step": 8, "eval_loss": 1.25},
+            {"step": 12, "loss": 1.1},
+        ],
+        **extra,
+    }
+    (directory / "trainer_state.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def test_the_training_summary_has_the_best_checkpoint_loss_curve_and_peak_memory(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "out"
+    write_state(output)
+    (output / "training_loss.png").write_bytes(b"png")
+    gpu = tmp_path / "gpu.csv"
+    gpu.write_text("1000\n21000\n19000\n\n", encoding="utf-8")
+    code = summarize_train.main(
+        [
+            "--output-dir",
+            str(output),
+            "--out-dir",
+            str(tmp_path / "art"),
+            "--gpu-log",
+            str(gpu),
+            "--gpu-name",
+            "NVIDIA GeForce RTX 5090",
+        ]
+    )
+    assert code == 0
+    metrics = json.loads((tmp_path / "art" / "metrics.json").read_text("utf-8"))
+    assert metrics == {
+        "best_checkpoint": "checkpoint-8",
+        "best_val_loss": 1.25,
+        "global_step": 12,
+        "epochs_done": 3.0,
+        "eval_history": [[4, 1.5], [8, 1.25]],
+        "last_train_loss": 1.1,
+        "peak_vram_mib": 21000,
+        "gpu_name": "NVIDIA GeForce RTX 5090",
+    }
+    assert (tmp_path / "art" / "training_loss.png").read_bytes() == b"png"
+
+
+def test_the_training_summary_fails_when_the_run_left_no_state(tmp_path: Path) -> None:
+    assert (
+        summarize_train.main(["--output-dir", str(tmp_path), "--out-dir", str(tmp_path / "a")]) == 1
+    )
+    assert summarize_train.peak_memory_mib(None) is None
+    assert summarize_train.peak_memory_mib(tmp_path / "missing.csv") is None
+
+
+def sft_row(sample_id: str, reply: str) -> dict[str, object]:
+    return {
+        "id": sample_id,
+        "system": "s",
+        "conversations": [{"from": "human", "value": "q"}, {"from": "gpt", "value": reply}],
+    }
+
+
+def test_generations_get_their_ids_back_by_position_and_nothing_else_is_kept(
+    tmp_path: Path,
+) -> None:
+    test = tmp_path / "test.jsonl"
+    test.write_text(
+        "\n".join(json.dumps(sft_row(f"te{i}", f"reply {i}")) for i in range(3)) + "\n",
+        encoding="utf-8",
+    )
+    predictions = tmp_path / "pred.jsonl"
+    predictions.write_text(
+        "\n".join(
+            json.dumps({"prompt": "P", "predict": f" generated {i}\n", "label": f"reply {i}\n"})
+            for i in range(3)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    results = tmp_path / "eval_results.json"
+    results.write_text(json.dumps({"eval_loss": 1.1}), encoding="utf-8")
+    code = make_eval.main(
+        [
+            "--test",
+            str(test),
+            "--predictions",
+            str(predictions),
+            "--eval-results",
+            str(results),
+            "--adapter",
+            "sft",
+            "--out-dir",
+            str(tmp_path / "eval"),
+        ]
+    )
+    assert code == 0
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "eval" / "eval_generations.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert rows == [{"id": f"te{i}", "text": f"generated {i}"} for i in range(3)]
+    metrics = json.loads((tmp_path / "eval" / "eval_metrics.json").read_text("utf-8"))
+    assert metrics == {"val_loss": 1.1, "adapter": "sft", "generated": 3}
+
+
+def test_generations_that_do_not_line_up_with_the_test_set_are_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    test = tmp_path / "test.jsonl"
+    test.write_text(json.dumps(sft_row("a", "secret reply")) + "\n", encoding="utf-8")
+    pred = tmp_path / "pred.jsonl"
+    pred.write_text(json.dumps({"predict": "x", "label": "another reply"}) + "\n", encoding="utf-8")
+    args = ["--test", str(test), "--predictions", str(pred), "--out-dir", str(tmp_path / "o")]
+    assert make_eval.main(args) == 1
+    error = capsys.readouterr().err
+    assert "do not belong to the test sample" in error and "secret reply" not in error
+    pred.write_text("", encoding="utf-8")
+    assert make_eval.main(args) == 1
+    assert "0 predictions for 1 test samples" in capsys.readouterr().err
+
+
+def make_artifacts(root: Path) -> Path:
+    for name, content in {
+        "gguf/5090-8b-Q4_K_M.gguf": b"q4",
+        "gguf/5090-8b-Q5_K_M.gguf": b"q5",
+        "gguf/5090-8b-Q8_0.gguf": b"q8",
+        "adapter/adapter_model.safetensors": b"adapter",
+        "adapter/adapter_config.json": b"{}",
+    }.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (root / "train").mkdir()
+    (root / "train" / "metrics.json").write_text(
+        json.dumps(
+            {"best_val_loss": 1.25, "best_checkpoint": "checkpoint-8", "peak_vram_mib": 21000}
+        ),
+        encoding="utf-8",
+    )
+    return root
+
+
+BUNDLE_MANIFEST = {
+    "profile": "5090-8b",
+    "base_model": "Qwen/Qwen3-8B",
+    "template": "qwen3_nothink",
+    "template_version": "qwen3_nothink@llamafactory-0.9.5",
+    "persona_version": "v3",
+    "profile_version": "P1",
+    "dataset_version": "ds-1",
+    "llamafactory_version": "0.9.5",
+    "llama_cpp_tag": "b11177",
+}
+
+
+def test_the_artifact_manifest_lists_files_models_versions_and_metrics(tmp_path: Path) -> None:
+    artifacts = make_artifacts(tmp_path / "art")
+    bundle = tmp_path / "manifest.json"
+    bundle.write_text(json.dumps(BUNDLE_MANIFEST), encoding="utf-8")
+    code = artifact_manifest.main(
+        [
+            "--artifacts",
+            str(artifacts),
+            "--bundle-manifest",
+            str(bundle),
+            "--quants",
+            "Q4_K_M,Q5_K_M,Q8_0",
+            "--adapter-kind",
+            "dpo",
+            "--run-id",
+            "r1",
+        ]
+    )
+    assert code == 0
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    assert manifest["run_id"] == "r1" and manifest["adapter_kind"] == "dpo"
+    assert manifest["persona_version"] == "v3" and manifest["dataset_version"] == "ds-1"
+    assert manifest["template_version"] == "qwen3_nothink@llamafactory-0.9.5"
+    assert manifest["models"] == [
+        {"quant": "Q4_K_M", "kind": "gguf", "path": "gguf/5090-8b-Q4_K_M.gguf"},
+        {"quant": "Q5_K_M", "kind": "gguf", "path": "gguf/5090-8b-Q5_K_M.gguf"},
+        {"quant": "Q8_0", "kind": "gguf", "path": "gguf/5090-8b-Q8_0.gguf"},
+        {"quant": "lora", "kind": "adapter", "path": "adapter/adapter_model.safetensors"},
+    ]
+    files = {f["path"]: f for f in manifest["files"]}
+    assert "manifest.json" not in files and "train/metrics.json" in files
+    assert files["gguf/5090-8b-Q4_K_M.gguf"]["size"] == 2
+    assert len(files["gguf/5090-8b-Q4_K_M.gguf"]["sha256"]) == 64
+    assert (
+        manifest["metrics"]["best_val_loss"] == 1.25
+        and manifest["metrics"]["peak_vram_mib"] == 21000
+    )
+    # writing it again does not list the manifest itself
+    assert (
+        artifact_manifest.main(
+            [
+                "--artifacts",
+                str(artifacts),
+                "--bundle-manifest",
+                str(bundle),
+                "--quants",
+                "Q4_K_M,Q5_K_M,Q8_0",
+            ]
+        )
+        == 0
+    )
+    assert json.loads((artifacts / "manifest.json").read_text("utf-8"))["run_id"] is None
+
+
+def test_the_artifact_manifest_needs_every_model_file_and_the_bundle_manifest(
+    tmp_path: Path,
+) -> None:
+    artifacts = make_artifacts(tmp_path / "art")
+    bundle = tmp_path / "manifest.json"
+    args = ["--artifacts", str(artifacts), "--bundle-manifest", str(bundle), "--quants", "Q4_K_M"]
+    assert artifact_manifest.main(args) == 1  # no bundle manifest yet
+    bundle.write_text(json.dumps(BUNDLE_MANIFEST), encoding="utf-8")
+    (artifacts / "gguf" / "5090-8b-Q4_K_M.gguf").unlink()
+    assert artifact_manifest.main(args) == 1
+
+
+def test_the_unpacked_package_is_checked_against_its_manifest_and_the_uploaded_scripts(
+    tmp_path: Path,
+) -> None:
+    import hashlib
+
+    root, scripts = tmp_path / "pkg", tmp_path / "up"
+    (root / "data").mkdir(parents=True)
+    (root / "autodl").mkdir()
+    scripts.mkdir()
+    entries = {"data/a.jsonl": b"aaa", "autodl/x.sh": b"echo\n"}
+    for name, content in entries.items():
+        (root / name).write_bytes(content)
+    (scripts / "x.sh").write_bytes(b"echo\n")
+    manifest = {
+        "files": [
+            {"path": n, "sha256": hashlib.sha256(c).hexdigest(), "size": len(c)}
+            for n, c in entries.items()
+        ]
+    }
+    (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert verify_manifest.check(root, scripts) == []
+    (scripts / "x.sh").write_bytes(b"echo changed\n")
+    assert verify_manifest.check(root, scripts) == ["autodl/x.sh differs from the uploaded script"]
+    (scripts / "x.sh").write_bytes(b"echo\n")
+    (root / "data" / "extra.txt").write_text("x", encoding="utf-8")
+    (root / "data" / "a.jsonl").write_bytes(b"bbb")
+    problems = verify_manifest.check(root, None)
+    assert "data/extra.txt is not listed in the manifest" in problems
+    assert "data/a.jsonl does not match the manifest" in problems
+    (root / "manifest.json").unlink()
+    assert verify_manifest.check(root, None) == ["manifest.json is missing"]
+    assert verify_manifest.main(["--root", str(root)]) == 1
+
+
+# ------------------------------------------------ the DPO reference and the adapter stack (R17-49d)
+
+
+def preference_row(name: str, prompt: str, chosen: str, rejected: str) -> dict[str, object]:
+    return {
+        "id": name,
+        "system": "sys",
+        "conversations": [{"from": "human", "value": prompt}],
+        "chosen": {"from": "gpt", "value": chosen},
+        "rejected": {"from": "gpt", "value": rejected},
+    }
+
+
+def test_the_trial_of_a_preference_set_takes_the_longest_pairs_by_the_longer_reply(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651): both replies go through the model; the longer one decides the memory."""
+    rows = [
+        preference_row("short", "q" * 5, "a" * 2, "b" * 3),  # 3 + 5 + 3 = 11
+        preference_row("long-rejected", "q" * 5, "a" * 2, "b" * 40),  # 48
+        preference_row("long-chosen", "q" * 5, "a" * 30, "b" * 3),  # 38
+        preference_row("long-prompt", "q" * 60, "a" * 2, "b" * 2),  # 65
+    ]
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "dpo_train.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    entry = {"file_name": "dpo_train.jsonl", "formatting": "sharegpt", "ranking": True}
+    (data / "dataset_info.json").write_text(json.dumps({"twin_dpo_train": entry}), "utf-8")
+    code = make_trial.main(
+        [
+            "--data-dir",
+            str(data),
+            "--dataset",
+            "twin_dpo_train",
+            "--out-dir",
+            str(tmp_path / "trial"),
+            "--count",
+            "3",
+            "--trial-name",
+            "twin_dpo_trial",
+            "--trial-file",
+            "dpo_trial.jsonl",
+        ]
+    )
+    assert code == 0
+    written = (tmp_path / "trial" / "dpo_trial.jsonl").read_text("utf-8").splitlines()
+    assert [json.loads(line)["id"] for line in written] == [
+        "long-prompt",
+        "long-rejected",
+        "long-chosen",
+    ]
+    info = json.loads((tmp_path / "trial" / "dataset_info.json").read_text("utf-8"))
+    assert info == {"twin_dpo_trial": {**entry, "file_name": "dpo_trial.jsonl"}}  # ranking stays
+    broken = {**rows[0], "chosen": {"from": "gpt"}}
+    assert make_trial.sample_length(rows[1]) == 48
+    with pytest.raises(make_trial.TrialDataError, match="reply without text"):
+        make_trial.sample_length(broken)
+
+
+def test_the_training_summary_carries_how_the_reference_model_was_chosen(tmp_path: Path) -> None:
+    """R17-49d (D-651): the record of ``dpo.sh`` is part of the report of the DPO run."""
+    output = tmp_path / "out"
+    write_state(output)
+    record = {"mode": "continued", "reference": "base", "fallback": True}
+    reference = tmp_path / "dpo_reference.json"
+    reference.write_text(json.dumps(record), encoding="utf-8")
+    args = ["--output-dir", str(output), "--out-dir", str(tmp_path / "art")]
+    assert summarize_train.main([*args, "--dpo-reference", str(reference)]) == 0
+    assert json.loads((tmp_path / "art" / "metrics.json").read_text("utf-8"))["dpo"] == record
+    assert summarize_train.main([*args, "--dpo-reference", str(tmp_path / "missing.json")]) == 0
+    assert "dpo" not in json.loads((tmp_path / "art" / "metrics.json").read_text("utf-8"))
+
+
+def delta(tensors: dict[str, Any], prefix: str, scale: float) -> Any:
+    import numpy as np
+
+    a = np.asarray(tensors[f"{prefix}.lora_A.weight"], dtype="float64")
+    b = np.asarray(tensors[f"{prefix}.lora_B.weight"], dtype="float64")
+    return scale * (b @ a)
+
+
+def test_composing_two_adapters_adds_their_scaled_deltas(tmp_path: Path) -> None:
+    """R17-49d (D-652): ``[s1*B1 | s2*B2] @ [A1; A2] = s1*B1@A1 + s2*B2@A2``, alpha = r1 + r2."""
+    import numpy as np
+    from safetensors.numpy import load_file
+
+    write_tiny_adapter(tmp_path / "sft", rank=3, alpha=6, seed=1)  # scale 2.0
+    write_tiny_adapter(tmp_path / "dpo", rank=5, alpha=5, seed=2)  # scale 1.0
+    config = adapter_stack.compose_files(
+        [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+    )
+    assert config["r"] == 8 and config["lora_alpha"] == 8
+    assert config["use_rslora"] is False and config["target_modules"] == ["q_proj", "v_proj"]
+    sft = load_file(str(tmp_path / "sft" / "adapter_model.safetensors"))
+    dpo = load_file(str(tmp_path / "dpo" / "adapter_model.safetensors"))
+    served = load_file(str(tmp_path / "served" / "adapter_model.safetensors"))
+    assert sorted(served) == sorted(sft)
+    prefixes = {key.rsplit(".lora_", 1)[0] for key in served}
+    assert len(prefixes) == 4
+    for prefix in prefixes:
+        assert served[f"{prefix}.lora_A.weight"].shape == (8, 6)
+        assert served[f"{prefix}.lora_B.weight"].shape == (6, 8)
+        assert served[f"{prefix}.lora_A.weight"].dtype == np.float32
+        expected = delta(sft, prefix, 2.0) + delta(dpo, prefix, 1.0)
+        assert np.allclose(delta(served, prefix, 1.0), expected, rtol=1e-5, atol=1e-5), prefix
+    # the sources are not touched
+    assert json.loads((tmp_path / "sft" / "adapter_config.json").read_text("utf-8"))["r"] == 3
+
+
+@given(
+    ranks=st.tuples(st.integers(1, 6), st.integers(1, 6)),
+    alphas=st.tuples(st.integers(1, 64), st.integers(1, 64)),
+    sizes=st.tuples(st.integers(1, 7), st.integers(1, 7)),
+    rslora=st.tuples(st.booleans(), st.booleans()),
+    seed=st.integers(0, 10_000),
+)
+def test_the_composition_is_the_sum_of_the_scaled_deltas_for_any_ranks_alphas_and_shapes(
+    ranks: tuple[int, int],
+    alphas: tuple[int, int],
+    sizes: tuple[int, int],
+    rslora: tuple[bool, bool],
+    seed: int,
+) -> None:
+    """R17-49d (D-652): the algebra, for plain and rank-stabilised LoRA alike (no files)."""
+    import numpy as np
+    import torch
+
+    generator = np.random.default_rng(seed)
+    key = "base_model.model.model.layers.0.self_attn.q_proj"
+    layers = []
+    for rank, alpha, stabilised in zip(ranks, alphas, rslora, strict=True):
+        config = {"r": rank, "lora_alpha": alpha, "use_rslora": stabilised}
+        tensors = {
+            f"{key}.lora_A.weight": torch.tensor(generator.standard_normal((rank, sizes[0]))),
+            f"{key}.lora_B.weight": torch.tensor(generator.standard_normal((sizes[1], rank))),
+        }
+        layers.append((f"l{rank}", config, {n: t.float() for n, t in tensors.items()}))
+    composed = adapter_stack.compose_tensors(layers)
+    expected = sum(
+        adapter_stack.scale_of(config)
+        * (tensors[f"{key}.lora_B.weight"].double() @ tensors[f"{key}.lora_A.weight"].double())
+        for _, config, tensors in layers
+    )
+    actual = composed[f"{key}.lora_B.weight"].double() @ composed[f"{key}.lora_A.weight"].double()
+    assert torch.allclose(actual, expected, rtol=1e-4, atol=1e-3)
+    assert composed[f"{key}.lora_A.weight"].shape[0] == sum(ranks)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"use_dora": True}, "use_dora"),
+        ({"modules_to_save": ["lm_head"]}, "modules_to_save"),
+        ({"rank_pattern": {"q_proj": 2}}, "rank_pattern"),
+        ({"alpha_pattern": {"q_proj": 2}}, "alpha_pattern"),
+        ({"bias": "all"}, "bias all"),
+        ({"peft_type": "OFT"}, "peft_type OFT"),
+        ({"lora_bias": True}, "lora_bias"),
+    ],
+)
+def test_forms_of_lora_the_composition_does_not_describe_are_refused(
+    tmp_path: Path, change: dict[str, Any], message: str
+) -> None:
+    """R17-49d (D-652): refused, never guessed at - a wrong adapter would serve a wrong model."""
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4, seed=1)
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4, seed=2)
+    path = tmp_path / "dpo" / "adapter_config.json"
+    path.write_text(json.dumps({**json.loads(path.read_text("utf-8")), **change}), "utf-8")
+    with pytest.raises(adapter_stack.StackError, match=message):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+        )
+    assert not (tmp_path / "served").exists()
+
+
+def test_adapters_that_do_not_cover_the_same_weights_are_not_composed(tmp_path: Path) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4, seed=1, modules=("q_proj", "v_proj"))
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4, seed=2, modules=("q_proj",))
+    with pytest.raises(adapter_stack.StackError, match="do not cover the same weights"):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "sft"), ("dpo", tmp_path / "dpo")], tmp_path / "served"
+        )
+    from safetensors.numpy import load_file, save_file
+
+    for name in ("odd", "odd2"):  # the same weights, plus one that is not a LoRA matrix
+        write_tiny_adapter(tmp_path / name, rank=2, alpha=4, seed=3)
+        file = tmp_path / name / "adapter_model.safetensors"
+        tensors = load_file(str(file))
+        tensors["base_model.model.lm_head.weight"] = tensors[next(iter(tensors))]
+        save_file(tensors, str(file))
+    with pytest.raises(adapter_stack.StackError, match="not a LoRA matrix"):
+        adapter_stack.compose_files(
+            [("sft", tmp_path / "odd"), ("dpo", tmp_path / "odd2")], tmp_path / "served"
+        )
+
+
+@pytest.mark.parametrize(
+    ("choice", "mode", "kind", "names"),
+    [
+        ("sft", "layered", "sft", ["sft"]),
+        ("sft", "continued", "sft", ["sft"]),
+        ("dpo", "layered", "sft+dpo", ["sft", "dpo"]),
+        ("dpo", "continued", "dpo", ["dpo"]),
+    ],
+)
+def test_collect_puts_the_stack_that_was_kept_into_the_artifacts(
+    tmp_path: Path, choice: str, mode: str, kind: str, names: list[str]
+) -> None:
+    """R17-49d (D-650, D-652, D-653): one layer is copied as it is, two are kept and composed."""
+    sources = {}
+    for seed, name in enumerate(("sft", "dpo")):
+        write_tiny_adapter(tmp_path / "out" / name, rank=4, alpha=8, seed=seed)
+        sources[name] = tmp_path / "out" / name
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "adapter").mkdir(parents=True)
+    (artifacts / "adapter" / "stale.txt").write_text("from an earlier export", "utf-8")
+    stack = adapter_stack.collect(artifacts, choice, mode, [(n, sources[n]) for n in names])
+    assert (stack["kind"], stack["mode"], stack["choice"]) == (kind, mode, choice)
+    assert [layer["name"] for layer in stack["layers"]] == names
+    assert stack["served"]["composed"] is (len(names) > 1)
+    assert stack["served"]["rank"] == 4 * len(names)
+    assert stack["served"]["sha256"] == adapter_stack.sha256_of(artifacts / stack["served"]["path"])
+    for layer in stack["layers"]:
+        assert layer["sha256"] == adapter_stack.sha256_of(artifacts / layer["path"])
+        assert layer["size"] == (artifacts / layer["path"]).stat().st_size
+    if len(names) == 1:
+        assert stack["layers"][0]["path"] == stack["served"]["path"]
+        assert stack["served"]["path"] == "adapter/adapter_model.safetensors"
+        assert not (artifacts / "adapters").exists()
+        assert (artifacts / "adapter" / "adapter_model.safetensors").read_bytes() == (
+            sources[names[0]] / "adapter_model.safetensors"
+        ).read_bytes()
+        assert not (artifacts / "adapter" / "stale.txt").exists()
+    else:
+        assert [layer["path"] for layer in stack["layers"]] == [
+            "adapters/sft/adapter_model.safetensors",
+            "adapters/dpo/adapter_model.safetensors",
+        ]
+    written = json.loads((artifacts / "adapter_stack.json").read_text("utf-8"))
+    assert written == stack and written["schema"] == 1
+
+
+def test_collect_refuses_a_stack_that_is_not_the_one_the_choice_names(tmp_path: Path) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=2, alpha=4)
+    write_tiny_adapter(tmp_path / "dpo", rank=2, alpha=4)
+    artifacts = tmp_path / "artifacts"
+    sft, dpo = tmp_path / "sft", tmp_path / "dpo"
+    with pytest.raises(adapter_stack.StackError, match="has the layers sft, dpo"):
+        adapter_stack.collect(artifacts, "dpo", "layered", [("dpo", dpo)])
+    with pytest.raises(adapter_stack.StackError, match="has the layers dpo"):
+        adapter_stack.collect(artifacts, "dpo", "continued", [("sft", sft), ("dpo", dpo)])
+    with pytest.raises(adapter_stack.StackError, match="is missing"):
+        adapter_stack.collect(artifacts, "sft", "layered", [("sft", tmp_path / "nowhere")])
+    with pytest.raises(adapter_stack.StackError, match="unknown"):
+        adapter_stack.collect(artifacts, "both", "layered", [("sft", sft)])
+
+
+def test_the_stack_tool_reports_in_words_and_exits_non_zero_on_errors(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_tiny_adapter(tmp_path / "sft", rank=4, alpha=8, seed=1)
+    write_tiny_adapter(tmp_path / "dpo", rank=4, alpha=8, seed=2)
+    arguments = ["--artifacts", str(tmp_path / "art"), "--choice", "dpo", "--mode", "layered"]
+    layers = ["--layer", f"sft={tmp_path / 'sft'}", "--layer", f"dpo={tmp_path / 'dpo'}"]
+    assert adapter_stack.main([*arguments, *layers]) == 0
+    assert "adapter stack sft+dpo: 2 layer(s), served adapter of rank 8 (composed)" in (
+        capsys.readouterr().out
+    )
+    assert adapter_stack.main([*arguments, "--layer", f"sft={tmp_path / 'sft'}"]) == 1
+    assert "has the layers sft, dpo" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        adapter_stack.main([*arguments, "--layer", "no-equals-sign"])
+
+
+def test_the_manifest_carries_the_stack_the_reference_record_and_the_verdict(
+    tmp_path: Path,
+) -> None:
+    """R17-49d (D-651, D-653, D-655): what the registry learns about how the model was made."""
+    artifacts = make_artifacts(tmp_path / "art")
+    for name in ("sft", "dpo"):
+        write_tiny_adapter(tmp_path / "out" / name, rank=2, alpha=4, seed=len(name))
+    shutil.rmtree(artifacts / "adapter")
+    adapter_stack.collect(
+        artifacts,
+        "dpo",
+        "layered",
+        [("sft", tmp_path / "out" / "sft"), ("dpo", tmp_path / "out" / "dpo")],
+    )
+    for stack, loss in (("sft", 1.2), ("dpo", 1.3)):
+        (artifacts / "eval" / stack).mkdir(parents=True)
+        (artifacts / "eval" / stack / "eval_metrics.json").write_text(
+            json.dumps({"val_loss": loss, "generated": 7}), encoding="utf-8"
+        )
+    (artifacts / "dpo").mkdir()
+    (artifacts / "dpo" / "dpo_reference.json").write_text(
+        json.dumps({"mode": "layered", "reference": "sft", "fallback": False}), encoding="utf-8"
+    )
+    (artifacts / "eval" / "stack_choice.json").write_text(
+        json.dumps({"keep": "dpo", "reason": "x"}), encoding="utf-8"
+    )
+    bundle_manifest = tmp_path / "manifest.json"
+    bundle_manifest.write_text(json.dumps(BUNDLE_MANIFEST), encoding="utf-8")
+    arguments = [
+        "--artifacts",
+        str(artifacts),
+        "--bundle-manifest",
+        str(bundle_manifest),
+        "--quants",
+        "Q4_K_M,Q5_K_M,Q8_0",
+        "--adapter-kind",
+        "dpo",
+    ]
+    assert artifact_manifest.main(arguments) == 0
+    manifest = json.loads((artifacts / "manifest.json").read_text("utf-8"))
+    assert manifest["adapter_stack"]["kind"] == "sft+dpo"
+    assert manifest["dpo"] == {"mode": "layered", "reference": "sft", "fallback": False}
+    assert manifest["stack_choice"] == {"keep": "dpo", "reason": "x"}
+    assert manifest["metrics"]["eval_val_loss"] == 1.3  # the stack that was kept
+    listed = {entry["path"] for entry in manifest["files"]}
+    assert {"adapters/sft/adapter_model.safetensors", "adapter_stack.json"} <= listed
+    # a layer that changed after the stack was recorded stops the export
+    layer = artifacts / "adapters" / "sft" / "adapter_model.safetensors"
+    layer.write_bytes(layer.read_bytes() + b"0")
+    assert artifact_manifest.main(arguments) == 1
+    # an artifacts directory without a stack (an older export) is as it was
+    (artifacts / "adapter_stack.json").unlink()
+    assert artifact_manifest.main(arguments) == 0
+    assert json.loads((artifacts / "manifest.json").read_text("utf-8"))["adapter_stack"] is None

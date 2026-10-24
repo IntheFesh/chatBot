@@ -1,0 +1,23 @@
+# The coverage settings of the Windows `coverage (windows-latest)` job (round 17, D-741).
+#
+# Identical to [tool.coverage.*] in pyproject.toml except for ONE line: the pragma
+# "# pragma: win32-only" is not an exclusion here.  The statements it marks (the Windows API
+# calls of ops/winapi.py and a few more) cannot run on Linux, so pyproject.toml leaves them out
+# of the count there; on Windows they run and are counted like any other code, so the packages
+# that hold them are measured with them.  tests/unit/test_gate_scripts.py keeps the two files
+# the same in everything else.
+[tool.coverage.run]
+source = ["src/twin"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "@overload",
+    "raise AssertionError",
+]
+
+[tool.coverage.json]
+pretty_print = true

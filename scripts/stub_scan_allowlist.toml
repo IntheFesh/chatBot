@@ -1,0 +1,101 @@
+# Findings of scripts/stub_scan.py that are legitimate, one entry each, with the reason.
+#
+# Not a place to park a stand-in: every entry here is an implementation that is *meant* to give
+# the same answer every time - a fail-closed default, a null object that stands for "nothing
+# configured", a member the interface of the standard library forces to be a constant, or a value
+# the SPEC fixes.  The scan reports an entry that matches nothing, so the list cannot go stale.
+#
+# rule      keyword | empty-body | constant-return | tests-import
+# file      path of the file, relative to the repository root, with forward slashes
+# symbol    (syntax rules) the function as Class.method, as the scan prints it
+# contains  (keyword rule) a piece of the line, as the scan shows it
+# reason    why this is not a stand-in (at least a full sentence)
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/channel/policy.py"
+symbol = "DenyAllMediaPolicy.allowed"
+reason = """The outbound picture allow-list must fail closed (R-SAFE-006): this is the policy of a channel
+that was given no sticker library, and by definition it allows no picture. It is the empty member of
+the OutboundMediaPolicy family (sticker library, probe manifest, composite), and a test pins it."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/llm/budget.py"
+symbol = "NoActivatedStyleBackend.available"
+reason = """Null object of StyleBackendStatus for the time before any style model is activated:
+the budget manager must not switch to a backend that does not exist (R-LLM-008 step 4, R-SRV-005).
+The real answer comes from BackendSelector.available once a model passed the launch gate."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/memory/asof.py"
+symbol = "AsOfView.lifeline"
+reason = """Required by R-TRN-013: at the moment of a real record the bot's life line did not exist, so
+the as-of view of training and evaluation must always show it empty. The property is the explicit
+statement of that rule (the live view has real data), and the injection tests assert it."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/memory/asof.py"
+symbol = "AsOfView.bot_turns"
+reason = """Required by R-TRN-013 and R-EVAL-009: the conversation with the bot did not exist at the time of
+the real records, so the as-of view never offers any bot turn. The constant is the rule itself."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/backup/sealed.py"
+symbol = "SealWriter.writable"
+reason = """io.RawIOBase protocol method: a writer stream has to answer True to writable(); it is the
+capability flag of the file-like object, not behaviour that could be missing."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/backup/sealed.py"
+symbol = "SealReader.readable"
+reason = """io.RawIOBase protocol method: a reader stream has to answer True to readable(); it is the
+capability flag of the file-like object, not behaviour that could be missing."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/training/bundle_crypto.py"
+symbol = "EncryptWriter.writable"
+reason = """io.RawIOBase protocol method: a writer stream has to answer True to writable(); it is the
+capability flag of the file-like object, not behaviour that could be missing."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/training/bundle_crypto.py"
+symbol = "DecryptReader.readable"
+reason = """io.RawIOBase protocol method: a reader stream has to answer True to readable(); it is the
+capability flag of the file-like object, not behaviour that could be missing."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/jobs.py"
+symbol = "DeferredOffPeakPolicy.allows"
+reason = """Fail-closed default of OffPeakPolicy (DECISIONS D-105): until the llm layer registers the
+real peak/off-peak decision, jobs that must wait for the cheap hours do not run. Running them at
+the expensive hours by accident is the failure this class prevents; activate_offpeak_policy replaces it."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/login_recovery.py"
+symbol = "ViewerQrWindow.ask_code"
+reason = """The default-viewer window shows a picture and has no input box, so it truly cannot ask for the
+number; None is the documented answer of the QrWindow protocol for "no way to ask" (the Tk window
+on Windows does ask). The caller handles None by waiting for the scan only."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/login_recovery.py"
+symbol = "ViewerQrWindow.close"
+reason = """The default image viewer is an external program that the person closes; there is nothing
+for the application to release, which is what the QrWindow protocol's close() means here."""
+
+[[allow]]
+rule = "constant-return"
+file = "src/twin/ops/power.py"
+symbol = "NotNeededPowerManager.active"
+reason = """Reports the truth on platforms that need no sleep inhibitor (everything but Windows): no
+inhibitor is held, so active is False. twin doctor prints this together with the platform name."""

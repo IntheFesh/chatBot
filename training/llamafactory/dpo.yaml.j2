@@ -1,0 +1,74 @@
+### LLaMA-Factory {{ llamafactory_version }} - DPO on top of the SFT adapter ({{ profile.name }})
+### rendered by twin.training.yaml_render; do not edit by hand
+### The reference model of a preference run is the SFT model, never the bare base (D-650).
+{% if profile.dpo_mode == "layered" %}
+### layered (bf16 profile): LLaMA-Factory merges the SFT adapter into the base in memory and trains a
+### NEW adapter on top of it (create_new_adapter).  No ref_model is set, so the trainer switches the
+### new adapter off for the reference pass: the reference is the merged SFT model - no second copy
+### in VRAM, no merged copy on disk.  output/dpo is the delta over SFT; the adapter stack is sft,dpo.
+{% else %}
+### continued (the base is quantised): a quantised model cannot take a new adapter, so the SFT adapter
+### is continued and output/dpo replaces output/sft (the adapter stack is dpo alone).  The reference
+### is held explicitly: the base with the SFT adapter, quantised to 4 bit like the policy.  If it does
+### not fit next to the policy, dpo.sh drops the three ref_model keys and the reference falls back to
+### the base with the adapter switched off (only this profile; the fact is recorded, D-651).
+{% endif %}
+
+### model
+model_name_or_path: {{ model_path }}
+adapter_name_or_path: {{ output_dir }}/sft
+{% if profile.dpo_mode == "layered" %}
+create_new_adapter: true
+{% endif %}
+trust_remote_code: false
+flash_attn: sdpa
+{% if profile.quantization_bit %}
+quantization_bit: {{ profile.quantization_bit }}
+quantization_method: bnb
+{% endif %}
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+lora_rank: {{ profile.lora_rank }}
+lora_alpha: {{ profile.lora_alpha }}
+lora_target: all
+pref_beta: {{ dpo_beta }}
+pref_loss: sigmoid
+{% if profile.dpo_mode == "continued" %}
+ref_model: {{ model_path }}
+ref_model_adapters: {{ output_dir }}/sft
+ref_model_quantization_bit: {{ profile.dpo_reference_quantization_bit }}
+{% endif %}
+
+### dataset
+dataset: {{ dataset_dpo }}
+dataset_dir: {{ data_dir }}
+template: {{ template }}
+cutoff_len: {{ cutoff_len }}
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+seed: 42
+
+### output
+output_dir: {{ output_dir }}/dpo
+logging_steps: 5
+save_steps: 100
+save_total_limit: 2
+save_only_model: false
+plot_loss: true
+overwrite_output_dir: false
+report_to: none
+resume_from_checkpoint: null
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: {{ dpo_grad_accum }}
+learning_rate: {{ dpo_learning_rate }}
+num_train_epochs: {{ dpo_epochs }}.0
+lr_scheduler_type: cosine
+warmup_ratio: {{ warmup_ratio }}
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000

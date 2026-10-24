@@ -1,0 +1,60 @@
+### LLaMA-Factory 0.9.5 - DPO on top of the SFT adapter (5090-14b)
+### rendered by twin.training.yaml_render; do not edit by hand
+### The reference model of a preference run is the SFT model, never the bare base (D-650).
+### continued (the base is quantised): a quantised model cannot take a new adapter, so the SFT adapter
+### is continued and output/dpo replaces output/sft (the adapter stack is dpo alone).  The reference
+### is held explicitly: the base with the SFT adapter, quantised to 4 bit like the policy.  If it does
+### not fit next to the policy, dpo.sh drops the three ref_model keys and the reference falls back to
+### the base with the adapter switched off (only this profile; the fact is recorded, D-651).
+
+### model
+model_name_or_path: /root/autodl-tmp/models/Qwen/Qwen3-14B
+adapter_name_or_path: /root/autodl-tmp/twin/output/sft
+trust_remote_code: false
+flash_attn: sdpa
+quantization_bit: 4
+quantization_method: bnb
+
+### method
+stage: dpo
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64
+lora_target: all
+pref_beta: 0.1
+pref_loss: sigmoid
+ref_model: /root/autodl-tmp/models/Qwen/Qwen3-14B
+ref_model_adapters: /root/autodl-tmp/twin/output/sft
+ref_model_quantization_bit: 4
+
+### dataset
+dataset: twin_dpo_train
+dataset_dir: /root/autodl-tmp/twin/data
+template: qwen3_nothink
+cutoff_len: 2048
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+seed: 42
+
+### output
+output_dir: /root/autodl-tmp/twin/output/dpo
+logging_steps: 5
+save_steps: 100
+save_total_limit: 2
+save_only_model: false
+plot_loss: true
+overwrite_output_dir: false
+report_to: none
+resume_from_checkpoint: null
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-6
+num_train_epochs: 2.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000

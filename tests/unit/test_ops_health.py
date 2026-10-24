@@ -1,0 +1,752 @@
+"""The health check: thresholds, inputs, the monitor, the weekly integrity check (R-OPS-003)."""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+import shutil
+from collections import namedtuple
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+from sqlalchemy import select
+
+from tests.support.clock import ManualClock
+from tests.support.waiting import wait_until
+from twin.app import ComponentHealth, HealthStatus
+from twin.channel.base import AuthState
+from twin.channel.ilink.store import Credentials, IlinkStore
+from twin.channel.state import ChannelStateStore
+from twin.llm.health import LlmHealth, LlmHealthSnapshot, llm_health_of
+from twin.llm.reliability import BreakerState, CircuitBreaker
+from twin.ops.backup.archive import Manifest
+from twin.ops.backup.ledger import BackupLedger
+from twin.ops.health import (
+    HealthCheck,
+    HealthCollector,
+    HealthLevel,
+    LiveSources,
+    StyleReading,
+    check_backup,
+    check_budget,
+    check_channel,
+    check_components,
+    check_deepseek,
+    check_disk,
+    check_failed_jobs,
+    check_queue,
+    check_style,
+)
+from twin.ops.integrity import IntegrityReport, TableCheck
+from twin.ops.jobs import JobQueue
+from twin.ops.monitor import INTEGRITY_KEY, HealthMonitor, launch_kind
+from twin.services import Services
+from twin.storage.models import Alert
+from twin.storage.ops_models import HealthSnapshot
+from twin.storage.settings_store import get_setting
+
+NOW = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+GB = 1024**3
+
+
+def channel(
+    last_ok: timedelta | None,
+    *,
+    started: timedelta = timedelta(hours=1),
+    logged_in: bool = True,
+    auth: AuthState = AuthState.OK,
+    kind: str = "ilink",
+) -> HealthCheck:
+    return check_channel(
+        kind=kind,
+        logged_in=logged_in,
+        auth=auth,
+        last_ok_at=None if last_ok is None else NOW - last_ok,
+        now=NOW,
+        started_at=NOW - started,
+        stale_min=5,
+    )
+
+
+# ----------------------------------------------------------------------- channel
+
+
+def test_the_console_channel_needs_no_login() -> None:
+    assert channel(None, kind="console").level is HealthLevel.OK
+
+
+def test_not_logged_in_and_an_expired_login_are_critical() -> None:
+    for check in (
+        channel(None, logged_in=False),
+        channel(timedelta(minutes=1), auth=AuthState.NEEDS_RELOGIN),
+    ):
+        assert (check.level, check.category, check.severity) == (
+            HealthLevel.FAIL,
+            "login_lost",
+            "critical",
+        )
+
+
+@pytest.mark.parametrize(
+    ("age_s", "level"),
+    [(30, HealthLevel.OK), (299, HealthLevel.OK), (300, HealthLevel.OK), (301, HealthLevel.FAIL)],
+)
+def test_a_long_poll_older_than_five_minutes_is_a_failure(age_s: int, level: HealthLevel) -> None:
+    check = channel(timedelta(seconds=age_s))
+    assert check.level is level
+    if level is HealthLevel.FAIL:
+        assert check.category == "channel_poll_stale" and check.value == age_s
+
+
+def test_a_fresh_process_is_given_time_to_poll_for_the_first_time() -> None:
+    assert channel(None, started=timedelta(minutes=2)).detail == "starting"
+    # a success from before the process started says nothing about the new process
+    assert channel(timedelta(minutes=30), started=timedelta(minutes=2)).level is HealthLevel.OK
+    stuck = channel(None, started=timedelta(minutes=6))
+    assert stuck.level is HealthLevel.FAIL and "since the start" in stuck.detail
+    assert channel(timedelta(minutes=30), started=timedelta(minutes=6)).level is HealthLevel.FAIL
+
+
+# ------------------------------------------------------------------------ the rest
+
+
+def test_deepseek_errors_and_the_breaker() -> None:
+    assert check_deepseek(None, error_rate=0.5, min_calls=10).level is HealthLevel.OK
+    breaker = check_deepseek(LlmHealthSnapshot(3, 3, True), error_rate=0.5, min_calls=10)
+    assert (breaker.level, breaker.category, breaker.severity) == (
+        HealthLevel.FAIL,
+        "circuit_open",
+        "critical",
+    )
+    few = check_deepseek(LlmHealthSnapshot(9, 9, False), error_rate=0.5, min_calls=10)
+    assert few.level is HealthLevel.OK  # nine attempts say nothing
+    bad = check_deepseek(LlmHealthSnapshot(10, 5, False), error_rate=0.5, min_calls=10)
+    assert bad.level is HealthLevel.FAIL and bad.category == "deepseek_failure"
+    fine = check_deepseek(LlmHealthSnapshot(10, 4, False), error_rate=0.5, min_calls=10)
+    assert fine.level is HealthLevel.OK
+
+
+def test_the_style_model_is_checked_only_when_the_backend_needs_it() -> None:
+    assert check_style(None).level is HealthLevel.OK
+    assert "not needed" in check_style(StyleReading(False, True)).detail
+    assert check_style(StyleReading(True, True)).level is HealthLevel.OK
+    down = check_style(StyleReading(True, False, "unhealthy"))
+    assert (down.level, down.category) == (HealthLevel.FAIL, "style_model_down")
+
+
+def test_disk_below_five_gigabytes_is_a_failure() -> None:
+    assert check_disk(5 * GB, min_gb=5).level is HealthLevel.OK
+    low = check_disk(int(4.9 * GB), min_gb=5)
+    assert (low.level, low.category, low.severity) == (HealthLevel.FAIL, "disk_low", "warning")
+    assert check_disk(2 * GB, min_gb=5).severity == "critical"
+
+
+def test_the_queue_counts_jobs_and_age() -> None:
+    assert check_queue(500, None, max_jobs=500, oldest_h=24).level is HealthLevel.OK
+    many = check_queue(501, None, max_jobs=500, oldest_h=24)
+    assert (many.level, many.category) == (HealthLevel.FAIL, "queue_backlog")
+    assert check_queue(3, timedelta(hours=24), max_jobs=500, oldest_h=24).level is HealthLevel.OK
+    old = check_queue(3, timedelta(hours=24, seconds=1), max_jobs=500, oldest_h=24)
+    assert old.level is HealthLevel.FAIL and old.category == "queue_backlog"
+
+
+def test_the_newest_backup_must_be_younger_than_36_hours() -> None:
+    day = timedelta(hours=1)
+    assert (
+        check_backup(36 * day, since_first_run=timedelta(days=9), stale_h=36).level
+        is HealthLevel.OK
+    )
+    old = check_backup(
+        timedelta(hours=36, minutes=6), since_first_run=timedelta(days=9), stale_h=36
+    )
+    assert (old.level, old.category) == (HealthLevel.FAIL, "backup_failed")
+    # before the first backup: a warning, then a failure once the grace period is over
+    assert check_backup(None, since_first_run=10 * day, stale_h=36).level is HealthLevel.WARN
+    never = check_backup(None, since_first_run=37 * day, stale_h=36)
+    assert (never.level, never.category) == (HealthLevel.FAIL, "backup_failed")
+
+
+def test_the_budget_level_is_shown_but_raises_no_alert_of_its_own() -> None:
+    assert check_budget(0, 0.2, 0.1).level is HealthLevel.OK
+    degraded = check_budget(2, 1.3, 0.4)
+    assert degraded.level is HealthLevel.WARN and degraded.category is None
+
+
+def test_unhealthy_components_are_a_failure() -> None:
+    ok = {"a": ComponentHealth(HealthStatus.OK)}
+    assert check_components(ok).level is HealthLevel.OK
+    assert check_components(None).level is HealthLevel.OK
+    weak = {**ok, "b": ComponentHealth(HealthStatus.DEGRADED, "x")}
+    assert check_components(weak).level is HealthLevel.WARN
+    bad = {**weak, "c": ComponentHealth(HealthStatus.UNHEALTHY, "y")}
+    result = check_components(bad)
+    assert result.level is HealthLevel.FAIL and "c" in result.detail
+
+
+def test_a_check_survives_its_json_form() -> None:
+    check = check_disk(2 * GB, min_gb=5)
+    again = HealthCheck.from_json("disk", check.to_json())
+    assert again == check
+
+
+# ------------------------------------------------------------------- the collector
+
+
+def log_in(services: Services) -> IlinkStore:
+    store = IlinkStore(ChannelStateStore(services.db), services.clock)
+    store.save_credentials(
+        Credentials(
+            "token", "bot", "user", "https://example.invalid", services.clock.now_utc().isoformat()
+        )
+    )
+    return store
+
+
+async def test_the_collector_reads_the_channel_from_the_stored_state(
+    services: Services, clock: ManualClock
+) -> None:
+    collector = HealthCollector(services, started_at=clock.now_utc() - timedelta(hours=1))
+    report = await collector.collect()
+    channel_check = report.get("channel")
+    assert channel_check is not None and channel_check.category == "login_lost"  # nobody logged in
+
+    store = log_in(services)
+    store.record_poll_success()
+    report = await collector.collect()
+    assert report.get("channel").level is HealthLevel.OK  # type: ignore[union-attr]
+    assert report.channel_ok is True and report.channel_last_ok_at == clock.now_utc()
+    clock.tick(6 * 60)
+    stale = await collector.collect()
+    assert stale.get("channel").category == "channel_poll_stale"  # type: ignore[union-attr]
+    assert stale.channel_ok is False and stale.status == "unhealthy"
+    store.mark_needs_relogin(-14, "expired")
+    assert (await collector.collect()).get("channel").category == "login_lost"  # type: ignore[union-attr]
+
+
+async def test_the_collector_counts_the_ready_jobs(services: Services, clock: ManualClock) -> None:
+    services.settings.ops.health.queue_max = 2
+    queue = JobQueue(services.db, clock)
+    for _ in range(3):
+        queue.enqueue("noop", {})
+    # a job that waits for the user's approval is not a backlog
+    queue.enqueue("batch", {}, batch_id="b", requires_approval=True)
+    # one that is not due yet is not either
+    queue.enqueue("later", {}, run_after=clock.now_utc() + timedelta(hours=1))
+    collector = HealthCollector(services)
+    report = await collector.collect()
+    check = report.get("queue")
+    assert check is not None and check.level is HealthLevel.FAIL and check.value == 3
+    clock.tick(25 * 3600)
+    services.settings.ops.health.queue_max = 500
+    old = (await collector.collect()).get("queue")
+    assert old is not None and "h old" in old.detail and old.level is HealthLevel.FAIL
+
+
+async def test_the_collector_reads_the_age_of_the_newest_backup(
+    services: Services, clock: ManualClock
+) -> None:
+    collector = HealthCollector(services, started_at=clock.now_utc())
+    assert (await collector.collect()).get("backup").level is HealthLevel.WARN  # type: ignore[union-attr]
+    manifest = Manifest(
+        created_at=clock.now_utc().isoformat(),
+        local_date="2026-10-09",
+        kind="daily",
+        schema_revision=None,
+        key_id=1,
+        key_ids=[1],
+        tables={},
+        media=[],
+        db_sha256="0" * 64,
+    )
+    BackupLedger(services.db, clock).add_ok(
+        manifest,
+        kind="daily",
+        file_name="twin-2026-10-09.bak.enc",
+        size_bytes=1,
+        sha256="0" * 64,
+        duration_ms=1,
+    )
+    assert (await collector.collect()).get("backup").level is HealthLevel.OK  # type: ignore[union-attr]
+    clock.tick(37 * 3600)
+    assert (await collector.collect()).get("backup").level is HealthLevel.FAIL  # type: ignore[union-attr]
+
+
+async def test_the_disk_check_reads_the_data_directory(
+    services: Services, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    usage = namedtuple("usage", "total used free")
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(100 * GB, 98 * GB, 2 * GB))
+    check = (await HealthCollector(services).collect()).get("disk")
+    assert check is not None and check.category == "disk_low"
+
+
+async def test_the_live_checks_come_from_the_process(
+    services: Services, clock: ManualClock
+) -> None:
+    live = LiveSources(
+        components=lambda: {"engine": ComponentHealth(HealthStatus.UNHEALTHY, "dead")},
+        style=lambda: _style(StyleReading(True, False, "unhealthy")),
+    )
+    health = llm_health_of(services)
+    for _ in range(10):
+        health.record(False)
+    collector = HealthCollector(services, live=live)
+    report = await collector.collect()
+    assert report.get("deepseek").category == "deepseek_failure"  # type: ignore[union-attr]
+    assert report.get("style_model").category == "style_model_down"  # type: ignore[union-attr]
+    assert report.get("app").level is HealthLevel.FAIL  # type: ignore[union-attr]
+
+
+async def _style(reading: StyleReading) -> StyleReading:
+    return reading
+
+
+async def test_other_components_register_their_own_probe(services: Services) -> None:
+    """R-SRV-002: the llama-server of round 14 puts its check into the report this way."""
+    collector = HealthCollector(services)
+
+    async def llama() -> HealthCheck:
+        return HealthCheck("llama_server", HealthLevel.FAIL, "exited", category="style_model_down")
+
+    async def broken() -> HealthCheck:
+        raise RuntimeError("boom")
+
+    collector.register_probe("llama_server", llama)
+    collector.register_probe("odd", broken)
+    report = await collector.collect()
+    assert report.get("llama_server").category == "style_model_down"  # type: ignore[union-attr]
+    odd = report.get("odd")
+    assert odd is not None and odd.level is HealthLevel.FAIL and "RuntimeError" in odd.detail
+
+
+def test_llm_health_counts_a_window_of_attempts(clock: ManualClock) -> None:
+    health = LlmHealth(clock)
+    health.record(True)
+    health.record(False)
+    clock.tick(600)
+    health.record(False)
+    assert health.snapshot(900).calls == 3 and health.snapshot(900).failures == 2
+    recent = health.snapshot(60)
+    assert (recent.calls, recent.failures, recent.error_rate) == (1, 1, 1.0)
+    clock.tick(120)  # nothing new for two minutes: the one-minute window is empty
+    assert health.snapshot(1).calls == 0 and health.snapshot(1).error_rate == 0.0
+
+
+def test_the_circuit_flag_follows_the_state_of_the_registered_breakers(clock: ManualClock) -> None:
+    """R17-10 (D-701): "open" is read from the breaker objects; half-open does not count."""
+    health = LlmHealth(clock)
+    one = CircuitBreaker(clock, failure_threshold=2)
+    other = CircuitBreaker(clock, failure_threshold=2)
+    health.register_breaker(one)
+    health.register_breaker(other)
+    health.register_breaker(one)  # twice is once
+    assert not health.snapshot(60).circuit_open
+    for _ in range(2):
+        one.before_call()
+        one.record_failure()
+    assert health.snapshot(60).circuit_open
+    clock.tick(301)  # half-open: a probe may go, nothing is announced
+    assert one.state is BreakerState.HALF_OPEN and not health.snapshot(60).circuit_open
+    one.before_call()
+    one.record_failure()  # the probe failed: open again, still one opening
+    assert health.snapshot(60).circuit_open
+    clock.tick(301)
+    one.before_call()
+    one.record_success()
+    assert not health.snapshot(60).circuit_open
+    # two breakers, one of them open: the flag is "any"
+    for _ in range(2):
+        other.before_call()
+        other.record_failure()
+    assert health.snapshot(60).circuit_open
+    health.unregister_breaker(other)
+    assert not health.snapshot(60).circuit_open
+    health.unregister_breaker(other)  # nothing to do
+
+
+def test_a_breaker_that_is_dropped_leaves_the_record(clock: ManualClock) -> None:
+    health = LlmHealth(clock)
+    breaker = CircuitBreaker(clock, failure_threshold=1)
+    health.register_breaker(breaker)
+    breaker.before_call()
+    breaker.record_failure()
+    assert health.snapshot(60).circuit_open
+    del breaker  # a job's own client that went away while it was open
+    gc.collect()
+    assert not health.snapshot(60).circuit_open
+
+
+async def test_the_collector_reads_the_budget_of_the_one_runtime(services: Services) -> None:
+    """R17-10 (D-701): the health collector and the application look at the same budget."""
+    from twin.llm.runtime import build_llm_runtime
+
+    assert "llm_runtime" not in services.extras
+    report = await HealthCollector(services).collect()
+    assert report.get("budget") is not None
+    runtime = services.extras["llm_runtime"]  # made by the check, found again by everybody
+    assert build_llm_runtime(services) is runtime
+    assert await asyncio.to_thread(build_llm_runtime, services) is runtime
+
+
+# --------------------------------------------------------------------- the monitor
+
+
+def snapshots(services: Services) -> list[HealthSnapshot]:
+    with services.db.session() as session:
+        rows = list(session.scalars(select(HealthSnapshot).order_by(HealthSnapshot.at)))
+        session.expunge_all()  # the rollback at the end of the session would expire them
+        return rows
+
+
+def alerts_of(services: Services) -> list[Alert]:
+    with services.db.session() as session:
+        rows = list(session.scalars(select(Alert).order_by(Alert.created_at, Alert.id)))
+        session.expunge_all()
+        return rows
+
+
+def make_monitor(services: Services, clock: ManualClock, **options: object) -> HealthMonitor:
+    started = clock.now_utc() - timedelta(hours=1)
+    collector = HealthCollector(services, started_at=started)
+    return HealthMonitor(  # type: ignore[arg-type]
+        services, collector, launch="task", started_at=started, **options
+    )
+
+
+def clean_integrity(at: datetime = NOW) -> IntegrityReport:
+    return IntegrityReport(at, True, ("ok",), ())
+
+
+async def test_every_look_is_stored_with_how_the_process_was_started(
+    services: Services, clock: ManualClock
+) -> None:
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    log_in(services).record_poll_success()
+    report = await monitor.tick()
+    (row,) = snapshots(services)
+    assert (row.at, row.launch, row.status) == (clock.now_utc(), "task", report.status)
+    assert row.started_at == clock.now_utc() - timedelta(hours=1)
+    assert row.channel_ok is True and row.channel_last_ok_at == clock.now_utc()
+    assert {"channel", "disk", "queue", "backup", "budget"} <= set(row.checks)
+    assert row.checks["channel"]["status"] == "ok"
+    with services.db.session() as session:
+        assert get_setting(session, "ops.first_run_at") == clock.now_utc().isoformat()
+
+
+def test_the_launch_kind_comes_from_the_environment() -> None:
+    assert launch_kind({"TWIN_LAUNCH": "task"}) == "task"
+    assert launch_kind({"TWIN_LAUNCH": "manual"}) == "manual"
+    assert launch_kind({"TWIN_LAUNCH": "weird"}) == "unsupervised"
+    assert launch_kind({}) == "unsupervised"
+
+
+async def test_a_failure_is_announced_once_reminded_later_and_closed(
+    services: Services, clock: ManualClock
+) -> None:
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    store.record_poll_success()
+    await monitor.tick()
+    assert [a.category for a in alerts_of(services) if a.kind == "alert"] == []
+
+    clock.tick(6 * 60)  # no poll for six minutes
+    await monitor.tick()
+    (alert,) = [a for a in alerts_of(services) if a.kind == "alert"]
+    assert (alert.category, alert.severity, alert.toast_state) == (
+        "channel_poll_stale",
+        "warning",
+        "pending",
+    )
+    clock.tick(60)
+    await monitor.tick()  # still failing: not announced again
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 1
+
+    clock.tick(6 * 3600)  # the reminder after remind_h
+    store.state.put("ilink.poll_status", {"consecutive_failures": 0, "last_ok_at": None})
+    await monitor.tick()
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 2
+
+    store.record_poll_success()  # the poll works again
+    clock.tick(60)
+    await monitor.tick()
+    kinds = [(a.kind, a.resolved_at is not None) for a in alerts_of(services)]
+    assert ("recovery", False) in kinds
+    assert all(done for kind, done in kinds if kind == "alert")
+
+
+async def test_a_failure_announced_before_a_restart_is_closed_by_the_next_process(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8 (D-800): the open alerts are read back from the database, not kept in memory only.
+
+    Before: a new monitor started with nothing open, so a problem announced before a restart
+    and gone after it was never told "recovered" (and one that went on was announced again at
+    once instead of after ``remind_h``).
+    """
+    first = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    store.record_poll_success()
+    await first.tick()
+    clock.tick(6 * 60)  # no poll for six minutes
+    await first.tick()
+    (alert,) = [a for a in alerts_of(services) if a.kind == "alert"]
+    assert alert.category == "channel_poll_stale"
+
+    store.record_poll_success()  # the process restarts, and the poll works again
+    clock.tick(60)
+    second = make_monitor(services, clock, integrity=clean_integrity)
+    await second.tick()
+    rows = alerts_of(services)
+    recoveries = [a for a in rows if a.kind == "recovery"]
+    assert [(a.category, a.toast_state) for a in recoveries] == [("channel_poll_stale", "pending")]
+    assert all(a.resolved_at is not None for a in rows if a.kind == "alert")
+
+
+async def test_a_failure_that_goes_on_after_a_restart_is_reminded_not_announced_again(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8 (D-800): the new process knows the problem was told; it reminds after remind_h."""
+    first = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    store.record_poll_success()
+    await first.tick()
+    clock.tick(6 * 60)
+    await first.tick()
+    clock.tick(60)  # the process restarts; the problem is still there
+    second = make_monitor(services, clock, integrity=clean_integrity)
+    await second.tick()
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 1
+    clock.tick(6 * 3600)  # remind_h after the first announcement
+    store.state.put("ilink.poll_status", {"consecutive_failures": 0, "last_ok_at": None})
+    await second.tick()
+    assert len([a for a in alerts_of(services) if a.kind == "alert"]) == 2
+
+
+async def test_a_failure_that_changes_its_nature_is_announced_as_the_new_one(
+    services: Services, clock: ManualClock
+) -> None:
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    store = log_in(services)
+    await monitor.tick()
+    clock.tick(6 * 60)
+    await monitor.tick()
+    store.mark_needs_relogin(-14, "expired")
+    await monitor.tick()
+    categories = [a.category for a in alerts_of(services) if a.kind == "alert"]
+    assert categories == ["channel_poll_stale", "login_lost"]
+
+
+async def test_old_snapshots_and_alerts_are_removed(services: Services, clock: ManualClock) -> None:
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    log_in(services).record_poll_success()
+    await monitor.tick()
+    clock.tick(31 * 24 * 3600)
+    services.alerts.raise_alert("job_failed", "old")
+    clock.tick(60 * 24 * 3600)
+    log_in(services)
+    await monitor.tick()  # the first look of the later day prunes (an hour has passed)
+    assert len(snapshots(services)) == 1  # only the new one
+    assert monitor.prune() == 0
+
+
+async def test_the_integrity_check_runs_on_sundays_at_half_past_three(
+    services: Services, clock: ManualClock
+) -> None:
+    runs: list[datetime] = []
+
+    def integrity() -> IntegrityReport:
+        runs.append(clock.now_utc())
+        return clean_integrity(clock.now_utc())  # the report says when it was made
+
+    monitor = make_monitor(services, clock, integrity=integrity)
+    assert monitor.integrity_due()  # never made
+    monitor.run_integrity_now()
+    assert len(runs) == 1 and not monitor.integrity_due()
+    with services.db.session() as session:
+        assert get_setting(session, INTEGRITY_KEY)["ok"] is True
+    # Friday noon -> the coming Sunday 03:30 Chicago (08:30 UTC) is what is next due
+    clock.set_time(datetime(2026, 10, 11, 8, 29, tzinfo=UTC))
+    assert not monitor.integrity_due()
+    clock.set_time(datetime(2026, 10, 11, 8, 31, tzinfo=UTC))
+    assert monitor.integrity_due()
+    monitor.run_integrity_now()
+    clock.set_time(datetime(2026, 10, 14, 12, 0, tzinfo=UTC))
+    assert not monitor.integrity_due()  # once a week
+    clock.set_time(datetime(2026, 10, 18, 9, 0, tzinfo=UTC))
+    assert monitor.integrity_due()
+
+
+async def test_a_damaged_database_or_index_is_a_critical_alert_until_clean(
+    services: Services, clock: ManualClock
+) -> None:
+    bad = IntegrityReport(NOW, False, ("row 3 missing",), (TableCheck("memory_facts", 10, 2),))
+    reports = [bad, clean_integrity()]
+    monitor = make_monitor(services, clock, integrity=lambda: reports.pop(0))
+    report = monitor.run_integrity_now()
+    assert not report.ok and "twin memory reindex" in "\n".join(report.problems())
+    (alert,) = alerts_of(services)
+    assert (alert.category, alert.severity) == ("integrity_failed", "critical")
+    assert alert.detail == {"database_ok": False, "orphans": 2, "missing": 0}
+    monitor.run_integrity_now()
+    assert [a.kind for a in alerts_of(services)] == ["alert", "recovery"]
+
+
+async def test_the_loops_run_under_the_clock(services: Services, clock: ManualClock) -> None:
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    log_in(services).record_poll_success()
+    await monitor.start()
+    try:
+        await wait_until(lambda: monitor.ticks >= 1)
+        await clock.advance(60)
+        await wait_until(lambda: monitor.ticks >= 2)
+    finally:
+        await monitor.stop()
+    assert monitor.health().status is HealthStatus.OK
+    assert len(snapshots(services)) >= 2
+
+
+# ------------------------------------------------------------- failed jobs (R18-D1-②)
+
+
+def failed_job(queue: JobQueue, job_type: str) -> str:
+    """A job of ``job_type`` that failed for good just now, as the worker leaves one."""
+    job_id = queue.enqueue(job_type, {}, max_attempts=1)
+    claimed = queue.claim_next({job_type}, offpeak_allowed=True, worker_id="w")
+    assert claimed is not None and claimed.id == job_id
+    assert queue.fail(job_id, "w", "RuntimeError", retry_at=None) == "failed"
+    return job_id
+
+
+def finish_all(queue: JobQueue, job_type: str) -> None:
+    while (job := queue.claim_next({job_type}, offpeak_allowed=True, worker_id="w")) is not None:
+        assert queue.complete(job.id, "w")
+
+
+def test_r18_d1_failed_jobs_are_a_warning_counted_by_type_with_the_command_to_retry() -> None:
+    """R18-D1-② (D-892, user decision 【后台任务失败与告警补发】①)."""
+    calm = check_failed_jobs({})
+    assert calm.name == "failed_jobs" and calm.level is HealthLevel.OK and calm.category is None
+    check = check_failed_jobs({"memory_extract": 2, "image_caption": 1})
+    assert check.level is HealthLevel.WARN and check.value == 3
+    assert (check.category, check.severity) == ("failed_jobs", "warning")
+    assert "image_caption ×1" in check.detail and "memory_extract ×2" in check.detail
+    assert "twin jobs retry --failed" in check.detail
+
+
+async def test_r18_d1_the_collector_counts_the_jobs_still_failed_from_the_last_day(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D1-②: only "24 小时内" counts, and only what is still failed."""
+    queue = JobQueue(services.db, clock)
+    failed_job(queue, "lifeline_generate")  # a day and an hour before the look: not counted
+    clock.tick(25 * 3600)
+    failed_job(queue, "memory_extract")
+    failed_job(queue, "memory_extract")
+    retried = failed_job(queue, "image_caption")
+    failed_job(queue, "image_caption")
+    assert queue.retry(retried)  # queued again: no longer failed
+    cancelled = queue.enqueue("persona_generate", {})
+    assert queue.cancel(cancelled)  # cancelled is somebody's decision, not a failure
+    queue.enqueue("memory_extract", {})  # waiting
+    report = await HealthCollector(services).collect()
+    check = report.get("failed_jobs")
+    assert check is not None and check.level is HealthLevel.WARN and check.value == 3
+    assert "memory_extract ×2" in check.detail and "image_caption ×1" in check.detail
+    assert "lifeline_generate" not in check.detail
+    clock.tick(24 * 3600 + 60)  # those three are older than a day now
+    aged = (await HealthCollector(services).collect()).get("failed_jobs")
+    assert aged is not None and aged.level is HealthLevel.OK
+
+
+async def test_r18_d1_failed_jobs_are_announced_once_and_retrying_them_sends_the_recovery(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D1-②: the warning is announced by the monitor (one notice for all failed jobs, the
+    per-job ``job_failed`` stays unannounced, D-445); after ``twin jobs retry --failed`` the jobs
+    run, the check is good again and the "recovered" notice is queued."""
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    log_in(services).record_poll_success()
+    queue = JobQueue(services.db, clock)
+    for job_type in ("memory_extract", "memory_extract", "image_caption"):
+        failed_job(queue, job_type)
+        services.alerts.raise_alert("job_failed", f"job {job_type} failed")  # as the worker does
+    report = await monitor.tick()
+    check = report.get("failed_jobs")
+    assert check is not None and check.level is HealthLevel.WARN and report.status == "degraded"
+    announced = [a for a in alerts_of(services) if a.toast_state != "none"]
+    assert [(a.category, a.kind) for a in announced] == [("failed_jobs", "alert")]
+    assert announced[0].detail == {"check": "failed_jobs", "value": 3}
+    clock.tick(60)
+    await monitor.tick()  # still there: not announced again
+    assert len([a for a in alerts_of(services) if a.category == "failed_jobs"]) == 1
+
+    assert len(queue.retry_failed()) == 3  # `twin jobs retry --failed`
+    finish_all(queue, "memory_extract")
+    finish_all(queue, "image_caption")
+    clock.tick(60)
+    report = await monitor.tick()
+    assert report.get("failed_jobs").level is HealthLevel.OK  # type: ignore[union-attr]
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs"]
+    assert [(a.kind, a.resolved_at is not None) for a in rows] == [
+        ("alert", True),
+        ("recovery", False),
+    ]
+    assert rows[1].toast_state == "pending" and rows[1].mail_state == "pending"
+
+
+async def test_r18_d8_a_held_back_failure_is_told_when_the_hour_ends_and_reminded_from_then(
+    services: Services, clock: ManualClock
+) -> None:
+    """R18-D8-② (D-893): the failed-jobs warning flaps - announced, recovered, failing again
+    within the hour (held back).  It is told once when the hour is over, and the reminder comes
+    ``remind_h`` after that notice ("之后照常按提醒周期")."""
+    from tests.support.ops import RecordingMailer, RecordingNotifier
+    from twin.ops.alert_delivery import AlertDelivery
+
+    mailer = RecordingMailer()
+    delivery = AlertDelivery(
+        services.alerts,
+        clock,
+        notifier=RecordingNotifier(),
+        mailer=mailer,
+        recipient=lambda: "me@example.org",
+        zone=lambda: ZoneInfo("America/Chicago"),
+    )
+    monitor = make_monitor(services, clock, integrity=clean_integrity)
+    channel = log_in(services)
+
+    async def look() -> None:
+        channel.record_poll_success()  # the channel is fine all along
+        await monitor.tick()
+        await delivery.deliver_once()
+
+    told = "[wechat-twin] 有后台任务处于失败状态"
+    queue = JobQueue(services.db, clock)
+    failed_job(queue, "memory_extract")
+    await look()
+    assert [m.subject for m in mailer.sent] == [told]
+    clock.tick(2 * 60)
+    queue.retry_failed()
+    finish_all(queue, "memory_extract")
+    await look()  # good again: "recovered", put off to the end of the hour
+    clock.tick(2 * 60)
+    failed_job(queue, "image_caption")
+    await look()  # failing again four minutes after the first notice: held back
+    assert len(mailer.sent) == 1
+
+    clock.tick(56 * 60)  # the hour of the first notice is over
+    await look()
+    assert [m.subject for m in mailer.sent] == [told, told]
+    resent_at = clock.now_utc()
+
+    clock.tick(6 * 3600 - 60)  # remind_h after the notice, less a minute
+    await look()
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs" and a.kind == "alert"]
+    assert len(rows) == 2 and len(mailer.sent) == 2  # no reminder yet
+    clock.tick(60)
+    await look()
+    rows = [a for a in alerts_of(services) if a.category == "failed_jobs" and a.kind == "alert"]
+    assert len(rows) == 3 and not rows[-1].suppressed
+    assert [m.subject for m in mailer.sent] == [told] * 3
+    assert rows[-1].created_at - resent_at == timedelta(hours=6)

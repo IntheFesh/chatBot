@@ -1,0 +1,384 @@
+"""Waking from sleep: the clock-jump detector and the ``WM_POWERBROADCAST`` window (R-SCH-005).
+
+Every platform detects a wake-up by the wall clock running ahead of the monotonic clock; Windows
+also receives the system's own message in a hidden window.  The Windows calls go through the
+``Win32`` protocol, so the logic is tested here with a recording double and, on Windows only, with
+a real window.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from collections.abc import Callable
+from datetime import timedelta
+
+import pytest
+
+from tests.support.alerts import RecordingAlerts
+from tests.support.clock import ManualClock
+from tests.support.waiting import wait_until
+from tests.support.win32 import FakeWin32
+from twin.app import HealthStatus
+from twin.clock import SystemClock
+from twin.ops.power_events import PowerEvent, PowerEventMonitor, awake_clock_for, clock_drift
+from twin.ops.winapi import (
+    PBT_APMRESUMEAUTOMATIC,
+    PBT_APMRESUMESUSPEND,
+    PBT_APMSUSPEND,
+    WM_POWERBROADCAST,
+    next_window_class_name,
+)
+
+TICK = 5.0
+
+
+class Heard:
+    def __init__(self) -> None:
+        self.events: list[PowerEvent] = []
+
+    async def __call__(self, event: PowerEvent) -> None:
+        self.events.append(event)
+
+
+async def started(clock: ManualClock, heard: Heard, **kwargs: object) -> PowerEventMonitor:
+    monitor = PowerEventMonitor(clock, heard, tick_s=TICK, jump_ticks=2, **kwargs)  # type: ignore[arg-type]
+    await monitor.start()
+    return monitor
+
+
+# ------------------------------------------------------------- the clock check
+
+
+def test_the_drift_is_the_wall_clock_beyond_the_monotonic_clock() -> None:
+    from datetime import UTC, datetime
+
+    start = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+    assert clock_drift(start, start + timedelta(seconds=5), 100.0, 105.0) == 0.0
+    assert clock_drift(start, start + timedelta(hours=3, seconds=5), 100.0, 105.0) == 10800.0
+    assert clock_drift(start, start - timedelta(hours=1), 100.0, 105.0) == -3605.0
+
+
+async def test_a_wall_clock_that_jumps_three_hours_ahead_is_a_wake_up(clock: ManualClock) -> None:
+    heard = Heard()
+    monitor = await started(clock, heard, platform="linux")
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        await clock.advance(TICK)  # an ordinary tick
+        assert heard.events == []
+        clock.jump_wall(3 * 3600)  # the machine slept; the monotonic clock did not run
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+        event = heard.events[0]
+        assert (event.kind, event.source) == ("resume", "clock_jump")
+        assert event.gap_s == pytest.approx(3 * 3600, abs=1)
+        assert event.at == clock.now_utc() and monitor.resumes == 1
+        await clock.advance(TICK)  # and the next tick is quiet again
+        assert len(heard.events) == 1
+    finally:
+        await monitor.stop()
+
+
+async def test_a_jump_must_be_more_than_two_ticks_to_count(clock: ManualClock) -> None:
+    heard = Heard()
+    monitor = await started(clock, heard, platform="linux")
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        assert monitor.threshold_s == 2 * TICK
+        clock.jump_wall(2 * TICK - 0.5)  # a hiccup of the scheduler, not a sleep
+        await clock.advance(TICK)
+        assert heard.events == []
+        clock.jump_wall(2 * TICK + 1)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+    finally:
+        await monitor.stop()
+
+
+async def test_a_wall_clock_set_back_is_reported_without_a_negative_gap(clock: ManualClock) -> None:
+    heard = Heard()
+    monitor = await started(clock, heard, platform="linux")
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        clock.jump_wall(-3600)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].gap_s == 0.0 and heard.events[0].source == "clock_jump"
+    finally:
+        await monitor.stop()
+
+
+async def test_two_reports_of_one_wake_up_are_one_event(clock: ManualClock) -> None:
+    heard = Heard()
+    monitor = await started(clock, heard, platform="linux")
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        assert await monitor.resumed("wm_powerbroadcast", 600.0) is True
+        assert await monitor.resumed("clock_jump", 600.0) is False  # the same wake-up, a tick later
+        clock.jump_wall(600)
+        await clock.advance(TICK)  # the detector sees the jump as well
+        assert len(heard.events) == 1 and heard.events[0].source == "wm_powerbroadcast"
+        await clock.advance(120)  # a while later: another sleep is another event
+        clock.jump_wall(900)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 2)
+        assert heard.events[1].source == "clock_jump"
+    finally:
+        await monitor.stop()
+
+
+async def test_only_windows_opens_a_window(clock: ManualClock) -> None:
+    fake = FakeWin32()
+    monitor = await started(clock, Heard(), platform="linux", win32=fake)
+    try:
+        assert fake.windows == {} and monitor.window_handle is None
+        assert monitor.health().status is HealthStatus.OK
+    finally:
+        await monitor.stop()
+
+
+# ------------------------------------------------------ WM_POWERBROADCAST (Windows)
+
+
+async def test_the_hidden_window_receives_suspend_and_resume(clock: ManualClock) -> None:
+    fake = FakeWin32()
+    heard = Heard()
+    monitor = await started(clock, heard, platform="win32", win32=fake)
+    try:
+        hwnd = monitor.window_handle
+        assert hwnd is not None and hwnd in fake.windows
+        assert fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND, 0) == 1
+        assert heard.events == []  # a suspend alone is not an event
+        clock.jump_wall(3 * 3600)  # the machine slept for three hours
+        assert fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0) == 1
+        await wait_until(lambda: len(heard.events) == 1)
+        event = heard.events[0]
+        assert event.source == "wm_powerbroadcast"
+        assert event.gap_s == pytest.approx(3 * 3600, abs=1)
+        assert fake.send_message(hwnd, 0x0001, 0, 0) == 0  # other messages are not ours
+        assert fake.send_message(hwnd, WM_POWERBROADCAST, 0x000A, 0) == 1  # answered, ignored
+        assert len(heard.events) == 1
+    finally:
+        await monitor.stop()
+    assert fake.closed == [hwnd] and monitor.window_handle is None
+
+
+async def test_the_user_waking_the_machine_by_hand_is_the_same_wake_up(clock: ManualClock) -> None:
+    fake = FakeWin32()
+    heard = Heard()
+    monitor = await started(clock, heard, platform="win32", win32=fake)
+    try:
+        hwnd = monitor.window_handle
+        assert hwnd is not None
+        fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMSUSPEND, 0)
+        clock.jump_wall(1800)
+        fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0)
+        fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMRESUMESUSPEND, 0)  # after the key press
+        await wait_until(lambda: len(heard.events) >= 1)
+        await clock.advance(TICK)  # and the clock check sees it too
+        assert len(heard.events) == 1
+    finally:
+        await monitor.stop()
+
+
+def unbiased_of(fake: FakeWin32) -> Callable[[], float]:
+    """What :func:`awake_clock_for` gives the real system clock on Windows, read from ``fake``."""
+    return awake_clock_for(SystemClock(), platform="win32", win32=fake)
+
+
+def windows_sleep(clock: ManualClock, fake: FakeWin32, seconds: float) -> None:
+    """The machine slept the way Windows sleeps for Python 3.12.
+
+    The wall clock ran on, and so did ``time.monotonic()`` - on Windows it is ``GetTickCount64``,
+    which counts a sleep (Python 3.13 moved to ``QueryPerformanceCounter``; the project is on 3.12).
+    Only the unbiased interrupt time stood still.
+    """
+    clock.tick(seconds)
+    fake.suspended_s += seconds
+
+
+async def test_a_window_that_cannot_be_made_falls_back_to_the_clock(clock: ManualClock) -> None:
+    """R18-D3 (D-797): the fallback really works on Windows.
+
+    Before, the check compared the wall clock with ``time.monotonic()``; on Windows both run on
+    through a sleep, the difference never moved, and with the window gone a wake-up went
+    unnoticed - while ``health()`` said "using the clock check".
+    """
+    fake = FakeWin32(clock=clock)
+    fake.window_fails = True
+    heard = Heard()
+    monitor = await started(clock, heard, platform="win32", win32=fake, awake=unbiased_of(fake))
+    try:
+        assert monitor.window_handle is None
+        health = monitor.health()
+        assert health.status is HealthStatus.DEGRADED and "clock" in health.detail
+        assert "sleep" in health.detail  # the check that is used counts no sleep
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        windows_sleep(clock, fake, 7200)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].source == "clock_jump"
+        assert heard.events[0].gap_s == pytest.approx(7200, abs=1)
+    finally:
+        await monitor.stop()
+
+
+async def test_on_windows_the_clock_check_reads_the_unbiased_interrupt_time(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 (D-797): two hours asleep, the unbiased time stands still, the wake-up is seen.
+
+    An ordinary tick (everything moves by the tick) and a wall clock set by hand (only the wall
+    clock moves) behave as before.
+    """
+    fake = FakeWin32(clock=clock)
+    heard = Heard()
+    monitor = await started(clock, heard, platform="win32", win32=fake, awake=unbiased_of(fake))
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        await clock.advance(TICK)  # an ordinary tick
+        assert heard.events == []
+        windows_sleep(clock, fake, 2 * 3600)
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].gap_s == pytest.approx(2 * 3600, abs=1)
+        await clock.advance(120)  # past the de-duplication window
+        clock.jump_wall(3600)  # set by hand: the wall clock alone
+        await clock.advance(TICK)
+        await wait_until(lambda: len(heard.events) == 2)
+    finally:
+        await monitor.stop()
+
+
+async def test_a_simulated_clock_is_never_compared_with_the_hardware_counter(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 correction (D-797): on Windows the check read ``QueryUnbiasedInterruptTime`` even
+    when the monitor ran on a simulated clock.  The simulated wall clock jumps hours in a test
+    world (or the evaluation sandbox) while the hardware counter does not move, so every jump
+    was a "sleep": the morning greeting was voided and replies were re-planned (the Windows CI
+    failures of the life tests).  A clock that is not the system clock is compared with its own
+    monotonic seconds; nothing is heard when it simply runs on."""
+    heard = Heard()
+    still = FakeWin32()  # a hardware counter that does not follow the simulated clock
+    monitor = await started(clock, heard, platform="win32", win32=still)
+    try:
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        for _ in range(12):  # a simulated world steps from one wake-up to the next, awake
+            clock.tick(300)  # (tests/support/life_world.py: steps of up to five minutes)
+            await clock.advance(TICK)
+        assert heard.events == []
+        assert monitor.awake_seconds() == clock.monotonic()
+    finally:
+        await monitor.stop()
+
+
+def test_only_the_system_clock_on_windows_reads_the_unbiased_interrupt_time(
+    clock: ManualClock,
+) -> None:
+    """R18-D3 (D-797): which clock :func:`awake_clock_for` pairs with which wall clock."""
+    fake = FakeWin32(clock=clock)
+    fake.suspended_s = 100.0
+    real_on_windows = awake_clock_for(SystemClock(), platform="win32", win32=fake)
+    assert real_on_windows() == pytest.approx(clock.monotonic() - 100.0)  # the unbiased time
+    assert awake_clock_for(clock, platform="win32", win32=fake) == clock.monotonic
+    system = SystemClock()
+    assert awake_clock_for(system, platform="linux") == system.monotonic
+
+
+@pytest.mark.windows
+def test_the_real_unbiased_interrupt_time_counts_up_in_100_ns_steps() -> None:
+    """R18-D3: ``QueryUnbiasedInterruptTime`` through the real binding (Windows CI)."""
+    from twin.ops.winapi import load_win32
+
+    win32 = load_win32()
+    first = win32.unbiased_interrupt_time()
+    readings = [win32.unbiased_interrupt_time() for _ in range(1000)]
+    assert isinstance(first, int) and first > 0
+    assert readings == sorted(readings) and readings[0] >= first
+
+
+async def test_a_failing_wake_up_flow_is_logged_and_raised_as_an_alert(
+    clock: ManualClock,
+) -> None:
+    fake = FakeWin32()
+    alerts = RecordingAlerts()
+
+    async def broken(event: PowerEvent) -> None:
+        raise RuntimeError("the wake-up flow failed")
+
+    monitor = PowerEventMonitor(
+        clock, broken, tick_s=TICK, platform="win32", win32=fake, alerts=alerts
+    )
+    await monitor.start()
+    try:
+        hwnd = monitor.window_handle
+        assert hwnd is not None
+        fake.send_message(hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0)
+        await wait_until(lambda: alerts.categories() == ["power_resume_failed"])
+        assert alerts.alerts[0].detail == {"source": "wm_powerbroadcast", "error": "RuntimeError"}
+        assert monitor.resumes == 1 and monitor.health().status is HealthStatus.OK
+    finally:
+        await monitor.stop()
+
+
+@pytest.mark.windows
+async def test_a_real_hidden_window_receives_a_broadcast_message(clock: ManualClock) -> None:
+    """On Windows: post a real WM_POWERBROADCAST to the real hidden window."""
+    import asyncio
+
+    from twin.ops.winapi import load_win32
+
+    win32 = load_win32()
+    heard = Heard()
+    monitor = PowerEventMonitor(clock, heard, tick_s=TICK, platform=sys.platform, win32=win32)
+    await monitor.start()
+    try:
+        hwnd = monitor.window_handle
+        assert hwnd is not None
+        answer = await asyncio.to_thread(
+            win32.send_message, hwnd, WM_POWERBROADCAST, PBT_APMRESUMEAUTOMATIC, 0
+        )
+        assert answer == 1  # TRUE: the message was dealt with
+        await wait_until(lambda: len(heard.events) == 1)
+        assert heard.events[0].source == "wm_powerbroadcast"
+        await wait_until(lambda: clock.pending_sleepers >= 1)
+        await clock.advance(TICK)  # the clock check reads this simulated clock's own seconds
+        assert len(heard.events) == 1 and monitor.health().status is HealthStatus.OK
+    finally:
+        await monitor.stop()
+    assert monitor.window_handle is None
+
+
+def test_no_window_class_name_is_used_twice_in_a_process() -> None:
+    """The class belongs to the process, not to the object that registered it (D-624): a name
+    counted per object is taken by the next object, and ``RegisterClassW`` then fails."""
+    names = [next_window_class_name() for _ in range(50)]
+    assert len(set(names)) == 50
+    assert all(name.startswith(f"wechat-twin-power-{os.getpid()}-") for name in names)
+
+
+@pytest.mark.windows
+async def test_two_monitors_of_one_process_each_get_a_hidden_window(clock: ManualClock) -> None:
+    """The first is not stopped when the second starts - the process of a crash that is simulated
+    in-process leaves its window behind, and a started-again component must still get its own."""
+    from twin.ops.winapi import load_win32
+
+    first = PowerEventMonitor(
+        clock, Heard(), tick_s=TICK, platform=sys.platform, win32=load_win32()
+    )
+    second = PowerEventMonitor(
+        clock, Heard(), tick_s=TICK, platform=sys.platform, win32=load_win32()
+    )
+    await first.start()
+    try:
+        await second.start()
+        try:
+            assert first.window_handle is not None and second.window_handle is not None
+            assert first.window_handle != second.window_handle
+            assert first.health().status is HealthStatus.OK
+            assert second.health().status is HealthStatus.OK
+        finally:
+            await second.stop()
+    finally:
+        await first.stop()

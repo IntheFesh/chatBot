@@ -1,0 +1,701 @@
+"""Alerts: the hook other rounds call and the service behind it (R-ARCH-003, R-OPS-004).
+
+Round 00 defined the hook (:class:`AlertSink`) that the job worker, the task supervisors and
+every component call when something needs attention.  Round 12 puts :class:`AlertService`
+behind it - the only code that writes the ``alerts`` table:
+
+* every alert is **recorded**, under one of the twenty categories of :class:`AlertCategory` (the
+  names the earlier rounds use are mapped onto them, see :func:`canonical_category`; the ones
+  that have no place among the twenty keep their own name and are recorded only, unless they are
+  critical);
+* an alert that is worth telling the user about is **delivered** by the delivery component
+  (:mod:`twin.ops.alert_delivery`): a Windows notification and an e-mail.  At most one notice
+  per category goes out per ``ops.alert_cooldown_min`` (an hour), counted from the newest
+  notice of the category that went out, an alert or a recovery; a repeat is stored as
+  ``suppressed``, whatever its severity (D-700, round 17: the SPEC's "同类 1 小时最多 1 封" has
+  no exception).  A held-back alert is not forgotten (round 18, user decision, D-893): when the
+  hour is over and the category is still open (nobody reported it gone), it is sent once - the
+  worst of the held-back ones, the newest among equals - and the usual reminders follow;
+* when the cause is gone, :meth:`AlertService.recover` closes the open alerts of the category and
+  queues **one** "recovered" notice - only if the user's last news of the category was an alert.
+  Inside the cooldown that notice is put off until the hour is over (``mail_next_at``) and a new
+  alert of the category withdraws it, so a fault that flaps costs one notice per hour;
+* the text that leaves the machine is made from fixed wording and numbers
+  (:mod:`twin.ops.alert_text`), never from chat content.
+
+The service only decides and records; sending is somebody else's job, so raising an alert never
+waits for a mail server and never fails the caller.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from typing import Any, Protocol
+
+from sqlalchemy import delete, or_, select
+
+from twin.clock import Clock
+from twin.ops.logging import get_logger
+from twin.storage.db import Database
+from twin.storage.models import ALERT_SEVERITIES, Alert
+
+log = get_logger("twin.alerts")
+
+ALERT_KEEP_DAYS = 90
+STALE_AFTER = timedelta(hours=24)  # a notice that was never delivered is not sent a day later
+CLAIM_LEASE = timedelta(minutes=2)  # a delivery attempt that did not report back is retried
+NOTICE_LOOKBACK = 8  # newest announced rows read to find the last notice of a category
+SEVERITY_RANK = {name: rank for rank, name in enumerate(ALERT_SEVERITIES)}
+
+
+class AlertSink(Protocol):
+    """Receives operational alerts."""
+
+    def raise_alert(
+        self,
+        category: str,
+        title: str,
+        *,
+        severity: str = "warning",
+        detail: dict[str, Any] | None = None,
+        dedup_key: str | None = None,
+    ) -> None: ...
+
+
+class AlertCategory(StrEnum):
+    """The kinds of alert the user is told about (R-OPS-004)."""
+
+    LOGIN_LOST = "login_lost"
+    DEEPSEEK_FAILURE = "deepseek_failure"
+    CIRCUIT_OPEN = "circuit_open"
+    BUDGET_80 = "budget_80"
+    BUDGET_LEVEL_N = "budget_level_n"
+    ONE_TIME_OVERRUN = "one_time_overrun"
+    STYLE_MODEL_DOWN = "style_model_down"
+    STYLE_TOKENIZE_MISMATCH = "style_tokenize_mismatch"
+    BACKUP_FAILED = "backup_failed"
+    BACKUP_MIRROR_UNAVAILABLE = "backup_mirror_unavailable"
+    DISK_LOW = "disk_low"
+    QUEUE_BACKLOG = "queue_backlog"
+    RETRAIN_SUGGESTED = "retrain_suggested"
+    CRISIS_DETECTED = "crisis_detected"
+    CHANNEL_WINDOW_UNEXPECTED = "channel_window_unexpected"
+    CHANNEL_POLL_STALE = "channel_poll_stale"
+    CALENDAR_OUT_OF_RANGE = "calendar_out_of_range"
+    SLEEP_TIMEZONE_SUSPECT = "sleep_timezone_suspect"
+    PROCESS_RESTARTED = "process_restarted"
+    SYSTEM_RESUMED = "system_resumed"
+
+
+@dataclass(frozen=True)
+class AlertSpec:
+    """How one category reads and whether it is announced.
+
+    ``notify`` ``None`` means "only when the alert is critical".  The caller's one-line title is
+    never part of a notice (see :mod:`twin.ops.alert_text`).
+    """
+
+    label: str
+    advice: str
+    notify: bool | None = True
+
+
+SPECS: dict[str, AlertSpec] = {
+    "login_lost": AlertSpec(
+        "微信登录失效",
+        "电脑上会弹出二维码窗口，请用手机微信扫码重新登录（二维码不会通过邮件发送）。",
+    ),
+    "deepseek_failure": AlertSpec(
+        "DeepSeek 连续出错",
+        "请检查 API Key、账户余额和网络；机器人在恢复前会用兜底话术回复。",
+    ),
+    "circuit_open": AlertSpec(
+        "DeepSeek 已熔断",
+        "连续失败触发了 5 分钟熔断；若反复出现，请检查网络和 DeepSeek 服务状态。",
+    ),
+    "budget_80": AlertSpec("费用达到预算的 80%", "可以用 twin cost report 查看花在哪里。"),
+    "budget_level_n": AlertSpec(
+        "费用超出预算，已降级",
+        "机器人会按顺序降级（关思考、减例子、停主动消息……），但不会停止回复。",
+    ),
+    "one_time_overrun": AlertSpec(
+        "一次性任务费用超出估算", "该批任务已暂停；检查后用 twin jobs approve 重新批准，或取消。"
+    ),
+    "style_model_down": AlertSpec(
+        "风格模型不可用", "回复已回退到 DeepSeek；模型恢复后会自动切回。"
+    ),
+    "style_tokenize_mismatch": AlertSpec(
+        "风格模型分词核对不一致", "模型与提示词模板对不上，不能启用；请重新核对训练时的模板版本。"
+    ),
+    "backup_failed": AlertSpec(
+        "备份失败或已过期", "用 twin backup now 手动备份一次，并查看日志里的原因。"
+    ),
+    "backup_mirror_unavailable": AlertSpec(
+        "异地备份目录不可用", "本地备份不受影响；请检查外接盘或网络位置是否在线。"
+    ),
+    "disk_low": AlertSpec("磁盘剩余空间不足", "请清理磁盘，数据库、媒体和备份都在数据目录里。"),
+    "queue_backlog": AlertSpec(
+        "后台任务积压", "用 twin jobs list 查看；可能是 DeepSeek 不可用或某类任务一直失败。"
+    ),
+    "retrain_suggested": AlertSpec(
+        "建议重新训练风格模型", "她的新消息已达到上次训练数据的一成以上。"
+    ),
+    "crisis_detected": AlertSpec(
+        "检测到可能需要关心的信号",
+        "机器人已跳出角色并给出求助渠道；请你亲自联系对方。（这里不会出现聊天内容。）",
+    ),
+    "channel_window_unexpected": AlertSpec(
+        "微信会话窗口意外失效", "请在手机上给机器人发一条消息，会话就会恢复。"
+    ),
+    "channel_poll_stale": AlertSpec(
+        "微信长轮询中断", "请检查电脑的网络连接；恢复后会自动继续，并通知你已恢复。"
+    ),
+    "calendar_out_of_range": AlertSpec(
+        "节假日日历没有覆盖当前年份", "高峰时段按周一至周五估算；升级 chinese-calendar 依赖即可。"
+    ),
+    "sleep_timezone_suspect": AlertSpec(
+        "作息推断可能受时区影响", "请用 twin profile show 与 twin timezone show 核对作息与时区。"
+    ),
+    "process_restarted": AlertSpec(
+        "机器人进程重启了", "监督进程已自动重启它；若短时间内反复出现，请查看日志。"
+    ),
+    "system_resumed": AlertSpec(
+        "电脑从睡眠中恢复", "机器人睡着期间不会收发消息；请检查电源计划是否允许睡眠。"
+    ),
+    # categories of the earlier rounds that are not among the twenty
+    "integrity_failed": AlertSpec(
+        "数据完整性检查发现问题", "请立即用 twin backup now 备份，并查看 twin health 的详情。"
+    ),
+    "llm_ledger": AlertSpec(
+        "DeepSeek 费用没有记上账", "请查看日志；费用统计和预算在恢复前可能偏低。"
+    ),
+    "channel_send_failed": AlertSpec("微信发送失败", "回复发不出去；请查看 twin channel status。"),
+    "channel_unbound": AlertSpec("微信没有绑定用户", "请运行 twin channel login 完成绑定。"),
+    "retrieval_index": AlertSpec("检索库需要重建", "请运行 twin retrieval rebuild。"),
+    "emergency_contact": AlertSpec("紧急联系人提醒没有发出", "请检查邮件设置。"),
+    "task_crashed": AlertSpec("后台任务崩溃", "已自动重启；反复出现请查看日志。", notify=None),
+    "engine_error": AlertSpec("回复引擎出错", "已自动恢复；反复出现请查看日志。", notify=None),
+    "job_failed": AlertSpec(
+        "后台任务失败", "用 twin jobs list --status failed 查看。", notify=False
+    ),
+    # the health check of the jobs that failed in the last day (round 18, D-892): one notice for all
+    "failed_jobs": AlertSpec(
+        "有后台任务处于失败状态",
+        "用 twin jobs list --status failed 查看原因，再用 twin jobs retry --failed 重新排队；"
+        "任务重新跑成功后会自动通知已恢复。",
+    ),
+    "reply_failed": AlertSpec("一次回复没有发出", "已用延迟回复降级。", notify=False),
+    "channel_quota_exhausted": AlertSpec("微信条数用完", "等你发下一条消息后恢复。", notify=False),
+    "power_resume_failed": AlertSpec("唤醒后的处理失败", "请查看日志。", notify=False),
+    "learning_fact_corrections": AlertSpec("有纠正是关于事实的", "请改用 /记住。", notify=False),
+    "dpo_ready": AlertSpec("偏好对已足够做 DPO", "可以运行 twin train export-dpo。", notify=False),
+    "lifeline_corrected": AlertSpec("今天的生活线被修正过", "仅供参考。", notify=False),
+    "channel_probe": AlertSpec("通道探针的进展", "查看 twin channel probe status。", notify=False),
+    "consistency_review": AlertSpec(
+        "前后一致审计找到了矛盾，等你决定", "运行 twin eval consistency --review。", notify=False
+    ),
+}
+
+# the names the earlier rounds use  ->  the category they belong to
+ALIASES: dict[str, str] = {
+    "channel.auth_expired": AlertCategory.LOGIN_LOST,
+    "channel.poll_failing": AlertCategory.CHANNEL_POLL_STALE,
+    "channel.probe": "channel_probe",
+    "channel_session_expired": AlertCategory.CHANNEL_WINDOW_UNEXPECTED,
+    "llm_auth": AlertCategory.DEEPSEEK_FAILURE,
+    "llm_balance": AlertCategory.DEEPSEEK_FAILURE,
+    "llm_circuit": AlertCategory.CIRCUIT_OPEN,
+    "batch_overrun": AlertCategory.ONE_TIME_OVERRUN,
+    "style_fallback": AlertCategory.STYLE_MODEL_DOWN,
+    "crisis": AlertCategory.CRISIS_DETECTED,
+    "routine_timezone": AlertCategory.SLEEP_TIMEZONE_SUSPECT,
+}
+
+# a "recovered" notice of the earlier rounds  ->  the category it closes
+RECOVERIES: dict[str, str] = {
+    "channel.auth_recovered": AlertCategory.LOGIN_LOST,
+    "style_recovered": AlertCategory.STYLE_MODEL_DOWN,
+}
+
+
+def canonical_category(raw: str, detail: dict[str, Any] | None = None) -> str:
+    """The category an alert is recorded under (the budget one depends on its detail)."""
+    if raw == "budget":
+        level = (detail or {}).get("level")
+        return AlertCategory.BUDGET_LEVEL_N if level is not None else AlertCategory.BUDGET_80
+    return str(ALIASES.get(raw, raw))
+
+
+_PLAIN_NAME = re.compile(r"^[a-z][a-z0-9_.]{0,47}$")
+UNKNOWN_LABEL = "未分类的告警"
+
+
+def spec_of(category: str) -> AlertSpec:
+    """The wording and policy of a category.
+
+    A name nobody wrote a wording for is recorded and, when it is a plain identifier
+    (``some_category``), read as it is; any other string is not a name, so the notice does not
+    repeat it (:data:`UNKNOWN_LABEL`).
+    """
+    found = SPECS.get(category)
+    if found is not None:
+        return found
+    label = category if _PLAIN_NAME.fullmatch(category) else UNKNOWN_LABEL
+    return AlertSpec(label, "请查看日志。", notify=None)
+
+
+def is_announced(category: str, severity: str) -> bool:
+    """Whether an alert of this category and severity is told to the user."""
+    notify = spec_of(category).notify
+    return severity == "critical" if notify is None else notify
+
+
+@dataclass(frozen=True)
+class AlertView:
+    """A row of ``alerts`` as the delivery side reads it."""
+
+    id: str
+    category: str
+    kind: str
+    severity: str
+    title: str
+    detail: dict[str, Any] | None
+    created_at: datetime
+    toast_state: str
+    mail_state: str
+    toast_at: datetime | None
+    mail_at: datetime | None
+    mail_attempts: int
+    mail_next_at: datetime | None
+    resolved_at: datetime | None
+    suppressed: bool
+    notified_at: datetime | None = None
+
+
+def _view(row: Alert) -> AlertView:
+    return AlertView(
+        id=row.id,
+        category=row.category,
+        kind=row.kind,
+        severity=row.severity,
+        title=row.title,
+        detail=dict(row.detail) if row.detail else None,
+        created_at=row.created_at,
+        toast_state=row.toast_state,
+        mail_state=row.mail_state,
+        toast_at=row.toast_at,
+        mail_at=row.mail_at,
+        mail_attempts=row.mail_attempts,
+        mail_next_at=row.mail_next_at,
+        resolved_at=row.resolved_at,
+        suppressed=row.suppressed,
+        notified_at=row.notified_at,
+    )
+
+
+class AlertService:
+    """Records alerts, decides which are announced, closes them again (see the module text)."""
+
+    def __init__(
+        self,
+        db: Database,
+        clock: Clock,
+        *,
+        cooldown_min: float = 60.0,
+        wake: Callable[[], None] | None = None,
+    ) -> None:
+        self._db = db
+        self._clock = clock
+        self._cooldown = timedelta(minutes=cooldown_min)
+        self._wake = wake
+
+    def set_wake(self, wake: Callable[[], None] | None) -> None:
+        """The delivery component asks to be told when something is waiting for it."""
+        self._wake = wake
+
+    # ------------------------------------------------------------------- raising
+
+    def raise_alert(
+        self,
+        category: str,
+        title: str,
+        *,
+        severity: str = "warning",
+        detail: dict[str, Any] | None = None,
+        dedup_key: str | None = None,
+    ) -> None:
+        if severity not in ALERT_SEVERITIES:
+            raise ValueError(f"unknown alert severity {severity!r}")
+        closes = RECOVERIES.get(category)
+        if closes is not None:
+            self.recover(closes, title, detail=detail)
+            return
+        canonical = canonical_category(category, detail)
+        announce = is_announced(canonical, severity)
+        now = self._clock.now_utc()
+        suppressed = False
+        resend_at: datetime | None = None
+        with self._db.transaction(bump_state=False) as session:
+            if announce:
+                suppressed = self._held_back(session, canonical, now)
+                # the problem is back: a "recovered" notice that is still waiting would lie
+                self._withdraw_waiting_recovery(session, canonical, now)
+                if suppressed:  # told when the hour is over, if it still holds then (D-893)
+                    resend_at = self._end_of_hour(session, canonical, now)
+                else:  # this notice tells the news the held-back ones would have told
+                    self._forget_held_back(session, canonical, now)
+            wanted = announce and not suppressed
+            session.add(
+                Alert(
+                    category=canonical,
+                    kind="alert",
+                    severity=severity,
+                    title=title[:200],
+                    detail=detail,
+                    dedup_key=dedup_key,
+                    suppressed=suppressed,
+                    toast_state="pending" if wanted else "none",
+                    mail_state="pending" if wanted else "none",
+                    mail_next_at=resend_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        log.warning(
+            "alert",
+            category=canonical,
+            severity=severity,
+            alert_title=title[:200],
+            announced=announce and not suppressed,
+        )
+        if announce and not suppressed:
+            self._poke()
+
+    def _notices(self, session: Any, category: str) -> list[Alert]:
+        """The newest announced rows of ``category`` (alerts and recoveries), newest first."""
+        return list(
+            session.scalars(
+                select(Alert)
+                .where(
+                    Alert.category == category,
+                    Alert.suppressed.is_(False),
+                    or_(Alert.toast_state != "none", Alert.mail_state != "none"),
+                )
+                .order_by(Alert.created_at.desc(), Alert.id.desc())
+                .limit(NOTICE_LOOKBACK)
+            )
+        )
+
+    @staticmethod
+    def _is_waiting(row: Alert) -> bool:
+        """A "recovered" notice that was put off and has not been shown yet.
+
+        It is the only row that is queued with a time in the future while its notification is
+        still to come (an alert whose mail is being retried has shown its notification).
+        """
+        return (
+            row.kind == "recovery" and row.toast_state == "pending" and row.mail_next_at is not None
+        )
+
+    @staticmethod
+    def _noticed_at(row: Alert) -> datetime:
+        """When the user was (or is about to be) told: a put-off notice counts from its showing."""
+        return max(t for t in (row.created_at, row.toast_at, row.mail_at) if t is not None)
+
+    def _gone_notices(self, session: Any, category: str) -> list[Alert]:
+        """The announced rows that went out or are queued to go out now, newest first."""
+        return [row for row in self._notices(session, category) if not self._is_waiting(row)]
+
+    def _held_back(self, session: Any, category: str, now: datetime) -> bool:
+        """True if a notice of this category (an alert or a recovery) went out within the
+        cooldown.  A put-off recovery has not gone out; it is withdrawn by the alert asking."""
+        gone = self._gone_notices(session, category)
+        if not gone:
+            return False
+        return now - max(self._noticed_at(row) for row in gone) < self._cooldown
+
+    def _hour_over(self, session: Any, category: str) -> datetime | None:
+        """When the cooldown of the category's last notice that went out ends (``None``: none)."""
+        gone = self._gone_notices(session, category)
+        return max(self._noticed_at(row) for row in gone) + self._cooldown if gone else None
+
+    def _end_of_hour(self, session: Any, category: str, now: datetime) -> datetime:
+        """The moment a held-back alert raised ``now`` is to be sent (D-893).
+
+        The end of the cooldown of the category's last notice, but never later than a notice may
+        wait before it counts as expired (``STALE_AFTER``), so a very long cooldown does not drop
+        it quietly (as for a put-off recovery, D-700).
+        """
+        expires = now + STALE_AFTER - CLAIM_LEASE
+        over = self._hour_over(session, category)
+        return expires if over is None else min(over, expires)
+
+    @staticmethod
+    def _held_back_rows(session: Any, category: str | None = None) -> list[Alert]:
+        """Held-back alerts still waiting for the end of their hour (open, not shown), oldest
+        first; of one category or of all."""
+        stmt = select(Alert).where(
+            Alert.kind == "alert",
+            Alert.suppressed.is_(True),
+            Alert.resolved_at.is_(None),
+            Alert.mail_next_at.is_not(None),
+            Alert.toast_state == "none",
+            Alert.mail_state == "none",
+        )
+        if category is not None:
+            stmt = stmt.where(Alert.category == category)
+        return list(session.scalars(stmt.order_by(Alert.created_at, Alert.id)))
+
+    def _forget_held_back(self, session: Any, category: str, now: datetime) -> None:
+        for row in self._held_back_rows(session, category):
+            row.mail_next_at = None
+            row.updated_at = now
+
+    def _resend_held_back(self, session: Any, now: datetime) -> None:
+        """Send, once per category, an alert that was held back and still holds (D-893).
+
+        Run where the notices are claimed, so the moment is the end of the hour as the delivery
+        sees it.  A category recovered meanwhile has its rows closed, and one told by a newer
+        alert has its moments cleared (:meth:`raise_alert`): neither is selected.  One whose last
+        notice went out later than reckoned (a mail sent on a retry) waits for the end of that
+        notice's hour; one nobody could send for a day is dropped, like any stale notice.
+        """
+        groups: dict[str, list[Alert]] = {}
+        for row in self._held_back_rows(session):
+            groups.setdefault(row.category, []).append(row)
+        for category, rows in groups.items():
+            if not any(row.mail_next_at is not None and row.mail_next_at <= now for row in rows):
+                continue
+            fresh = [row for row in rows if now - row.created_at <= STALE_AFTER - CLAIM_LEASE]
+            if not fresh:
+                self._forget_held_back(session, category, now)  # too old to be news
+                continue
+            chosen = max(fresh, key=lambda row: (SEVERITY_RANK[row.severity], row.created_at))
+            over = self._hour_over(session, category)
+            if over is not None and now < over <= chosen.created_at + STALE_AFTER - CLAIM_LEASE:
+                for row in rows:  # the last notice went out later than reckoned: its hour
+                    row.mail_next_at = over
+                    row.updated_at = now
+                continue
+            for row in rows:
+                row.mail_next_at = None
+                row.updated_at = now
+            chosen.suppressed = False
+            chosen.toast_state = "pending"
+            chosen.mail_state = "pending"
+            log.info("alert_resent_after_cooldown", category=category, severity=chosen.severity)
+
+    def resend_due(self, category: str) -> datetime | None:
+        """When a held-back alert of ``category`` is to be sent (D-893), or ``None``."""
+        canonical = canonical_category(category)
+        with self._db.session() as session:
+            moments = [row.mail_next_at for row in self._held_back_rows(session, canonical)]
+        return min((moment for moment in moments if moment is not None), default=None)
+
+    def _withdraw_waiting_recovery(self, session: Any, category: str, now: datetime) -> None:
+        """A new alert of the category takes the waiting "recovered" notice back (D-700)."""
+        for row in self._notices(session, category):
+            if self._is_waiting(row):
+                row.suppressed = True
+                row.toast_state = "none"
+                row.mail_state = "none"
+                row.mail_next_at = None
+                row.updated_at = now
+                log.info("alert_recovery_withdrawn", category=category)
+
+    def recover(self, category: str, title: str, *, detail: dict[str, Any] | None = None) -> bool:
+        """The cause of ``category`` is gone: close its alerts, announce it once.
+
+        Returns ``True`` if a "recovered" notice was queued: the user's last news of the
+        category was an alert.  Inside the cooldown of that news the notice is put off until
+        the cooldown is over (and a new alert withdraws it); otherwise it goes out at once.
+        """
+        canonical = canonical_category(RECOVERIES.get(category, category), detail)
+        now = self._clock.now_utc()
+        due_at: datetime | None = None
+        with self._db.transaction(bump_state=False) as session:
+            open_rows = list(
+                session.scalars(
+                    select(Alert).where(
+                        Alert.category == canonical,
+                        Alert.kind == "alert",
+                        Alert.resolved_at.is_(None),
+                    )
+                )
+            )
+            if not open_rows:
+                return False
+            for row in open_rows:
+                row.resolved_at = now
+                if row.suppressed:  # held back and now gone: nothing to send at the hour (D-893)
+                    row.mail_next_at = None
+            notices = self._notices(session, canonical)
+            gone = [row for row in notices if not self._is_waiting(row)]
+            told = any(
+                not row.suppressed and (row.toast_state != "none" or row.mail_state != "none")
+                for row in open_rows
+            ) or (bool(gone) and gone[0].kind == "alert")
+            if not told or len(gone) < len(notices):  # nothing to correct, or one is waiting
+                return False
+            last = max(self._noticed_at(row) for row in gone)
+            if now - last < self._cooldown:
+                # a notice nobody delivered for a day is dropped (STALE_AFTER): never put one off
+                # beyond that, whatever the cooldown is set to
+                due_at = min(last + self._cooldown, now + STALE_AFTER - CLAIM_LEASE)
+            session.add(
+                Alert(
+                    category=canonical,
+                    kind="recovery",
+                    severity="info",
+                    title=title[:200],
+                    detail=detail,
+                    dedup_key=None,
+                    suppressed=False,
+                    toast_state="pending",
+                    mail_state="pending",
+                    mail_next_at=due_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        log.info("alert_recovered", category=canonical, put_off=due_at is not None)
+        if due_at is None:
+            self._poke()
+        return True
+
+    def _poke(self) -> None:
+        wake = self._wake
+        if wake is not None:
+            try:
+                wake()
+            except Exception:  # the delivery side being gone must not fail the caller
+                log.warning("alert_wake_failed")
+
+    # ------------------------------------------------------------------ delivery
+
+    def claim_due(self, *, limit: int = 20) -> list[AlertView]:
+        """Alerts with a channel still to deliver, leased to the caller for two minutes."""
+        now = self._clock.now_utc()
+        with self._db.transaction(bump_state=False) as session:
+            self._resend_held_back(session, now)
+            rows = list(
+                session.scalars(
+                    select(Alert)
+                    .where(
+                        or_(Alert.toast_state == "pending", Alert.mail_state == "pending"),
+                        or_(Alert.claimed_at.is_(None), Alert.claimed_at < now - CLAIM_LEASE),
+                        # a put-off "recovered" notice waits in both channels (D-700)
+                        or_(Alert.mail_next_at.is_(None), Alert.mail_next_at <= now),
+                    )
+                    .order_by(Alert.created_at)
+                    .limit(limit)
+                )
+            )
+            claimed: list[AlertView] = []
+            for row in rows:
+                if now - row.created_at > STALE_AFTER:
+                    row.toast_state = "failed" if row.toast_state == "pending" else row.toast_state
+                    row.mail_state = "failed" if row.mail_state == "pending" else row.mail_state
+                    row.mail_error = "expired"
+                    continue
+                row.claimed_at = now
+                claimed.append(_view(row))
+            return claimed
+
+    def release(self, alert_id: str) -> None:
+        """Give a leased alert back untouched (its mail is not due yet)."""
+        with self._db.transaction(bump_state=False) as session:
+            row = session.get(Alert, alert_id)
+            if row is not None:
+                row.claimed_at = None
+
+    def finish_toast(self, alert_id: str, *, ok: bool | None) -> None:
+        """Record the outcome of the notification: sent, failed, or ``None`` (not available)."""
+        now = self._clock.now_utc()
+        with self._db.transaction(bump_state=False) as session:
+            row = session.get(Alert, alert_id)
+            if row is None:
+                return
+            row.toast_state = "none" if ok is None else ("sent" if ok else "failed")
+            if ok:
+                row.toast_at = now
+                row.notified_at = row.notified_at or now
+            row.claimed_at = None
+
+    def finish_mail(
+        self,
+        alert_id: str,
+        *,
+        ok: bool | None,
+        error: str | None = None,
+        retry_in: timedelta | None = None,
+    ) -> None:
+        """Record the outcome of the e-mail: sent, not wanted (``None``), or failed.
+
+        A failure with ``retry_in`` stays pending and is tried again then; without it the mail
+        is given up.
+        """
+        now = self._clock.now_utc()
+        with self._db.transaction(bump_state=False) as session:
+            row = session.get(Alert, alert_id)
+            if row is None:
+                return
+            if ok is None:
+                row.mail_state = "none"
+            elif ok:
+                row.mail_state = "sent"
+                row.mail_at = now
+                row.notified_at = row.notified_at or now
+                row.mail_error = None
+            else:
+                row.mail_attempts += 1
+                row.mail_error = (error or "error")[:64]
+                if retry_in is None:
+                    row.mail_state = "failed"
+                else:
+                    row.mail_next_at = now + retry_in
+            row.claimed_at = None
+
+    # ------------------------------------------------------------------- reading
+
+    def pending_count(self) -> int:
+        with self._db.session() as session:
+            rows = session.scalars(
+                select(Alert.id).where(
+                    or_(Alert.toast_state == "pending", Alert.mail_state == "pending")
+                )
+            )
+            return len(list(rows))
+
+    def recent(self, *, limit: int = 20, since: datetime | None = None) -> list[AlertView]:
+        stmt = select(Alert).order_by(Alert.created_at.desc(), Alert.id.desc()).limit(limit)
+        if since is not None:
+            stmt = stmt.where(Alert.created_at >= since)
+        with self._db.session() as session:
+            return [_view(row) for row in session.scalars(stmt)]
+
+    def open_alerts(self) -> list[AlertView]:
+        """Announced alerts whose cause has not been reported gone yet."""
+        with self._db.session() as session:
+            rows = session.scalars(
+                select(Alert)
+                .where(
+                    Alert.kind == "alert",
+                    Alert.resolved_at.is_(None),
+                    Alert.suppressed.is_(False),
+                    or_(Alert.toast_state != "none", Alert.mail_state != "none"),
+                )
+                .order_by(Alert.created_at)
+            )
+            return [_view(row) for row in rows]
+
+    def prune(self, *, keep_days: int = ALERT_KEEP_DAYS) -> int:
+        """Delete alerts older than ``keep_days``; returns how many."""
+        cutoff = self._clock.now_utc() - timedelta(days=keep_days)
+        with self._db.transaction(bump_state=False) as session:
+            result = session.execute(delete(Alert).where(Alert.created_at < cutoff))
+            return int(getattr(result, "rowcount", 0) or 0)
